@@ -3,12 +3,12 @@
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 /**
- * YDollar node-context RPCs (plan §4.4). They work without a wallet (C21)
- * and are gated by -experimentalfeatures -ydollar. Every reply that reads
+ * Yellowback node-context RPCs (plan §4.4). They work without a wallet (C21)
+ * and are gated by -experimentalfeatures -yellowback. Every reply that reads
  * the index reports the index height it answers for; "synced" is whether
  * that height is chainActive.Tip().
  *
- * Lock order: cs_main, then cs_ydollar (plan B15).
+ * Lock order: cs_main, then cs_yellowback (plan B15).
  */
 
 #include "chainparams.h"
@@ -25,38 +25,38 @@
 #include "script/standard.h"
 #include "txmempool.h"
 #include "utilstrencodings.h"
-#include "ydollar/index.h"
-#include "ydollar/math.h"
-#include "ydollar/payload.h"
-#include "ydollar/script.h"
-#include "ydollar/state.h"
-#include "ydollar/view.h"
+#include "yellowback/index.h"
+#include "yellowback/math.h"
+#include "yellowback/payload.h"
+#include "yellowback/script.h"
+#include "yellowback/state.h"
+#include "yellowback/view.h"
 
 #include <univalue.h>
 
-using namespace ydollar;
+using namespace yellowback;
 
-static const int YD_RPC_VERSION = 1;
+static const int YELLOWBACK_RPC_VERSION = 1;
 
 namespace {
 
-YDollarIndex& EnsureIndex()
+YellowbackIndex& EnsureIndex()
 {
-    if (!fExperimentalYDollar || !g_ydollar) {
-        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (YDollar requires -experimentalfeatures -ydollar)");
+    if (!fExperimentalYellowback || !g_yellowback) {
+        throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Method not found (Yellowback requires -experimentalfeatures -yellowback)");
     }
-    return *g_ydollar;
+    return *g_yellowback;
 }
 
-void EnsureHealthy(const YDollarIndex& index)
+void EnsureHealthy(const YellowbackIndex& index)
 {
-    AssertLockHeld(index.cs_ydollar);
+    AssertLockHeld(index.cs_yellowback);
     if (!index.IsHealthy()) {
-        throw JSONRPCError(RPC_MISC_ERROR, "ydollar index unhealthy: " + index.UnhealthyReason() + "; restart with -reindex-ydollar");
+        throw JSONRPCError(RPC_MISC_ERROR, "yellowback index unhealthy: " + index.UnhealthyReason() + "; restart with -reindex-yellowback");
     }
 }
 
-int IndexHeight(const YDollarIndex& index)
+int IndexHeight(const YellowbackIndex& index)
 {
     std::optional<TipRecord> tip = index.GetTip();
     return tip.has_value() ? tip->height : -1;
@@ -113,8 +113,8 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l)
     o.pushKV("height", l.height);
     o.pushKV("type", l.type == 0 ? "none" : PayloadTypeName((PayloadType)l.type));
     o.pushKV("verdict", l.verdict);
-    o.pushKV("ydIn", l.ydIn);
-    o.pushKV("ydOut", l.ydOut);
+    o.pushKV("yedIn", l.yedIn);
+    o.pushKV("yedOut", l.yedOut);
     o.pushKV("burned", l.burned);
     UniValue assigned(UniValue::VARR);
     for (const AssignedOutput& a : l.assigned) {
@@ -189,9 +189,9 @@ UniValue PayloadToJSON(const Payload& p)
 }
 
 /** Dry-run §3.7 for a transaction at the next height without touching the index. */
-UniValue DryRun(YDollarIndex& index, const CTransaction& tx)
+UniValue DryRun(YellowbackIndex& index, const CTransaction& tx)
 {
-    AssertLockHeld(index.cs_ydollar);
+    AssertLockHeld(index.cs_yellowback);
     OverlayStateView overlay(index.MutableView());
     State st(overlay);
     const int height = IndexHeight(index) + 1;
@@ -205,16 +205,16 @@ UniValue DryRun(YDollarIndex& index, const CTransaction& tx)
 
 } // namespace
 
-UniValue yd_getinfo(const UniValue& params, bool fHelp)
+UniValue yed_getinfo(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
-            "yd_getinfo\n"
-            "\nYDollar index status and parameters.\n"
+            "yed_getinfo\n"
+            "\nYellowback index status and parameters.\n"
             "\nResult:\n"
             "{\n"
             "  \"enabled\": true,\n"
-            "  \"rpcversion\": n,             (numeric) the yd_* RPC contract version\n"
+            "  \"rpcversion\": n,             (numeric) the yed_* RPC contract version\n"
             "  \"network\": \"main|test|regtest\",\n"
             "  \"startHeight\": n,\n"
             "  \"height\": n,                 (numeric) index height, -1 when empty\n"
@@ -227,18 +227,18 @@ UniValue yd_getinfo(const UniValue& params, bool fHelp)
             "  \"rosterIndex\": n,\n"
             "  \"params\": {...}\n"
             "}\n"
-            "\nExamples:\n" + HelpExampleCli("yd_getinfo", "") + HelpExampleRpc("yd_getinfo", ""));
+            "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     LOCK(cs_main);
-    LOCK(index.cs_ydollar);
-    const ydollar::Params& p = index.GetParams();
+    LOCK(index.cs_yellowback);
+    const yellowback::Params& p = index.GetParams();
     State st(index.View());
     std::optional<TipRecord> tip = st.GetTip();
 
     UniValue o(UniValue::VOBJ);
     o.pushKV("enabled", true);
-    o.pushKV("rpcversion", YD_RPC_VERSION);
+    o.pushKV("rpcversion", YELLOWBACK_RPC_VERSION);
     o.pushKV("network", p.network);
     o.pushKV("startHeight", p.startHeight);
     o.pushKV("genesisAnchor", OutPointToJSON(p.genesisAnchor));
@@ -276,24 +276,24 @@ UniValue yd_getinfo(const UniValue& params, bool fHelp)
     pp.pushKV("volCooldown", p.volCooldown);
     pp.pushKV("priceMaxAge", PRICE_MAX_AGE);
     pp.pushKV("mintWindow", MINT_WINDOW);
-    pp.pushKV("mintEvalLag", g_ydollarMintLag);
+    pp.pushKV("mintEvalLag", g_yellowbackMintLag);
     pp.pushKV("tokenValueZat", TOKEN_VALUE);
-    pp.pushKV("feeZat", g_ydollarFee);
+    pp.pushKV("feeZat", g_yellowbackFee);
     o.pushKV("params", pp);
     return o;
 }
 
-UniValue yd_getstatehash(const UniValue& params, bool fHelp)
+UniValue yed_getstatehash(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
-            "yd_getstatehash ( height )\n"
+            "yed_getstatehash ( height )\n"
             "\nSHA-256 over the canonical serialisation of every index table (undo excluded).\n"
             "Tests assert equality across nodes and rebuilds. If height is given it must equal the index height.\n"
             "\nResult:\n{ \"height\": n, \"blockhash\": \"hex\", \"statehash\": \"hex\" }\n");
 
-    YDollarIndex& index = EnsureIndex();
-    LOCK(index.cs_ydollar);
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     std::optional<TipRecord> tip = index.GetTip();
     int h = tip.has_value() ? tip->height : -1;
@@ -307,15 +307,15 @@ UniValue yd_getstatehash(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_getstats(const UniValue& params, bool fHelp)
+UniValue yed_getstats(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
-            "yd_getstats\n"
+            "yed_getstats\n"
             "\nSupply, collateral, vault counts, price, health, DCA, ERR and mint-freeze state at the index tip.\n");
 
-    YDollarIndex& index = EnsureIndex();
-    LOCK(index.cs_ydollar);
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     const int h = IndexHeight(index);
@@ -356,17 +356,17 @@ UniValue yd_getstats(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_getprice(const UniValue& params, bool fHelp)
+UniValue yed_getprice(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
-            "yd_getprice ( height )\n"
+            "yed_getprice ( height )\n"
             "\nThe price in effect at the given height (default: index tip): the most recent attestation\n"
             "at or below it that is at most " + std::to_string(PRICE_MAX_AGE) + " blocks old.\n"
             "\nResult:\n{ \"height\": n, \"priceMicroUsd\": n|null, \"sourceHeight\": n, \"age\": n }\n");
 
-    YDollarIndex& index = EnsureIndex();
-    LOCK(index.cs_ydollar);
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     int h = IndexHeight(index);
@@ -404,15 +404,15 @@ static UniValue RosterToJSON(const RosterRecord& r, int indexNo)
     return o;
 }
 
-UniValue yd_getroster(const UniValue& params, bool fHelp)
+UniValue yed_getroster(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
-            "yd_getroster\n"
+            "yed_getroster\n"
             "\nThe current federation roster (keys in script order, k, n, script, P2SH address) and the previous one.\n");
 
-    YDollarIndex& index = EnsureIndex();
-    LOCK(index.cs_ydollar);
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     std::vector<RosterRecord> rosters = st.GetRosters();
@@ -428,16 +428,16 @@ UniValue yd_getroster(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_getvault(const UniValue& params, bool fHelp)
+UniValue yed_getvault(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
-            "yd_getvault \"txid\"\n"
+            "yed_getvault \"txid\"\n"
             "\nThe vault record created by the MINT transaction txid (vault outpoint txid:0).\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "txid");
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     COutPoint out(txid, 0);
@@ -456,21 +456,21 @@ UniValue yd_getvault(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_listvaults(const UniValue& params, bool fHelp)
+UniValue yed_listvaults(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 4)
         throw std::runtime_error(
-            "yd_listvaults ( \"status\" rosterIndex count skip )\n"
+            "yed_listvaults ( \"status\" rosterIndex count skip )\n"
             "\nVaults, optionally filtered by status (ACTIVE|VOID|CLOSED) and roster index; paged (default count 100).\n"
             "Also returns the number of open (ACTIVE or VOID) vaults per roster index for the rotation runbook.\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
     int rosterIndex = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : -2;
     int count = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 100;
     int skip = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : 0;
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     UniValue list(UniValue::VARR);
     std::map<int, int> openPerRoster;
@@ -498,18 +498,18 @@ UniValue yd_listvaults(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_gettxinfo(const UniValue& params, bool fHelp)
+UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
-            "yd_gettxinfo \"txid\"\n"
+            "yed_gettxinfo \"txid\"\n"
             "\nThe index's record of a confirmed transaction (type, verdict, cents in/out/burned, assigned\n"
             "outputs, closed vaults), or a dry run for a transaction still in the mempool (\"dryRun\": true).\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "txid");
     LOCK(cs_main);
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     std::optional<TxLogRecord> log = st.GetTxLog(txid);
@@ -525,15 +525,15 @@ UniValue yd_gettxinfo(const UniValue& params, bool fHelp)
         o.pushKV("confirmations", 0);
         return o;
     }
-    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "transaction is neither in the YDollar index nor in the mempool");
+    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "transaction is neither in the Yellowback index nor in the mempool");
 }
 
-UniValue yd_decodepayload(const UniValue& params, bool fHelp)
+UniValue yed_decodepayload(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
-            "yd_decodepayload \"hex\"\n"
-            "\nDecode a YDollar OP_RETURN payload (the data push, or a whole OP_RETURN script, or a raw transaction).\n");
+            "yed_decodepayload \"hex\"\n"
+            "\nDecode a Yellowback OP_RETURN payload (the data push, or a whole OP_RETURN script, or a raw transaction).\n");
 
     std::string hex = params[0].get_str();
     if (!IsHex(hex)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not hex");
@@ -551,27 +551,27 @@ UniValue yd_decodepayload(const UniValue& params, bool fHelp)
     CTransaction tx;
     if (DecodeHexTx(tx, hex)) {
         auto fp = FindPayload(tx);
-        if (!fp.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "transaction carries no well-formed YDollar payload");
+        if (!fp.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "transaction carries no well-formed Yellowback payload");
         UniValue o = PayloadToJSON(fp->payload);
         o.pushKV("opReturnIndex", (int64_t)fp->opReturnIndex);
         return o;
     }
-    throw JSONRPCError(RPC_INVALID_PARAMETER, "not a YDollar payload");
+    throw JSONRPCError(RPC_INVALID_PARAMETER, "not a Yellowback payload");
 }
 
-UniValue yd_validaterawtransaction(const UniValue& params, bool fHelp)
+UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
-            "yd_validaterawtransaction \"hex\"\n"
-            "\nDry-run the YDollar state rules for a raw transaction as if it confirmed in the next block,\n"
+            "yed_validaterawtransaction \"hex\"\n"
+            "\nDry-run the Yellowback state rules for a raw transaction as if it confirmed in the next block,\n"
             "without changing the index. Returns the verdict, type, cents in/out/burned and assigned outputs.\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     CTransaction tx;
     if (!DecodeHexTx(tx, params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
     LOCK(cs_main);
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     UniValue o = DryRun(index, tx);
     o.pushKV("indexHeight", IndexHeight(index));
@@ -581,28 +581,28 @@ UniValue yd_validaterawtransaction(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_estimatecollateral(const UniValue& params, bool fHelp)
+UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
-            "yd_estimatecollateral cents tier ( priceMicroUsd )\n"
+            "yed_estimatecollateral cents tier ( priceMicroUsd )\n"
             "\nThe collateral (zatoshi, rounded up to 1,000) required to mint cents at tier, at the price and\n"
             "DCA multiplier of the height the wallet would evaluate at (index tip minus the mint lag), or at\n"
             "the given price with the current DCA.\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     int64_t cents = params[0].get_int64();
     int tier = params[1].get_int();
-    const ydollar::Params& p = index.GetParams();
+    const yellowback::Params& p = index.GetParams();
     if (!p.IsValidTier(tier)) throw JSONRPCError(RPC_INVALID_PARAMETER, "tier must be 0..4");
     if (cents < p.minMint || cents > p.maxMint) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cents must be between %d and %d", p.minMint, p.maxMint));
     }
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     const int tipH = IndexHeight(index);
-    const int evalH = tipH - g_ydollarMintLag;
+    const int evalH = tipH - g_yellowbackMintLag;
     std::optional<Snapshot> snap = evalH >= p.startHeight ? st.GetSnapshot((uint32_t)evalH) : std::nullopt;
     std::optional<MicroUsd> price;
     int dcaBps = snap.has_value() ? snap->dcaBps : 10000;
@@ -635,18 +635,18 @@ UniValue yd_estimatecollateral(const UniValue& params, bool fHelp)
     return o;
 }
 
-UniValue yd_gethistory(const UniValue& params, bool fHelp)
+UniValue yed_gethistory(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 2)
         throw std::runtime_error(
-            "yd_gethistory fromHeight toHeight\n"
+            "yed_gethistory fromHeight toHeight\n"
             "\nPer-block snapshots (supply, collateral, price, health, DCA, ERR, mint freeze) for the range; at most 10,000 blocks.\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     int from = params[0].get_int();
     int to = params[1].get_int();
     if (from < 0 || to < from || to - from >= 10000) throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid range");
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     UniValue arr(UniValue::VARR);
@@ -657,11 +657,11 @@ UniValue yd_gethistory(const UniValue& params, bool fHelp)
     return arr;
 }
 
-UniValue yd_createpricetx(const UniValue& params, bool fHelp)
+UniValue yed_createpricetx(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw std::runtime_error(
-            "yd_createpricetx priceMicroUsd|\"rotate\" ( \"refillTxid:n\" \"newRosterScriptHex\" )\n"
+            "yed_createpricetx priceMicroUsd|\"rotate\" ( \"refillTxid:n\" \"newRosterScriptHex\" )\n"
             "\nBuild the unsigned PRICE transaction that spends the current anchor into a new anchor with the\n"
             "same roster script plus an OP_RETURN price; or, with \"rotate\", the ROTATION transaction paying\n"
             "the anchor to a new roster script with no OP_RETURN. An optional confirmed refill input is\n"
@@ -670,7 +670,7 @@ UniValue yd_createpricetx(const UniValue& params, bool fHelp)
             "needs when the anchor is in neither the chain nor the signer's mempool.\n"
             "\nResult:\n{ \"hex\": \"...\", \"prevtxs\": [...], \"anchor\": {...}, \"newAnchorValueZat\": n, \"fee\": n }\n");
 
-    YDollarIndex& index = EnsureIndex();
+    YellowbackIndex& index = EnsureIndex();
     const bool rotate = params[0].isStr() && params[0].get_str() == "rotate";
     int64_t price = 0;
     if (!rotate) {
@@ -698,7 +698,7 @@ UniValue yd_createpricetx(const UniValue& params, bool fHelp)
     }
 
     LOCK(cs_main);
-    LOCK(index.cs_ydollar);
+    LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     AnchorRecord anchor = st.GetAnchor();
@@ -749,7 +749,7 @@ UniValue yd_createpricetx(const UniValue& params, bool fHelp)
             refillValue = rc->vout[refill->n].nValue;
         }
     }
-    const CAmount fee = g_ydollarFee;
+    const CAmount fee = g_yellowbackFee;
     const CAmount newValue = anchorValue + refillValue - fee;
     if (newValue <= 0) throw JSONRPCError(RPC_MISC_ERROR, "anchor value does not cover the fee; add a refill input");
 
@@ -790,22 +790,22 @@ UniValue yd_createpricetx(const UniValue& params, bool fHelp)
 static const CRPCCommand commands[] =
 { //  category   name                          actor (function)              okSafeMode
   //  ---------  ----------------------------  ----------------------------  ----------
-    { "ydollar", "yd_getinfo",                 &yd_getinfo,                  true  },
-    { "ydollar", "yd_getstatehash",            &yd_getstatehash,             true  },
-    { "ydollar", "yd_getstats",                &yd_getstats,                 true  },
-    { "ydollar", "yd_getprice",                &yd_getprice,                 true  },
-    { "ydollar", "yd_getroster",               &yd_getroster,                true  },
-    { "ydollar", "yd_getvault",                &yd_getvault,                 true  },
-    { "ydollar", "yd_listvaults",              &yd_listvaults,               true  },
-    { "ydollar", "yd_gettxinfo",               &yd_gettxinfo,                true  },
-    { "ydollar", "yd_decodepayload",           &yd_decodepayload,            true  },
-    { "ydollar", "yd_validaterawtransaction",  &yd_validaterawtransaction,   true  },
-    { "ydollar", "yd_estimatecollateral",      &yd_estimatecollateral,       true  },
-    { "ydollar", "yd_gethistory",              &yd_gethistory,               true  },
-    { "ydollar", "yd_createpricetx",           &yd_createpricetx,            true  },
+    { "yellowback", "yed_getinfo",                 &yed_getinfo,                  true  },
+    { "yellowback", "yed_getstatehash",            &yed_getstatehash,             true  },
+    { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
+    { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
+    { "yellowback", "yed_getroster",               &yed_getroster,                true  },
+    { "yellowback", "yed_getvault",                &yed_getvault,                 true  },
+    { "yellowback", "yed_listvaults",              &yed_listvaults,               true  },
+    { "yellowback", "yed_gettxinfo",               &yed_gettxinfo,                true  },
+    { "yellowback", "yed_decodepayload",           &yed_decodepayload,            true  },
+    { "yellowback", "yed_validaterawtransaction",  &yed_validaterawtransaction,   true  },
+    { "yellowback", "yed_estimatecollateral",      &yed_estimatecollateral,       true  },
+    { "yellowback", "yed_gethistory",              &yed_gethistory,               true  },
+    { "yellowback", "yed_createpricetx",           &yed_createpricetx,            true  },
 };
 
-void RegisterYDollarRPCCommands(CRPCTable &tableRPC)
+void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)
 {
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);

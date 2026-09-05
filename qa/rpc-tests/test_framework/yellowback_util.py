@@ -4,20 +4,20 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-Shared helpers for the YDollar functional tests (plan §6.0, §7).
+Shared helpers for the Yellowback functional tests (plan §6.0, §7).
 
 - Ycash's own network-upgrade branch IDs (util.py carries Zcash's for
   Blossom/Heartwood/Canopy, plan B6).
-- ydollar_node_args(): every upgrade active from height 1 (regtest activates
+- yellowback_node_args(): every upgrade active from height 1 (regtest activates
   none by default, C12; Overwinter and Sapling are already passed by
-  start_node) plus -experimentalfeatures -ydollar and the regtest genesis
+  start_node) plus -experimentalfeatures -yellowback and the regtest genesis
   arguments once known (C2).
 - make_regtest_roster(): k-of-n roster from the operator nodes' own keys,
   registered with addmultisigaddress on every signer (B2, C7).
 - fund_genesis_anchor(): creates the anchor UTXO on chain.
-- publish_price(): builds with yd_createpricetx, signs on k nodes with
+- publish_price(): builds with yed_createpricetx, signs on k nodes with
   signrawtransaction (partials merged in one call, F2), broadcasts.
-- assert_yd_synced(): sync_blocks already waits for the notifier cycle in
+- assert_yed_synced(): sync_blocks already waits for the notifier cycle in
   which the index ran (C13), so this is a sync plus an assertion.
 """
 
@@ -46,7 +46,7 @@ YCASH_CANOPY_BRANCH_ID = 0x19bd2d2f
 MINT_WINDOW = 40
 PRICE_MAX_AGE = 48
 TOKEN_VALUE = 10000
-YD_FEE = 1000
+YELLOWBACK_FEE = 1000
 DEFAULT_MINT_EVAL_LAG = 2
 
 # start_node already passes Overwinter and Sapling at height 1.
@@ -58,11 +58,11 @@ YCASH_UPGRADE_ARGS = [
 ]
 
 
-def ydollar_node_args(extra=None, genesis=None, ydollar=True):
+def yellowback_node_args(extra=None, genesis=None, yellowback=True):
     """Arguments for one node. `genesis` is the dict returned by fund_genesis_anchor."""
     args = list(YCASH_UPGRADE_ARGS)
-    if ydollar:
-        args += ['-experimentalfeatures', '-ydollar']
+    if yellowback:
+        args += ['-experimentalfeatures', '-yellowback']
         if genesis is not None:
             args += genesis_args(genesis)
     if extra:
@@ -72,23 +72,23 @@ def ydollar_node_args(extra=None, genesis=None, ydollar=True):
 
 def genesis_args(genesis):
     return [
-        '-ydollarstartheight=%d' % genesis['height'],
-        '-ydollargenesisanchor=%s:%d' % (genesis['txid'], genesis['vout']),
-        '-ydollargenesisroster=%s' % genesis['script'],
+        '-yellowbackstartheight=%d' % genesis['height'],
+        '-yellowbackgenesisanchor=%s:%d' % (genesis['txid'], genesis['vout']),
+        '-yellowbackgenesisroster=%s' % genesis['script'],
     ]
 
 
-def assert_yd_synced(nodes):
-    """After sync_blocks the index is at the tip on every -ydollar node (C13)."""
+def assert_yed_synced(nodes):
+    """After sync_blocks the index is at the tip on every -yellowback node (C13)."""
     sync_blocks(nodes)
     for node in nodes:
-        info = node.yd_getinfo()
+        info = node.yed_getinfo()
         assert_equal(info['healthy'], True, "index unhealthy: " + info['unhealthyReason'])
         assert_equal(info['synced'], True)
 
 
 def assert_same_statehash(nodes):
-    hashes = [n.yd_getstatehash()['statehash'] for n in nodes]
+    hashes = [n.yed_getstatehash()['statehash'] for n in nodes]
     assert_equal(hashes, [hashes[0]] * len(hashes))
     return hashes[0]
 
@@ -123,8 +123,8 @@ def make_regtest_roster(signer_nodes, k, extra_pubkeys=None):
 def fund_genesis_anchor(funder, roster, amount=Decimal('1.0')):
     """
     Pay `amount` to the roster's P2SH address and mine one block; returns the
-    genesis dict for -ydollarstartheight / -ydollargenesisanchor /
-    -ydollargenesisroster (C2). Caller syncs afterwards.
+    genesis dict for -yellowbackstartheight / -yellowbackgenesisanchor /
+    -yellowbackgenesisroster (C2). Caller syncs afterwards.
     """
     txid = funder.sendtoaddress(roster['address'], amount)
     funder.generate(1)
@@ -139,14 +139,14 @@ def fund_genesis_anchor(funder, roster, amount=Decimal('1.0')):
             'address': roster['address'], 'k': roster['k'], 'pubkeys': roster['pubkeys']}
 
 
-def restart_with_ydollar(test, node_indices, genesis, extra=None, ydollar_indices=None):
+def restart_with_yellowback(test, node_indices, genesis, extra=None, yellowback_indices=None):
     """
-    Stop and restart the given nodes with -ydollar and the genesis arguments
-    (nodes listed in ydollar_indices=None => all of node_indices get -ydollar;
+    Stop and restart the given nodes with -yellowback and the genesis arguments
+    (nodes listed in yellowback_indices=None => all of node_indices get -yellowback;
     others get only the upgrade args), then reconnect them in a chain.
     """
-    if ydollar_indices is None:
-        ydollar_indices = node_indices
+    if yellowback_indices is None:
+        yellowback_indices = node_indices
     for i in node_indices:
         stop_node(test.nodes[i], i)
     for i in node_indices:
@@ -156,7 +156,7 @@ def restart_with_ydollar(test, node_indices, genesis, extra=None, ydollar_indice
         elif extra is not None:
             per_node_extra = extra
         test.nodes[i] = start_node(i, test.options.tmpdir,
-                                   ydollar_node_args(per_node_extra, genesis, ydollar=(i in ydollar_indices)))
+                                   yellowback_node_args(per_node_extra, genesis, yellowback=(i in yellowback_indices)))
     for a, b in zip(node_indices, node_indices[1:]):
         connect_nodes_bi(test.nodes, a, b)
 
@@ -164,15 +164,15 @@ def restart_with_ydollar(test, node_indices, genesis, extra=None, ydollar_indice
 def publish_price(builder, signers, price, refill=None, rotate_script=None, prevtxs=None):
     """
     Build the PRICE (or ROTATION) transaction on `builder` with
-    yd_createpricetx, collect partial signatures from `signers` in parallel
+    yed_createpricetx, collect partial signatures from `signers` in parallel
     style (each signs the unsigned hex), merge them with one
     signrawtransaction call on the first signer, and broadcast. Returns the
     txid. Does not mine or sync.
     """
     if rotate_script is not None:
-        built = builder.yd_createpricetx('rotate', refill or '', rotate_script)
+        built = builder.yed_createpricetx('rotate', refill or '', rotate_script)
     else:
-        built = builder.yd_createpricetx(price, refill or '')
+        built = builder.yed_createpricetx(price, refill or '')
     unsigned = built['hex']
     partials = []
     for s in signers:
