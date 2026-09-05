@@ -40,6 +40,7 @@ BASE_SCRIPTS= [
     'yellowback_void_mint.py',
     'yellowback_wallet_restore.py',
     'yellowback_federation.py',
+    'yellowback_protection.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv

@@ -356,6 +356,57 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     return o;
 }
 
+UniValue yed_getprotectionstatus(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "yed_getprotectionstatus\n"
+            "\nThe three protection systems at the index tip (plan D12): DCA (collateral multiplier by health band),\n"
+            "ERR (burn ratio by health band) and the volatility mint freeze, with the prices the freeze compares.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const yellowback::Params& p = index.GetParams();
+    const int h = IndexHeight(index);
+    std::optional<Snapshot> snap = h >= 0 ? st.GetSnapshot((uint32_t)h) : std::nullopt;
+    Volatility vol = st.GetVolatility();
+    const int health = snap.has_value() ? snap->healthPct : HEALTH_CAP;
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", h);
+    o.pushKV("healthPct", health);
+    UniValue dca(UniValue::VOBJ);
+    dca.pushKV("bps", DcaBps(health));
+    dca.pushKV("band", health >= 150 ? "healthy" : health >= 120 ? "warning" : health >= 110 ? "critical" : "emergency");
+    o.pushKV("dca", dca);
+    UniValue err(UniValue::VOBJ);
+    err.pushKV("bps", ErrBps(health));
+    err.pushKV("active", health < 100);
+    err.pushKV("burnMultiplierBps", (int64_t)(10000LL * 10000 / ErrBps(health)));
+    o.pushKV("err", err);
+    UniValue v(UniValue::VOBJ);
+    v.pushKV("mintFrozen", snap.has_value() ? snap->mintFrozen : false);
+    v.pushKV("lastBreachHeight", vol.lastBreachHeight);
+    v.pushKV("frozenUntil", vol.lastBreachHeight >= 0 ? vol.lastBreachHeight + p.volCooldown : -1);
+    v.pushKV("cooldownBlocks", p.volCooldown);
+    auto pushPrice = [&](const char* name, int at) {
+        if (at < 0) { v.pushKV(name, NullUniValue); return; }
+        std::optional<MicroUsd> pr = st.PriceInEffect((uint32_t)at);
+        if (pr.has_value()) v.pushKV(name, pr.value()); else v.pushKV(name, NullUniValue);
+    };
+    pushPrice("priceNow", h);
+    pushPrice("priceShortWindow", h - p.volWindowShort);
+    pushPrice("priceLongWindow", h - p.volWindowLong);
+    v.pushKV("shortWindowBlocks", p.volWindowShort);
+    v.pushKV("longWindowBlocks", p.volWindowLong);
+    v.pushKV("shortThresholdBps", VOL_1H_BPS);
+    v.pushKV("longThresholdBps", VOL_24H_BPS);
+    o.pushKV("volatility", v);
+    o.pushKV("mintingAllowed", snap.has_value() && snap->priceDefined && health >= 100 && !snap->mintFrozen);
+    return o;
+}
+
 UniValue yed_getprice(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
@@ -793,6 +844,7 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_getstatehash",            &yed_getstatehash,             true  },
     { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
     { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
+    { "yellowback", "yed_getprotectionstatus",     &yed_getprotectionstatus,     true  },
     { "yellowback", "yed_getroster",               &yed_getroster,                true  },
     { "yellowback", "yed_getvault",                &yed_getvault,                 true  },
     { "yellowback", "yed_listvaults",              &yed_listvaults,               true  },
