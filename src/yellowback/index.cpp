@@ -222,30 +222,55 @@ void YellowbackIndex::HandleDisconnect(const CBlockIndex* pindex)
 
 void YellowbackIndex::ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added)
 {
-    LOCK(cs_yellowback);
-    if (stopped || !healthy) return;
-    try {
-        if (added.has_value()) {
-            if (!pblock) {
-                SetUnhealthy("ChainTip connect without block data");
-                return;
+    bool applied = false;
+    {
+        LOCK(cs_yellowback);
+        if (stopped || !healthy) return;
+        try {
+            if (added.has_value()) {
+                if (!pblock) {
+                    SetUnhealthy("ChainTip connect without block data");
+                    return;
+                }
+                HandleConnect(pindex, *pblock);
+                applied = true;
+            } else {
+                HandleDisconnect(pindex);
             }
-            HandleConnect(pindex, *pblock);
-        } else {
-            HandleDisconnect(pindex);
+        } catch (const std::exception& e) {
+            db->Discard();
+            SetUnhealthy(std::string("exception in ChainTip: ") + e.what());
+        } catch (...) {
+            db->Discard();
+            SetUnhealthy("unknown exception in ChainTip");
         }
-    } catch (const std::exception& e) {
-        db->Discard();
-        SetUnhealthy(std::string("exception in ChainTip: ") + e.what());
-    } catch (...) {
-        db->Discard();
-        SetUnhealthy("unknown exception in ChainTip");
+    }
+    // Stage (iii) of coin locking runs after every applied block, outside cs_yellowback (B15).
+    // Nothing is unlocked on disconnect (C3).
+    if (applied && onReconcile) {
+        try {
+            onReconcile();
+        } catch (const std::exception& e) {
+            LogPrintf("yellowback: reconcile failed: %s\n", e.what());
+        } catch (...) {
+            LogPrintf("yellowback: reconcile failed\n");
+        }
     }
 }
 
 void YellowbackIndex::SyncTransaction(const CTransaction& tx, const CBlock* pblock, const int nHeight)
 {
-    // Wallet pre-locking of assigned outputs is added with the wallet layer (plan B4, Phase 3).
+    // Stage (ii) of coin locking (B4): pre-lock every output a well-formed payload assigns to a
+    // script that is mine, for mempool and block transactions alike. Never touches the state.
+    if (stopped || !onSyncTransaction) return;
+    if (nHeight < params.startHeight) return;
+    try {
+        onSyncTransaction(tx);
+    } catch (const std::exception& e) {
+        LogPrintf("yellowback: SyncTransaction hook failed: %s\n", e.what());
+    } catch (...) {
+        LogPrintf("yellowback: SyncTransaction hook failed\n");
+    }
 }
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)

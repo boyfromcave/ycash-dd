@@ -41,6 +41,9 @@
 #include "validationinterface.h"
 #include "yellowback/index.h"
 #ifdef ENABLE_WALLET
+#include "yellowback/wallet.h"
+#endif
+#ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
 #endif
@@ -1193,8 +1196,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     RegisterAllCoreRPCCommands(tableRPC);
 #ifdef ENABLE_WALLET
     bool fDisableWallet = GetBoolArg("-disablewallet", false);
-    if (!fDisableWallet)
+    if (!fDisableWallet) {
         RegisterWalletRPCCommands(tableRPC);
+        RegisterYellowbackWalletRPCCommands(tableRPC);
+    }
 #endif
 
     nConnectTimeout = GetArg("-timeout", DEFAULT_CONNECT_TIMEOUT);
@@ -1884,6 +1889,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             LogPrintf("yellowback: index is unhealthy at startup: %s\n", yellowback::g_yellowback->UnhealthyReason());
         }
         RegisterValidationInterface(yellowback::g_yellowback);
+#ifdef ENABLE_WALLET
+        if (pwalletMain) {
+            yellowback::g_yellowbackWallet = new yellowback::YellowbackWallet(pwalletMain, yellowback::g_yellowback);
+            yellowback::g_yellowbackWallet->Attach();
+            yellowback::g_yellowbackWallet->Reconcile(); // stage (iii) at startup: re-lock every YED output that is mine
+        }
+#endif
     }
 
     // Start the thread that notifies listeners of transactions that have been

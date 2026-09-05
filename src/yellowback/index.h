@@ -12,6 +12,7 @@
 #include "yellowback/params.h"
 #include "yellowback/view.h"
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -72,6 +73,14 @@ public:
 
     /** Mark unhealthy (also used by unit tests to exercise the RPC refusal). */
     void SetUnhealthy(const std::string& reason);
+
+    /**
+     * Wallet hooks (plan §4.5, stages ii and iii of coin locking), set by the
+     * wallet layer when there is one. Called on the notifier thread without
+     * cs_yellowback held; they must not take cs_main.
+     */
+    std::function<void(const CTransaction&)> onSyncTransaction;
+    std::function<void()> onReconcile;
 
 protected:
     void ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added) override;

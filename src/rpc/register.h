@@ -23,6 +23,8 @@ void RegisterRawTransactionRPCCommands(CRPCTable &tableRPC);
 void RegisterAtomicSwapRPCCommands(CRPCTable &tableRPC);
 /** Register Yellowback node-context RPC commands */
 void RegisterYellowbackRPCCommands(CRPCTable &tableRPC);
+/** Register Yellowback wallet-context RPC commands (ENABLE_WALLET) */
+void RegisterYellowbackWalletRPCCommands(CRPCTable &tableRPC);
 /** Initialize atomic swap database */
 void InitAtomicSwapDatabase();
 /** Shutdown atomic swap database */

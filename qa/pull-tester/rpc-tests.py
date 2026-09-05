@@ -36,6 +36,7 @@ SERIAL_SCRIPTS = [
 BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
+    'yellowback_lifecycle.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv

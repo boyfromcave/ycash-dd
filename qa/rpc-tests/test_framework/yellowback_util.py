@@ -87,6 +87,20 @@ def assert_yed_synced(nodes):
         assert_equal(info['synced'], True)
 
 
+def wait_yed_synced(node, timeout=30):
+    """Poll until the index tip equals the chain tip (needed after invalidateblock: the framework's
+    fullyNotified flag does not cover block disconnects)."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        info = node.yed_getinfo()
+        assert_equal(info['healthy'], True, "index unhealthy: " + info['unhealthyReason'])
+        if info['synced']:
+            return
+        time.sleep(0.1)
+    raise AssertionError("index did not reach the chain tip within %ds" % timeout)
+
+
 def assert_same_statehash(nodes):
     hashes = [n.yed_getstatehash()['statehash'] for n in nodes]
     assert_equal(hashes, [hashes[0]] * len(hashes))
