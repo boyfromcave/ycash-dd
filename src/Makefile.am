@@ -206,6 +206,11 @@ BITCOIN_CORE_H = \
   script/sign.h \
   script/standard.h \
   script/ismine.h \
+  ydollar/address.h \
+  ydollar/math.h \
+  ydollar/params.h \
+  ydollar/payload.h \
+  ydollar/script.h \
   serialize.h \
   spentindex.h \
   streams.h \
@@ -443,6 +448,10 @@ libbitcoin_common_a_SOURCES = \
   transaction_builder.cpp \
   utiltest.cpp \
   warnings.cpp \
+  ydollar/address.cpp \
+  ydollar/params.cpp \
+  ydollar/payload.cpp \
+  ydollar/script.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
