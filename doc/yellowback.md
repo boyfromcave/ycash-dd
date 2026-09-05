@@ -18,9 +18,9 @@ guide and will grow with each phase.
 
 | Phase | State |
 |---|---|
-| 0 — groundwork (test framework fix, CI, baseline) | in progress |
-| 1 — pure protocol library (`src/yellowback/{params,amount,payload,script,address}`) | not started |
-| 2 — state machine, index, node RPCs | not started |
+| 0 — groundwork (test framework fix, CI, baseline) | done except the inherited functional-test baseline run |
+| 1 — pure protocol library (`src/yellowback/{params,math,payload,script,address}`) | done |
+| 2 — state machine, index, node RPCs | done |
 | 3 — wallet RPCs (mint, send, redeem, co-sign) | not started |
 | 4 — federation coordinator (`contrib/yellowback/`) | not started |
 | 5 — protections (DCA, ERR, volatility) | not started |
@@ -68,6 +68,21 @@ Recorded here once the Phase 0 build completes; see the section "Build and test 
 
 ### Build and test baseline
 
-_To be filled in: host, `zcutil/build.sh` result with and without `YCASH_WR=1`, `make check`
-result, and the list of `qa/pull-tester/rpc-tests.py` scripts that pass at the pin after the
-`ycash.conf` framework fix._
+Host: macOS 26 (Darwin 25.0.0), Apple Silicon, Apple clang 17, GNU make 3.81. Recorded 2026-09-05
+at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
+
+- `zcutil/build.sh` (without `YCASH_WR=1`) builds `ycashd`, `ycash-cli`, `ycash-tx` and
+  `src/test/test_bitcoin` on this host with three host-side conditions that are not fork changes:
+  Homebrew `automake` and GNU `libtool` on the PATH (`LIBTOOLIZE=glibtoolize`; libevent's
+  `autoreconf` needs them), GNU coreutils' `sha256sum` on the PATH for `zcutil/fetch-params.sh`
+  (macOS ships a BSD `sha256sum` whose flags differ), and `CARGO_TARGET_DIR` pointed at
+  `<repo>/target` when the user's shell sets a global cargo target directory (the Makefile links
+  `target/<triple>/release/librustzcash.a` relative to the repo). The `YCASH_WR=1` build has not
+  been run yet.
+- Depends: the native `aarch64-apple-darwin` toolchain (clang 18.1.8, rust, boost, libevent,
+  zeromq, libsodium, utfcpp, googletest, bdb) builds from `depends/` unchanged.
+- `src/test/test_bitcoin --run_test='yellowback_*'`: 28 cases green.
+- `qa/rpc-tests/yellowback_index.py`: green (about five minutes, four nodes).
+- The full `test_bitcoin` run and the inherited `qa/pull-tester/rpc-tests.py` baseline (which
+  tests at the pin pass on Ycash after the `ycash.conf` and `src/ycashd` framework fixes) are
+  to be recorded here once run.
