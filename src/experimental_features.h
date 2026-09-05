@@ -15,6 +15,7 @@ extern bool fExperimentalPaymentDisclosure;
 extern bool fExperimentalInsightExplorer;
 extern bool fExperimentalLightWalletd;
 extern bool fExperimentalAtomicSwaps;
+extern bool fExperimentalYDollar;
 
 std::optional<std::string> InitExperimentalMode();
 std::vector<std::string> GetExperimentalFeatures();

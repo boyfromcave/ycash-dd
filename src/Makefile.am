@@ -208,6 +208,7 @@ BITCOIN_CORE_H = \
   script/ismine.h \
   ydollar/address.h \
   ydollar/db.h \
+  ydollar/index.h \
   ydollar/math.h \
   ydollar/params.h \
   ydollar/payload.h \
@@ -315,6 +316,8 @@ libbitcoin_server_a_SOURCES = \
   txmempool.cpp \
   validationinterface.cpp \
   ydollar/db.cpp \
+  ydollar/index.cpp \
+  rpc/ydollar.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

@@ -39,6 +39,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "ydollar/index.h"
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
@@ -209,6 +210,12 @@ void Shutdown()
     StopREST();
     StopRPC();
     StopHTTPServer();
+    // YDollar (plan D2): unregister, then stop and flush under cs_ydollar; never deleted here.
+    if (ydollar::g_ydollar) {
+        UnregisterValidationInterface(ydollar::g_ydollar);
+        ydollar::g_ydollar->Stop();
+        ydollar::g_ydollar->Flush(true);
+    }
 #ifdef ENABLE_WALLET
     if (pwalletMain)
         pwalletMain->Flush(false);
@@ -404,6 +411,16 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-fastsync", _("Do a faster, PoW-only verification of blocks during initial block download (a.k.a. -ibdskiptxverification)"));
     strUsage += HelpMessageOpt("-txexpirynotify=<cmd>", _("Execute command when transaction expires (%s in cmd is replaced by transaction id)"));
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
+    strUsage += HelpMessageOpt("-ydollar", _("Enable the YDollar overlay index and yd_* RPCs (requires -experimentalfeatures; incompatible with -prune)"));
+    strUsage += HelpMessageOpt("-reindex-ydollar", _("Wipe and rebuild the YDollar index from the start height on startup"));
+    strUsage += HelpMessageOpt("-ydollarfee=<zat>", strprintf(_("Flat fee for YDollar transactions in zatoshi (default and minimum: %d)"), ydollar::DEFAULT_YD_FEE));
+    strUsage += HelpMessageOpt("-ydollarmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), ydollar::DEFAULT_MINT_EVAL_LAG, ydollar::MAX_MINT_EVAL_LAG));
+    if (showDebug) {
+        strUsage += HelpMessageOpt("-ydollarstartheight=<h>", "YDollar start height (regtest only; with -ydollargenesisanchor and -ydollargenesisroster)");
+        strUsage += HelpMessageOpt("-ydollargenesisanchor=<txid:n>", "YDollar genesis anchor outpoint (regtest only)");
+        strUsage += HelpMessageOpt("-ydollargenesisroster=<hex>", "YDollar genesis roster redeem script (regtest only)");
+        strUsage += HelpMessageOpt("-ydollarsupplycap=<cents>", "YDollar supply cap override, 0 = none (regtest only)");
+    }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
     strUsage += HelpMessageOpt("-addnode=<ip>", _("Add a node to connect to and attempt to keep the connection open"));
@@ -483,10 +500,10 @@ std::string HelpMessage(HelpMessageMode mode)
     }
 #ifdef YCASH_WR
     std::string debugCategories = "addrman, alert, bench, coindb, db, deletetx, estimatefee, http, libevent, lock, mempool, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, ydollar, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
 #else
     std::string debugCategories = "addrman, alert, bench, coindb, db, estimatefee, http, libevent, lock, mempool, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, ydollar, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
 #endif // YCASH_WR
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ". " +
@@ -1102,6 +1119,33 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         LogPrintf("Prune configured to target %uMiB on disk for block and undo files.\n", nPruneTarget / 1024 / 1024);
         fPruneMode = true;
+    }
+
+    // YDollar overlay (plan §4.3, C2, C16): the index rebuilds from blocks on disk, so it
+    // refuses -prune; the flat fee may not go below DEFAULT_FEE; regtest genesis arguments
+    // must appear together and only on regtest.
+    if (fExperimentalYDollar) {
+        if (fPruneMode) {
+            return InitError(_("-ydollar is incompatible with -prune."));
+        }
+        ydollar::g_ydollarFee = GetArg("-ydollarfee", ydollar::DEFAULT_YD_FEE);
+        if (ydollar::g_ydollarFee < ydollar::DEFAULT_YD_FEE) {
+            return InitError(strprintf(_("-ydollarfee must be at least %d zatoshi."), ydollar::DEFAULT_YD_FEE));
+        }
+        ydollar::g_ydollarMintLag = GetArg("-ydollarmintlag", ydollar::DEFAULT_MINT_EVAL_LAG);
+        if (ydollar::g_ydollarMintLag < 0 || ydollar::g_ydollarMintLag > ydollar::MAX_MINT_EVAL_LAG) {
+            return InitError(strprintf(_("-ydollarmintlag must be between 0 and %d."), ydollar::MAX_MINT_EVAL_LAG));
+        }
+        ydollar::Params ydParams;
+        auto ydErr = ydollar::ParamsFromArgs(chainparams.NetworkIDString(), ydParams);
+        if (ydErr.has_value()) {
+            return InitError(ydErr.value());
+        }
+        if (!ydParams.IsConfigured()) {
+            return InitError(_("YDollar has no genesis anchor for this network yet."));
+        }
+    } else if (mapArgs.count("-ydollarstartheight") || mapArgs.count("-ydollargenesisanchor") || mapArgs.count("-ydollargenesisroster") || mapArgs.count("-ydollarsupplycap") || mapArgs.count("-reindex-ydollar")) {
+        return InitError(_("YDollar options require -ydollar."));
     }
 
     // block prefetch cache
@@ -1828,6 +1872,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         GetMainSignals().AddressForMining.connect(GetMinerAddress);
     }
 #endif // ENABLE_MINING
+
+    // YDollar index (plan §4.3): opened and synced to chainActive before the notifier
+    // thread starts, so it is at the tip when notifications begin; registered after the
+    // wallet. Zero lines in main.cpp: it is an ordinary CValidationInterface subscriber.
+    if (fExperimentalYDollar) {
+        ydollar::Params ydParams;
+        ydollar::ParamsFromArgs(chainparams.NetworkIDString(), ydParams); // validated in step 3
+        ydollar::g_ydollar = new ydollar::YDollarIndex(ydParams, GetDataDir() / "ydollar", 1 << 22, GetBoolArg("-reindex-ydollar", false));
+        if (!ydollar::g_ydollar->SyncToChain()) {
+            LogPrintf("ydollar: index is unhealthy at startup: %s\n", ydollar::g_ydollar->UnhealthyReason());
+        }
+        RegisterValidationInterface(ydollar::g_ydollar);
+    }
 
     // Start the thread that notifies listeners of transactions that have been
     // recently added to the mempool, or have been added to or removed from the

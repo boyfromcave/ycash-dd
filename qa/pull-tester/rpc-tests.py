@@ -34,6 +34,8 @@ SERIAL_SCRIPTS = [
 ]
 
 BASE_SCRIPTS= [
+    # YDollar overlay (fork-local; names must be listed here, the runner does not glob)
+    'ydollar_index.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
@@ -259,7 +261,7 @@ def run_tests(test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=Fal
 
     #Set env vars
     if "BITCOIND" not in os.environ:
-        os.environ["BITCOIND"] = build_dir + '/src/zcashd' + exeext
+        os.environ["BITCOIND"] = build_dir + '/src/ycashd' + exeext
 
     tests_dir = src_dir + '/qa/rpc-tests/'
 
