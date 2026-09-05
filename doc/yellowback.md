@@ -24,7 +24,7 @@ guide and will grow with each phase.
 | 3 — wallet RPCs (mint, send, redeem, co-sign) | done |
 | 4 — federation coordinator (`contrib/yellowback/`) | done |
 | 5 — protections (DCA, ERR, volatility) | done |
-| 6 — hardening and review | in progress (fuzz targets, stress test, review package written; external review pending) |
+| 6 — hardening and review | done locally (fuzz targets, stress test, review package); external maintainer review pending |
 
 ## Enabling
 
@@ -138,7 +138,8 @@ at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
   `rpc_wallet_tests/rpc_z_sendmany_internals`. Everything else passes, including all 28
   `yellowback_*` cases.
 - `qa/rpc-tests/yellowback_lifecycle.py`, `yellowback_void_mint.py`, `yellowback_wallet_restore.py`,
-  `yellowback_federation.py`, `yellowback_protection.py`: green (five nodes each, 5-12 minutes).
+  `yellowback_federation.py`, `yellowback_protection.py`, `yellowback_reorg_stress.py` (30 reorgs over 300
+  blocks): green (five nodes each, 5-15 minutes).
 - The inherited `qa/pull-tester/rpc-tests.py` baseline (which tests at the pin pass on Ycash after
   the `ycash.conf` and `src/ycashd` framework fixes) and the `YCASH_WR=1` build are still to be run.
 - Python 3.12+ note: the inherited `test_framework/mininode.py` imports `asyncore` (removed in

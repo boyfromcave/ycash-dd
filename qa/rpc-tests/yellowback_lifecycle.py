@@ -284,7 +284,7 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         print("Redeem vault 1 with RPC co-signing on two federation nodes")
         lock1 = nodes[0].yed_getvault(vault1)['lockHeight']
         self.mine_to(lock1, 50000000)
-        assert_equal(nodes[0].yed_listpositions()[0]['canRedeem'] or nodes[0].yed_listpositions()[1]['canRedeem'], True)
+        assert_equal([p for p in nodes[0].yed_listpositions() if p['vaultTxid'] == vault1][0]['canRedeem'], True)
         red = nodes[0].yed_redeem(vault1)
         assert_equal(red['requiredBurnCents'], 10000)
         assert_equal(red['roster']['k'], 2)
@@ -365,11 +365,12 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         lock2 = nodes[0].yed_getvault(vault2)['lockHeight']
         self.mine_to(lock2, 50000000)
         red2 = nodes[0].yed_redeem(vault2)
-        assert_equal(nodes[0].yed_listpositions('ACTIVE')[0]['pending'], True)
+        pos2 = lambda: [p for p in nodes[0].yed_listpositions('ACTIVE') if p['vaultTxid'] == vault2][0]
+        assert_equal(pos2()['pending'], True)
         assert_equal(nodes[0].yed_abortredeem(vault2)['aborted'], True)
         assert_equal(nodes[0].yed_abortredeem(vault2)['aborted'], False)
         assert_rpc_error("no pending redemption", nodes[0].yed_submitredeem, red2['hex'])
-        assert_equal(nodes[0].yed_listpositions('ACTIVE')[0]['pending'], False)
+        assert_equal(pos2()['pending'], False)
         assert_same_statehash(nodes)
         print("Done")
 

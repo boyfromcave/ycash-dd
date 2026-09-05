@@ -682,6 +682,7 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     o.pushKV("requiredZat", req.value());
     o.pushKV("required", ValueFromAmount(req.value()));
     o.pushKV("lockHeight", (int64_t)evalH + p.tierBlocks[tier] + MINT_WINDOW);
+    o.pushKV("unlockHeight", (int64_t)evalH + p.tierBlocks[tier] + MINT_WINDOW);
     o.pushKV("expiryHeight", (int64_t)evalH + MINT_WINDOW);
     return o;
 }

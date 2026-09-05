@@ -85,6 +85,18 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
         self.reconnect_all()
         sync_blocks(self.nodes)
 
+    def sync_all(self):
+        # After a reorg the resurrected transactions live only in the victim's mempool and mempools never
+        # resync on their own, so only blocks are required to agree; mempools are synced best-effort.
+        sync_blocks(self.nodes)
+        self.soft_sync_mempools()
+
+    def soft_sync_mempools(self):
+        try:
+            sync_mempools(self.nodes, timeout=10)
+        except AssertionError:
+            pass
+
     def mine(self, n=1, node=0):
         self.nodes[node].generate(n)
         self.sync_all()
@@ -92,7 +104,7 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
 
     def price(self, p):
         publish_price(self.nodes[2], [self.nodes[2], self.nodes[3]], p)
-        sync_mempools(self.nodes)
+        self.soft_sync_mempools()
 
     # ---- random activity
     def try_mint(self, rng, node):
@@ -150,13 +162,22 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
         victim = rng.choice([0, 1, 2])
         node = self.nodes[victim]
         height = node.getblockcount()
-        node.invalidateblock(node.getblockhash(height - k + 1))
+        invalidated = node.getblockhash(height - k + 1)
+        node.invalidateblock(invalidated)
         wait_yed_synced(node)
         # The node may now sit on an older side branch (stale blocks from an earlier reorg are still
         # valid), so mine whatever it takes to overtake the previous tip.
         newh = node.getblockcount()
         assert newh < height
         node.generate(height - newh + 1)
+        sync_blocks(self.nodes)
+        # invalidateblock is sticky per node: lift it so a later branch built on that block (by a node
+        # that never invalidated it) can still be followed. The longer branch remains the tip.
+        node.reconsiderblock(invalidated)
+        # Relaying an invalidated block earns a misbehaviour score; keep the network connected.
+        for n in self.nodes:
+            n.clearbanned()
+        self.reconnect_all()
         sync_blocks(self.nodes)
         assert_yed_synced(self.nodes)
         return victim
@@ -200,7 +221,7 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
             else:
                 what = self.try_redeem(rng, nodes[actor])
             stats[what.split("(")[0]] = stats.get(what.split("(")[0], 0) + 1
-            sync_mempools(nodes)
+            self.soft_sync_mempools()
             if rng.random() < 0.12:
                 k = rng.randint(1, 6)
                 victim = self.reorg(rng, k)

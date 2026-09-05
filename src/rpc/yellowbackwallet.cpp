@@ -570,7 +570,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         o.pushKV("txid", kv.first.GetHex());
         o.pushKV("height", -1);
         o.pushKV("confirmations", 0);
-        o.pushKV("type", PayloadTypeName(fp->payload.type));
+        o.pushKV("type", fp->payload.type == PayloadType::MINT ? "mint" : fp->payload.type == PayloadType::REDEEM ? "redeem" : "send");
         o.pushKV("verdict", "expired");
         o.pushKV("yedIn", 0);
         o.pushKV("yedOut", 0);
