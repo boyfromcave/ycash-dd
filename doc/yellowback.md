@@ -21,7 +21,7 @@ guide and will grow with each phase.
 | 0 — groundwork (test framework fix, CI, baseline) | done except the inherited functional-test baseline run |
 | 1 — pure protocol library (`src/yellowback/{params,math,payload,script,address}`) | done |
 | 2 — state machine, index, node RPCs | done |
-| 3 — wallet RPCs (mint, send, redeem, co-sign) | not started |
+| 3 — wallet RPCs (mint, send, redeem, co-sign) | done |
 | 4 — federation coordinator (`contrib/yellowback/`) | not started |
 | 5 — protections (DCA, ERR, volatility) | not started |
 | 6 — hardening and review | not started |
@@ -83,6 +83,14 @@ at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
   zeromq, libsodium, utfcpp, googletest, bdb) builds from `depends/` unchanged.
 - `src/test/test_bitcoin --run_test='yellowback_*'`: 28 cases green.
 - `qa/rpc-tests/yellowback_index.py`: green (about five minutes, four nodes).
-- The full `test_bitcoin` run and the inherited `qa/pull-tester/rpc-tests.py` baseline (which
-  tests at the pin pass on Ycash after the `ycash.conf` and `src/ycashd` framework fixes) are
-  to be recorded here once run.
+- Full `src/test/test_bitcoin` (450 cases): 2 failures, both pre-existing at the pin and in files
+  the fork does not touch — `main_tests/subsidy_limit_test` (subsidy sum) and
+  `rpc_wallet_tests/rpc_z_sendmany_internals`. Everything else passes, including all 28
+  `yellowback_*` cases.
+- `qa/rpc-tests/yellowback_lifecycle.py`, `yellowback_void_mint.py`, `yellowback_wallet_restore.py`:
+  green (five nodes each, 5-12 minutes).
+- The inherited `qa/pull-tester/rpc-tests.py` baseline (which tests at the pin pass on Ycash after
+  the `ycash.conf` and `src/ycashd` framework fixes) and the `YCASH_WR=1` build are still to be run.
+- Python 3.12+ note: the inherited `test_framework/mininode.py` imports `asyncore` (removed in
+  3.12) and `pyblake2` (unmaintained). The workspace venv carries `pyasyncore` and a one-line
+  `pyblake2` shim over `hashlib.blake2b`; no framework file is changed.

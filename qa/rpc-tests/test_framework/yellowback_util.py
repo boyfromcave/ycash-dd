@@ -206,3 +206,58 @@ def publish_price(builder, signers, price, refill=None, rotate_script=None, prev
 def sync_all_nodes(nodes):
     sync_blocks(nodes)
     sync_mempools(nodes)
+
+
+def build_mint_tx(node, cents, tier, lock_height, eval_height, collateral_zat, owner_pubkey=None, roster_script_hex=None):
+    """
+    Hand-build a MINT transaction (the wallet only builds valid ones): vault
+    P2SH at vout 0 with `collateral_zat`, token P2PKH to the owner at vout 1,
+    the MINT payload at vout 2, YEC change at vout 3. Returns the signed hex
+    and the owner pubkey. Uses the node for every script derivation (no
+    Python crypto, G2).
+    """
+    from decimal import Decimal
+    from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
+    from .script import CScript, OP_NOP2, OP_CHECKSIGVERIFY, OP_DROP, OP_RETURN
+    OP_CHECKLOCKTIMEVERIFY = OP_NOP2
+    from .util import bytes_to_hex_str, hex_str_to_bytes
+    if owner_pubkey is None:
+        owner_pubkey = node.validateaddress(node.getnewaddress())['pubkey']
+    if roster_script_hex is None:
+        roster_script_hex = node.yed_getroster()['scriptHex']
+    owner = hex_str_to_bytes(owner_pubkey)
+    # Concatenate raw bytes: CScript + CScript would push the roster as data (PUSHDATA1), not append it.
+    vault = CScript(bytes(CScript([lock_height, OP_CHECKLOCKTIMEVERIFY, OP_DROP, owner, OP_CHECKSIGVERIFY])) + hex_str_to_bytes(roster_script_hex))
+    p2sh = node.decodescript(bytes_to_hex_str(bytes(vault)))['p2sh']
+    vault_spk = hex_str_to_bytes(node.validateaddress(p2sh)['scriptPubKey'])
+    token_spk = hex_str_to_bytes(node.validateaddress(node.getnewaddress())['scriptPubKey'])  # any script; the owner key is what matters
+    payload = (bytes([0x59, 0x42, 0x01, 0x01, tier]) + int(cents).to_bytes(4, 'little') +
+               int(lock_height).to_bytes(4, 'little') + int(eval_height).to_bytes(4, 'little') + owner)
+    needed = collateral_zat + TOKEN_VALUE + YELLOWBACK_FEE
+    utxos = sorted([u for u in node.listunspent(1)], key=lambda u: u['amount'])
+    tx = CTransaction()
+    total = 0
+    for u in utxos:
+        tx.vin.append(CTxIn(COutPoint(int(u['txid'], 16), u['vout'])))
+        total += int(u['amount'] * 100000000)
+        if total >= needed:
+            break
+    assert total >= needed, 'insufficient YEC to hand-build the mint'
+    tx.vout.append(CTxOut(collateral_zat, CScript(vault_spk)))
+    tx.vout.append(CTxOut(TOKEN_VALUE, CScript(token_spk)))
+    tx.vout.append(CTxOut(0, CScript([OP_RETURN, payload])))
+    if total - needed > 0:
+        change_spk = hex_str_to_bytes(node.validateaddress(node.getnewaddress())['scriptPubKey'])
+        tx.vout.append(CTxOut(total - needed, CScript(change_spk)))
+    tx.nExpiryHeight = node.getblockcount() + 40
+    signed = node.signrawtransaction(bytes_to_hex_str(tx.serialize()))
+    assert_equal(signed['complete'], True)
+    return signed['hex'], owner_pubkey
+
+
+def cosign_and_submit(owner_node, signer_nodes, redeem_hex):
+    """Pass the owner-signed hex through each signer's yed_cosignredeem, then yed_submitredeem on the owner."""
+    h = redeem_hex
+    for n in signer_nodes:
+        h = n.yed_cosignredeem(h)['hex']
+    return owner_node.yed_submitredeem(h)['txid']

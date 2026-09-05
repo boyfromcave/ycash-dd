@@ -140,9 +140,12 @@ RedeemCheck CheckRedeem(const YellowbackIndex& index, const CCoinsViewCache& vie
         return Refuse(c, "RED-4", strprintf("fee %d outside [%d, %d]", c.fee, g_yellowbackFee, 100 * g_yellowbackFee));
     }
 
-    // RED-8
+    // RED-8 (and the mirror image: a transaction that has already expired, or is about to, is refused too)
     if (tx.nExpiryHeight == 0 || (int64_t)tx.nExpiryHeight > (int64_t)c.indexHeight + MINT_WINDOW + RED_SKEW) {
         return Refuse(c, "RED-8", strprintf("nExpiryHeight %u beyond index height + %d", tx.nExpiryHeight, MINT_WINDOW + RED_SKEW));
+    }
+    if ((int64_t)tx.nExpiryHeight <= (int64_t)c.indexHeight + (int64_t)TX_EXPIRING_SOON_THRESHOLD) {
+        return Refuse(c, "RED-8", strprintf("nExpiryHeight %u has expired or is expiring (index height %d)", tx.nExpiryHeight, c.indexHeight));
     }
 
     // RED-7: the owner signature over the vault script reconstructed from the index (C5)

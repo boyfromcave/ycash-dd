@@ -540,6 +540,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         else if (closedMine) { type = "redeem"; amount = -spent; }
         else if (spent > 0 && received < spent && l.type == 0) { type = "burn"; amount = -(spent - received); }
         else if (spent > 0 && l.type != 0 && l.verdict != verdict::TRANSFER_OK && l.verdict != verdict::REDEEM_OK) { type = "burn"; amount = -(spent - received); }
+        else if (spent > 0 && l.type == (uint8_t)PayloadType::TRANSFER) { type = "send"; amount = received - spent; }
         else if (spent > received) { type = "send"; amount = -(spent - received); }
         else { type = "receive"; amount = received - spent; }
         UniValue o(UniValue::VOBJ);
