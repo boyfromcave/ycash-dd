@@ -2,11 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/math.h"
-#include "ydollar/payload.h"
-#include "ydollar/script.h"
-#include "ydollar/state.h"
-#include "ydollar/view.h"
+#include "yellowback/math.h"
+#include "yellowback/payload.h"
+#include "yellowback/script.h"
+#include "yellowback/state.h"
+#include "yellowback/view.h"
 
 #include "key.h"
 #include "primitives/block.h"
@@ -15,7 +15,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-using namespace ydollar;
+using namespace yellowback;
 
 namespace {
 
@@ -106,7 +106,7 @@ struct Fixture
         AnchorRecord a = st.GetAnchor();
         CMutableTransaction m;
         m.vin.push_back(CTxIn(a.outpoint, BuildAnchorSig()));
-        m.vout.push_back(CTxOut(a.nValue - DEFAULT_YD_FEE, newAnchorSpk.empty() ? a.scriptPubKey : newAnchorSpk));
+        m.vout.push_back(CTxOut(a.nValue - DEFAULT_YELLOWBACK_FEE, newAnchorSpk.empty() ? a.scriptPubKey : newAnchorSpk));
         if (withPayload) m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price(price)))));
         return m;
     }
@@ -157,7 +157,7 @@ struct Fixture
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(ydollar_state_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(yellowback_state_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(genesis_and_prices)
 {
@@ -183,14 +183,14 @@ BOOST_AUTO_TEST_CASE(genesis_and_prices)
     BOOST_REQUIRE(!f.Apply({ f.PriceTx(50000) }).has_value());
     BOOST_CHECK_EQUAL(f.Price(START + 1).value(), 50000);
     BOOST_CHECK(State(f.view).GetSnapshot(START + 1)->priceDefined);
-    BOOST_CHECK(State(f.view).GetAnchor().nValue == COIN - DEFAULT_YD_FEE);
+    BOOST_CHECK(State(f.view).GetAnchor().nValue == COIN - DEFAULT_YELLOWBACK_FEE);
     // Two chained prices in one block: the last wins (B7).
     {
         CMutableTransaction p1 = f.PriceTx(60000);
         // p2 spends p1's new anchor
         CMutableTransaction p2;
         p2.vin.push_back(CTxIn(COutPoint(CTransaction(p1).GetHash(), 0), f.BuildAnchorSig()));
-        p2.vout.push_back(CTxOut(p1.vout[0].nValue - DEFAULT_YD_FEE, f.anchorSpk));
+        p2.vout.push_back(CTxOut(p1.vout[0].nValue - DEFAULT_YELLOWBACK_FEE, f.anchorSpk));
         p2.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price(70000)))));
         BOOST_REQUIRE(!f.Apply({ p1, p2 }).has_value());
         BOOST_CHECK_EQUAL(f.Price(START + 2).value(), 70000);
@@ -206,7 +206,7 @@ BOOST_AUTO_TEST_CASE(genesis_and_prices)
     BOOST_REQUIRE(!f.Apply({ f.PriceTx(PRICE_MAX + 1) }).has_value());
     BOOST_CHECK(!f.Price(f.tipHeight).has_value());
     BOOST_CHECK(State(f.view).GetTxLog(CTransaction(f.PriceTx(1)).GetHash()) == std::nullopt);
-    // A PRICE payload that does not spend the anchor is non-YDollar.
+    // A PRICE payload that does not spend the anchor is non-Yellowback.
     {
         CMutableTransaction m;
         m.vin.push_back(CTxIn(COutPoint(Fixture::FakeHash(1), 0)));
@@ -242,7 +242,7 @@ BOOST_AUTO_TEST_CASE(rotation_and_custody)
         CMutableTransaction p;
         AnchorRecord a = st.GetAnchor();
         p.vin.push_back(CTxIn(a.outpoint, f.BuildAnchorSig(roster2)));
-        p.vout.push_back(CTxOut(a.nValue - DEFAULT_YD_FEE, anchor2));
+        p.vout.push_back(CTxOut(a.nValue - DEFAULT_YELLOWBACK_FEE, anchor2));
         p.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price(55000)))));
         BOOST_REQUIRE(!f.Apply({ p }).has_value());
         State st2(f.view);
@@ -310,7 +310,7 @@ BOOST_AUTO_TEST_CASE(mint_transfer_burn_redeem)
         BOOST_CHECK_EQUAL(st.GetTotals().collateralZat, 20000 * COIN);
         BOOST_CHECK_EQUAL(st.GetTotals().activeVaults, 1u);
         BOOST_CHECK_EQUAL(st.GetTxLog(mintId)->verdict, verdict::MINT_OK);
-        BOOST_CHECK_EQUAL(st.GetTxLog(mintId)->ydOut, 10000);
+        BOOST_CHECK_EQUAL(st.GetTxLog(mintId)->yedOut, 10000);
         // Snapshot health: 20,000 YEC * $0.05 = $1,000 backing $100 => 1000 %
         BOOST_CHECK_EQUAL(st.GetSnapshot(mintH)->healthPct, 1000);
     }
@@ -359,9 +359,9 @@ BOOST_AUTO_TEST_CASE(mint_transfer_burn_redeem)
     BOOST_REQUIRE(!f.Apply({ plain }).has_value());
     BOOST_CHECK_EQUAL(State(f.view).GetTotals().supplyCents, 0);
     BOOST_CHECK_EQUAL(State(f.view).GetTxLog(CTransaction(plain).GetHash())->burned, 5500);
-    BOOST_CHECK_EQUAL(State(f.view).GetTxLog(CTransaction(plain).GetHash())->verdict, verdict::NON_YDOLLAR);
+    BOOST_CHECK_EQUAL(State(f.view).GetTxLog(CTransaction(plain).GetHash())->verdict, verdict::NON_YELLOWBACK);
 
-    // A transfer with no YDollar input assigns nothing (XFER-3).
+    // A transfer with no Yellowback input assigns nothing (XFER-3).
     CMutableTransaction noIn = f.TransferTx({ COutPoint(Fixture::FakeHash(77), 0) }, { Assignment(0, 100) });
     BOOST_REQUIRE(!f.Apply({ noIn }).has_value());
     BOOST_CHECK(!State(f.view).GetToken(COutPoint(CTransaction(noIn).GetHash(), 0)).has_value());

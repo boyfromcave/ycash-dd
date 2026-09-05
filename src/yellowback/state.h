@@ -2,20 +2,20 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_STATE_H
-#define YCASH_YDOLLAR_STATE_H
+#ifndef YCASH_YELLOWBACK_STATE_H
+#define YCASH_YELLOWBACK_STATE_H
 
 #include "primitives/block.h"
 #include "primitives/transaction.h"
-#include "ydollar/params.h"
-#include "ydollar/payload.h"
-#include "ydollar/view.h"
+#include "yellowback/params.h"
+#include "yellowback/payload.h"
+#include "yellowback/view.h"
 
 #include <optional>
 #include <string>
 
 /**
- * The YDollar state machine: rules §3.7 (IN-1..3, TX-0, MINT-1..7, XFER-1..3,
+ * The Yellowback state machine: rules §3.7 (IN-1..3, TX-0, MINT-1..7, XFER-1..3,
  * PRICE-1..3, SNAP, UNDO) as pure functions of (block or transaction, state
  * view, height, params). Nothing here may read the clock, the mempool, the
  * wallet or configuration (§3.10, D19): this is the shape a consensus rule
@@ -26,11 +26,11 @@
  * transaction; an overlay cannot reject, so a failing MINT registers a VOID
  * vault and a failing TRANSFER burns (plan D18, the Runes "cenotaph" rule).
  */
-namespace ydollar {
+namespace yellowback {
 
-/** Stable verdict strings (reused by yd_gettxinfo, yd_validaterawtransaction and the wallet). */
+/** Stable verdict strings (reused by yed_gettxinfo, yed_validaterawtransaction and the wallet). */
 namespace verdict {
-extern const char* const NON_YDOLLAR;
+extern const char* const NON_YELLOWBACK;
 extern const char* const MINT_OK;
 extern const char* const TRANSFER_OK;
 extern const char* const REDEEM_OK;
@@ -65,7 +65,7 @@ extern const char* const XFER_OVER_ASSIGNED;
 /**
  * Apply one transaction's effect on the state (§3.7). Inputs are processed
  * before outputs. Returns the TxLog entry; `relevant` is false when the
- * transaction touched nothing YDollar (no payload, no YDollar outpoint
+ * transaction touched nothing Yellowback (no payload, no Yellowback outpoint
  * spent), in which case the state is unchanged and nothing is logged.
  */
 TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, int height, bool& relevant);
@@ -92,6 +92,6 @@ Snapshot ComputeSnapshot(const State& st, const Params& params, int height, cons
  */
 std::vector<uint32_t> MintableRosters(const std::vector<RosterRecord>& rosters, const Params& params, int height);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_STATE_H
+#endif // YCASH_YELLOWBACK_STATE_H

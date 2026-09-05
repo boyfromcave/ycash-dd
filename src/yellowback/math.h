@@ -2,12 +2,12 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_MATH_H
-#define YCASH_YDOLLAR_MATH_H
+#ifndef YCASH_YELLOWBACK_MATH_H
+#define YCASH_YELLOWBACK_MATH_H
 
 #include "amount.h"
 #include "arith_uint256.h"
-#include "ydollar/params.h"
+#include "yellowback/params.h"
 
 #include <optional>
 
@@ -19,7 +19,7 @@
  * Reference tables: ref/digibyte/src/consensus/dca.cpp:53-58 (DCA) and
  * ref/digibyte/src/consensus/err.cpp:38-41,100 (ERR).
  */
-namespace ydollar {
+namespace yellowback {
 
 /** ceil(a / b) for b > 0. */
 inline arith_uint256 CeilDiv(const arith_uint256& a, const arith_uint256& b)
@@ -100,7 +100,7 @@ inline std::optional<CAmount> RequiredCollateralRounded(Cents cents, int ratioPc
     return z;
 }
 
-/** YDollar cents that must be burned to release a vault that minted `mintedCents`: ceil(M * 10000 / errBps). */
+/** Yellowback cents that must be burned to release a vault that minted `mintedCents`: ceil(M * 10000 / errBps). */
 inline Cents RequiredBurn(Cents mintedCents, int errBps)
 {
     if (mintedCents <= 0) return 0;
@@ -121,6 +121,6 @@ inline bool VolatilityBreach(std::optional<MicroUsd> p0, std::optional<MicroUsd>
     return diff * arith_uint256(10000) >= arith_uint256(thresholdBps) * arith_uint256(b);
 }
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_MATH_H
+#endif // YCASH_YELLOWBACK_MATH_H

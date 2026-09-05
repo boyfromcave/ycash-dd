@@ -206,15 +206,15 @@ BITCOIN_CORE_H = \
   script/sign.h \
   script/standard.h \
   script/ismine.h \
-  ydollar/address.h \
-  ydollar/db.h \
-  ydollar/index.h \
-  ydollar/math.h \
-  ydollar/params.h \
-  ydollar/payload.h \
-  ydollar/script.h \
-  ydollar/state.h \
-  ydollar/view.h \
+  yellowback/address.h \
+  yellowback/db.h \
+  yellowback/index.h \
+  yellowback/math.h \
+  yellowback/params.h \
+  yellowback/payload.h \
+  yellowback/script.h \
+  yellowback/state.h \
+  yellowback/view.h \
   serialize.h \
   spentindex.h \
   streams.h \
@@ -315,9 +315,9 @@ libbitcoin_server_a_SOURCES = \
   mempool_limit.cpp \
   txmempool.cpp \
   validationinterface.cpp \
-  ydollar/db.cpp \
-  ydollar/index.cpp \
-  rpc/ydollar.cpp \
+  yellowback/db.cpp \
+  yellowback/index.cpp \
+  rpc/yellowback.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
@@ -455,12 +455,12 @@ libbitcoin_common_a_SOURCES = \
   transaction_builder.cpp \
   utiltest.cpp \
   warnings.cpp \
-  ydollar/address.cpp \
-  ydollar/params.cpp \
-  ydollar/payload.cpp \
-  ydollar/script.cpp \
-  ydollar/state.cpp \
-  ydollar/view.cpp \
+  yellowback/address.cpp \
+  yellowback/params.cpp \
+  yellowback/payload.cpp \
+  yellowback/script.cpp \
+  yellowback/state.cpp \
+  yellowback/view.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 

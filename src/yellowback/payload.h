@@ -2,21 +2,21 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_PAYLOAD_H
-#define YCASH_YDOLLAR_PAYLOAD_H
+#ifndef YCASH_YELLOWBACK_PAYLOAD_H
+#define YCASH_YELLOWBACK_PAYLOAD_H
 
 #include "primitives/transaction.h"
 #include "pubkey.h"
-#include "ydollar/params.h"
+#include "yellowback/params.h"
 
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 /**
- * YDollar payload codec (plan §3.2).
+ * Yellowback payload codec (plan §3.2).
  *
- *   magic   2 bytes   0x59 0x44 ("YD")
+ *   magic   2 bytes   0x59 0x42 ("YB")
  *   version 1 byte    0x01
  *   type    1 byte    0x01 MINT | 0x02 TRANSFER | 0x03 REDEEM | 0x10 PRICE
  *   body    per type; total <= 80 bytes; trailing bytes => malformed
@@ -29,7 +29,7 @@
  * OP_RETURN (ref/digibyte/src/digidollar/txbuilder.cpp:407-418, 807-818);
  * Ycash pins nVersion == 4, so the type lives in the payload (mapping.md §5).
  */
-namespace ydollar {
+namespace yellowback {
 
 enum class PayloadType : uint8_t {
     MINT     = 0x01,
@@ -112,16 +112,16 @@ struct FoundPayload
 };
 
 /**
- * The transaction's YDollar payload, if it has one: exactly one OP_RETURN
+ * The transaction's Yellowback payload, if it has one: exactly one OP_RETURN
  * output, of the required shape, that decodes, whose assigned vouts all exist
  * and none of which is the OP_RETURN itself. Otherwise nullopt: the
- * transaction is non-YDollar for outputs (inputs still follow IN-1..3).
+ * transaction is non-Yellowback for outputs (inputs still follow IN-1..3).
  */
 std::optional<FoundPayload> FindPayload(const CTransaction& tx);
 
 /** Name of a type for RPC output and logs. */
 const char* PayloadTypeName(PayloadType type);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_PAYLOAD_H
+#endif // YCASH_YELLOWBACK_PAYLOAD_H

@@ -2,16 +2,16 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/math.h"
-#include "ydollar/params.h"
+#include "yellowback/math.h"
+#include "yellowback/params.h"
 
 #include "test/test_bitcoin.h"
 
 #include <boost/test/unit_test.hpp>
 
-using namespace ydollar;
+using namespace yellowback;
 
-BOOST_FIXTURE_TEST_SUITE(ydollar_math_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(yellowback_math_tests, BasicTestingSetup)
 
 // §3.6 worked example: 1,000 YEC at $0.05 backing $10 => 500 %.
 BOOST_AUTO_TEST_CASE(health_worked_example)

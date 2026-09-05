@@ -2,43 +2,43 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_INDEX_H
-#define YCASH_YDOLLAR_INDEX_H
+#ifndef YCASH_YELLOWBACK_INDEX_H
+#define YCASH_YELLOWBACK_INDEX_H
 
 #include "fs.h"
 #include "sync.h"
 #include "validationinterface.h"
-#include "ydollar/db.h"
-#include "ydollar/params.h"
-#include "ydollar/view.h"
+#include "yellowback/db.h"
+#include "yellowback/params.h"
+#include "yellowback/view.h"
 
 #include <memory>
 #include <optional>
 #include <string>
 
 /**
- * The YDollar index: a CValidationInterface subscriber that applies every
+ * The Yellowback index: a CValidationInterface subscriber that applies every
  * connected block and undoes every disconnected block on the wallet
  * notifier thread (plan D7, §4.3). Zero lines in main.cpp.
  *
- * Lock order (B15): cs_main -> cs_wallet -> cs_ydollar. The ChainTip handler
+ * Lock order (B15): cs_main -> cs_wallet -> cs_yellowback. The ChainTip handler
  * runs on ThreadNotifyWallets, which must not take cs_main; it takes only
- * cs_ydollar. RPCs take cs_main (and cs_wallet) first, then cs_ydollar.
+ * cs_yellowback. RPCs take cs_main (and cs_wallet) first, then cs_yellowback.
  *
  * Every handler is wrapped in try/catch: on any exception the index logs,
  * marks itself unhealthy and returns (the notifier does not wrap block
- * callbacks, §8.3). The node never fails a block because of YDollar.
+ * callbacks, §8.3). The node never fails a block because of Yellowback.
  */
-namespace ydollar {
+namespace yellowback {
 
 /** Undo records older than this many blocks below the tip are pruned (B10). */
 static const int UNDO_KEEP = 1000;
 
-class YDollarIndex final : public CValidationInterface
+class YellowbackIndex final : public CValidationInterface
 {
 public:
-    YDollarIndex(const Params& params, const fs::path& dir, size_t cacheSize, bool fWipe);
-    ~YDollarIndex();
+    YellowbackIndex(const Params& params, const fs::path& dir, size_t cacheSize, bool fWipe);
+    ~YellowbackIndex();
 
     /**
      * Bring the database in line with chainActive at startup: undo while the
@@ -54,18 +54,18 @@ public:
     /** Commit anything pending and fsync. */
     void Flush(bool fSync);
 
-    mutable CCriticalSection cs_ydollar;
+    mutable CCriticalSection cs_yellowback;
 
     const Params& GetParams() const { return params; }
     bool IsHealthy() const { return healthy; }
     std::string UnhealthyReason() const { return unhealthyReason; }
     bool IsStopped() const { return stopped; }
 
-    /** The stored tip (cs_ydollar). */
+    /** The stored tip (cs_yellowback). */
     std::optional<TipRecord> GetTip() const;
-    /** True iff the stored tip is chainActive.Tip() (cs_main and cs_ydollar). */
+    /** True iff the stored tip is chainActive.Tip() (cs_main and cs_yellowback). */
     bool IsSynced() const;
-    /** The state view (cs_ydollar). Callers other than the handlers must not write to it; dry runs go through an OverlayStateView. */
+    /** The state view (cs_yellowback). Callers other than the handlers must not write to it; dry runs go through an OverlayStateView. */
     StateView& View() const { return *db; }
     StateView& MutableView() { return *db; }
     uint256 GetStateHash() const;
@@ -85,26 +85,26 @@ private:
     void HandleDisconnect(const CBlockIndex* pindex);
 
     Params params;
-    std::unique_ptr<YDollarDB> db;
+    std::unique_ptr<YellowbackDB> db;
     bool healthy;
     std::string unhealthyReason;
     bool stopped;
 };
 
-/** The node's index, or nullptr when -ydollar is off. */
-extern YDollarIndex* g_ydollar;
-/** -ydollarfee (>= DEFAULT_YD_FEE, C16) and -ydollarmintlag (C4). */
-extern CAmount g_ydollarFee;
-extern int g_ydollarMintLag;
+/** The node's index, or nullptr when -yellowback is off. */
+extern YellowbackIndex* g_yellowback;
+/** -yellowbackfee (>= DEFAULT_YELLOWBACK_FEE, C16) and -yellowbackmintlag (C4). */
+extern CAmount g_yellowbackFee;
+extern int g_yellowbackMintLag;
 
 /**
  * Build the parameters for the running network from configuration
- * (regtest genesis arguments, -ydollarsupplycap). Returns an error string
+ * (regtest genesis arguments, -yellowbacksupplycap). Returns an error string
  * on a misconfiguration (C2: the three regtest arguments must appear
  * together and only on regtest).
  */
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_INDEX_H
+#endif // YCASH_YELLOWBACK_INDEX_H

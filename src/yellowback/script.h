@@ -2,18 +2,18 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_SCRIPT_H
-#define YCASH_YDOLLAR_SCRIPT_H
+#ifndef YCASH_YELLOWBACK_SCRIPT_H
+#define YCASH_YELLOWBACK_SCRIPT_H
 
 #include "pubkey.h"
 #include "script/script.h"
 #include "script/standard.h"
-#include "ydollar/params.h"
+#include "yellowback/params.h"
 
 #include <vector>
 
 /**
- * YDollar scripts (plan §3.3). Existing opcodes only.
+ * Yellowback scripts (plan §3.3). Existing opcodes only.
  *
  * Roster script (also the anchor's redeem script):
  *     <k> <Q1> … <Qn> <n> OP_CHECKMULTISIG
@@ -31,7 +31,7 @@
  * spare opcode semantics (mapping.md §2), so the burn-on-release invariant is
  * carried by the federation co-signature instead (plan D3).
  */
-namespace ydollar {
+namespace yellowback {
 
 typedef std::vector<unsigned char> valtype;
 
@@ -96,6 +96,6 @@ bool ExtractRedeemScript(const CScript& scriptSig, CScript& redeemScript);
 /** Serialised size of the vault script for n keys and a lockHeight push of `heightPushBytes` bytes (D3 arithmetic). */
 size_t VaultScriptSize(unsigned int n, size_t heightPushBytes);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_SCRIPT_H
+#endif // YCASH_YELLOWBACK_SCRIPT_H

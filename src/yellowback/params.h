@@ -2,8 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_PARAMS_H
-#define YCASH_YDOLLAR_PARAMS_H
+#ifndef YCASH_YELLOWBACK_PARAMS_H
+#define YCASH_YELLOWBACK_PARAMS_H
 
 #include "amount.h"
 #include "primitives/transaction.h"
@@ -14,27 +14,27 @@
 #include <vector>
 
 /**
- * YDollar: a federated, over-collateralised USD stablecoin overlay on Ycash.
+ * Yellowback: a federated, over-collateralised USD stablecoin overlay on Ycash.
  *
  * Everything in this namespace is a Tier-0 overlay: no consensus rule, no
  * policy rule, no opcode and no network upgrade. The protocol is specified in
- * the workspace document docs/spec/ydollar-adaptation-spec.md (plan §3); the
+ * the workspace document docs/spec/yellowback-adaptation-spec.md (plan §3); the
  * constants below are §3.1. Rule identifiers in comments (MINT-2, XFER-1, …)
  * refer to that document.
  *
  * DigiByte's DigiDollar (ref/digibyte/src/consensus/digidollar.h) is the
  * behavioural reference for the ratios, tiers and protection tables.
  */
-namespace ydollar {
+namespace yellowback {
 
-/** YDollar amounts are integer US cents; 100 == $1.00. */
+/** Yellowback amounts are integer US cents; 100 == $1.00. */
 typedef int64_t Cents;
 /** Prices are integer micro-USD per YEC; 1,000,000 == $1.00. */
 typedef int64_t MicroUsd;
 
-/** Payload magic ("YD") and version (§3.2). */
+/** Payload magic ("YB") and version (§3.2). */
 static const unsigned char PAYLOAD_MAGIC_0 = 0x59;
-static const unsigned char PAYLOAD_MAGIC_1 = 0x44;
+static const unsigned char PAYLOAD_MAGIC_1 = 0x42;
 static const unsigned char PAYLOAD_VERSION = 0x01;
 /** Largest payload: Ycash nMaxDatacarrierBytes (83) minus OP_RETURN and the push opcode. */
 static const size_t MAX_PAYLOAD = 80;
@@ -61,10 +61,10 @@ static const int MAX_MINT_EVAL_LAG = 36;
 /** Co-signer slack on RED-8 (plan E2). */
 static const int RED_SKEW = 2;
 
-/** YEC carried by every YDollar output: 10,000 zat, >= 100x the dust floor. */
+/** YEC carried by every Yellowback output: 10,000 zat, >= 100x the dust floor. */
 static const CAmount TOKEN_VALUE = 10000;
-/** Flat fee; equals policy DEFAULT_FEE (policy/fees.h). -ydollarfee may not go below it (C16). */
-static const CAmount DEFAULT_YD_FEE = 1000;
+/** Flat fee; equals policy DEFAULT_FEE (policy/fees.h). -yellowbackfee may not go below it (C16). */
+static const CAmount DEFAULT_YELLOWBACK_FEE = 1000;
 
 /** Health is a percentage capped as DigiByte does. */
 static const int HEALTH_CAP = 30000;
@@ -86,7 +86,7 @@ struct Params
     COutPoint genesisAnchor;             //!< the federation's first anchor UTXO
     CScript genesisRosterScript;         //!< k-of-n CHECKMULTISIG redeem script of that anchor
 
-    std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of YDollar addresses (D10)
+    std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of Yellowback addresses (D10)
 
     Cents minMint;                       //!< MINT-2
     Cents maxMint;                       //!< MINT-2
@@ -114,14 +114,14 @@ const Params& TestParams();
 
 /**
  * Regtest parameters. The three genesis values are supplied by the test through
- * -ydollarstartheight / -ydollargenesisanchor / -ydollargenesisroster (plan C2);
- * supplyCap 0 means no cap (-ydollarsupplycap, plan G5).
+ * -yellowbackstartheight / -yellowbackgenesisanchor / -yellowbackgenesisroster (plan C2);
+ * supplyCap 0 means no cap (-yellowbacksupplycap, plan G5).
  */
 Params RegtestParams(int startHeight, const COutPoint& genesisAnchor, const CScript& genesisRosterScript, Cents supplyCap = 0);
 
 /** Parameters for a network id as returned by CChainParams::NetworkIDString(); regtest returns unconfigured defaults. */
 const Params& ParamsForNetwork(const std::string& networkId);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_PARAMS_H
+#endif // YCASH_YELLOWBACK_PARAMS_H

@@ -2,16 +2,16 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/db.h"
+#include "yellowback/db.h"
 
-namespace ydollar {
+namespace yellowback {
 
-YDollarDB::YDollarDB(const fs::path& path, size_t nCacheSize, bool fMemory, bool fWipe)
+YellowbackDB::YellowbackDB(const fs::path& path, size_t nCacheSize, bool fMemory, bool fWipe)
     : db(new CDBWrapper(path, nCacheSize, fMemory, fWipe))
 {
 }
 
-bool YDollarDB::Read(const std::string& key, std::string& value) const
+bool YellowbackDB::Read(const std::string& key, std::string& value) const
 {
     auto it = pending.find(key);
     if (it != pending.end()) {
@@ -22,10 +22,10 @@ bool YDollarDB::Read(const std::string& key, std::string& value) const
     return db->Read(RawKey(key), value);
 }
 
-void YDollarDB::Write(const std::string& key, const std::string& value) { pending[key] = value; }
-void YDollarDB::Erase(const std::string& key) { pending[key] = std::nullopt; }
+void YellowbackDB::Write(const std::string& key, const std::string& value) { pending[key] = value; }
+void YellowbackDB::Erase(const std::string& key) { pending[key] = std::nullopt; }
 
-void YDollarDB::Iterate(const std::string& prefix, const std::function<bool(const std::string&, const std::string&)>& fn) const
+void YellowbackDB::Iterate(const std::string& prefix, const std::function<bool(const std::string&, const std::string&)>& fn) const
 {
     std::map<std::string, std::string> merged;
     {
@@ -49,7 +49,7 @@ void YDollarDB::Iterate(const std::string& prefix, const std::function<bool(cons
     }
 }
 
-bool YDollarDB::Commit(bool fSync)
+bool YellowbackDB::Commit(bool fSync)
 {
     if (pending.empty()) return fSync ? db->Sync() : true;
     CDBBatch batch(*db);
@@ -62,12 +62,12 @@ bool YDollarDB::Commit(bool fSync)
     return ok;
 }
 
-bool YDollarDB::Sync()
+bool YellowbackDB::Sync()
 {
     return db->Sync();
 }
 
-bool YDollarDB::Wipe()
+bool YellowbackDB::Wipe()
 {
     pending.clear();
     std::vector<std::string> keys;
@@ -84,4 +84,4 @@ bool YDollarDB::Wipe()
     return db->WriteBatch(batch, true);
 }
 
-} // namespace ydollar
+} // namespace yellowback

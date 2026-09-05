@@ -2,11 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/script.h"
+#include "yellowback/script.h"
 
 #include <algorithm>
 
-namespace ydollar {
+namespace yellowback {
 
 namespace {
 
@@ -208,4 +208,4 @@ size_t VaultScriptSize(unsigned int n, size_t heightPushBytes)
     return (1 + heightPushBytes) + 1 + 1 + 34 + 1 + 1 + 34 * (size_t)n + 1 + 1;
 }
 
-} // namespace ydollar
+} // namespace yellowback

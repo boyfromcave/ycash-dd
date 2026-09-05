@@ -2,8 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/address.h"
-#include "ydollar/params.h"
+#include "yellowback/address.h"
+#include "yellowback/params.h"
 
 #include "base58.h"
 #include "key.h"
@@ -12,9 +12,9 @@
 
 #include <boost/test/unit_test.hpp>
 
-using namespace ydollar;
+using namespace yellowback;
 
-BOOST_FIXTURE_TEST_SUITE(ydollar_address_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(yellowback_address_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
 {
@@ -35,7 +35,7 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
         std::string m = EncodeAddress(id, main);
         std::string t = EncodeAddress(id, test);
         std::string r = EncodeAddress(id, regtest);
-        BOOST_CHECK_EQUAL(m.substr(0, 2), "yd");
+        BOOST_CHECK_EQUAL(m.substr(0, 2), "ye");
         BOOST_CHECK_EQUAL(t.substr(0, 2), "yt");
         BOOST_CHECK_EQUAL(r.substr(0, 2), "yr");
         BOOST_CHECK_EQUAL(m.size(), 35u);
@@ -64,8 +64,8 @@ BOOST_AUTO_TEST_CASE(rejects_garbage)
     const Params& main = MainParams();
     CKeyID id;
     BOOST_CHECK(!DecodeAddress("", main, id));
-    BOOST_CHECK(!DecodeAddress("yd", main, id));
-    // A Ycash transparent address (s1…) is not a YDollar address.
+    BOOST_CHECK(!DecodeAddress("ye", main, id));
+    // A Ycash transparent address (s1…) is not a Yellowback address.
     BOOST_CHECK(!DecodeAddress("s1RyNzGjPzkgc7jP6uvjJx8tmv7gY9dvRbP", main, id));
     // Checksum damage.
     CKey key;

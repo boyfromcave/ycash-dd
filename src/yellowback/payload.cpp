@@ -2,13 +2,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/payload.h"
+#include "yellowback/payload.h"
 
 #include "script/script.h"
 
 #include <set>
 
-namespace ydollar {
+namespace yellowback {
 
 namespace {
 
@@ -222,7 +222,7 @@ bool DecodePayload(const std::vector<unsigned char>& data, Payload& out)
         break;
     }
     default:
-        return false; // unknown type: forward-compatibility rule, non-YDollar
+        return false; // unknown type: forward-compatibility rule, non-Yellowback
     }
     if (!r.AtEnd()) return false;
     out = p;
@@ -255,7 +255,7 @@ std::optional<unsigned int> FindOpReturn(const CTransaction& tx)
     for (unsigned int i = 0; i < tx.vout.size(); i++) {
         const CScript& s = tx.vout[i].scriptPubKey;
         if (s.size() >= 1 && s[0] == OP_RETURN) {
-            if (found.has_value()) return std::nullopt; // more than one => non-YDollar
+            if (found.has_value()) return std::nullopt; // more than one => non-Yellowback
             found = i;
         }
     }
@@ -289,4 +289,4 @@ const char* PayloadTypeName(PayloadType type)
     return "unknown";
 }
 
-} // namespace ydollar
+} // namespace yellowback

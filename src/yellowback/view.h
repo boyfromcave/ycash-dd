@@ -2,8 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#ifndef YCASH_YDOLLAR_VIEW_H
-#define YCASH_YDOLLAR_VIEW_H
+#ifndef YCASH_YELLOWBACK_VIEW_H
+#define YCASH_YELLOWBACK_VIEW_H
 
 #include "amount.h"
 #include "primitives/transaction.h"
@@ -11,7 +11,7 @@
 #include "script/script.h"
 #include "serialize.h"
 #include "uint256.h"
-#include "ydollar/params.h"
+#include "yellowback/params.h"
 
 #include <functional>
 #include <map>
@@ -20,7 +20,7 @@
 #include <vector>
 
 /**
- * The YDollar state view (plan §3.5, D19): an ordered key/value store with
+ * The Yellowback state view (plan §3.5, D19): an ordered key/value store with
  * the per-table record types on top. The state machine in state.cpp reads
  * and writes only through StateView, so it runs identically over the
  * in-memory view (unit tests, dry runs) and the LevelDB view (db.cpp).
@@ -40,7 +40,7 @@
  *   O                     Volatility
  *   U<blockhash>          Undo (not part of the state hash)
  */
-namespace ydollar {
+namespace yellowback {
 
 static const uint32_t SCHEMA_VERSION = 1;
 
@@ -246,8 +246,8 @@ struct TxLogRecord
     int32_t height;
     uint8_t type;                //!< PayloadType, or 0 for no (well-formed) payload
     std::string verdict;         //!< stable reason string (§3.7 / Phase 2 list)
-    int64_t ydIn;
-    int64_t ydOut;               //!< cents assigned (XFER) or minted (MINT)
+    int64_t yedIn;
+    int64_t yedOut;               //!< cents assigned (XFER) or minted (MINT)
     int64_t burned;
     std::vector<AssignedOutput> assigned;
     std::vector<AssignedOutput> spentTokens;   //!< Tokens consumed by this tx (scriptPubKey kept for wallet filtering)
@@ -255,7 +255,7 @@ struct TxLogRecord
     bool anchorSpend;
     bool priceRecorded;
 
-    TxLogRecord() : height(0), type(0), ydIn(0), ydOut(0), burned(0), anchorSpend(false), priceRecorded(false) {}
+    TxLogRecord() : height(0), type(0), yedIn(0), yedOut(0), burned(0), anchorSpend(false), priceRecorded(false) {}
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
@@ -263,8 +263,8 @@ struct TxLogRecord
         READWRITE(height);
         READWRITE(type);
         READWRITE(verdict);
-        READWRITE(ydIn);
-        READWRITE(ydOut);
+        READWRITE(yedIn);
+        READWRITE(yedOut);
         READWRITE(burned);
         READWRITE(assigned);
         READWRITE(spentTokens);
@@ -444,6 +444,6 @@ private:
 /** SHA-256 over every (key, value) in key order, excluding undo records. */
 uint256 StateHash(const StateView& view);
 
-} // namespace ydollar
+} // namespace yellowback
 
-#endif // YCASH_YDOLLAR_VIEW_H
+#endif // YCASH_YELLOWBACK_VIEW_H

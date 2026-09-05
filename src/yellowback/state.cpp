@@ -2,15 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/state.h"
+#include "yellowback/state.h"
 
-#include "ydollar/math.h"
-#include "ydollar/script.h"
+#include "yellowback/math.h"
+#include "yellowback/script.h"
 
-namespace ydollar {
+namespace yellowback {
 
 namespace verdict {
-const char* const NON_YDOLLAR = "non-ydollar";
+const char* const NON_YELLOWBACK = "non-yellowback";
 const char* const MINT_OK = "mint-registered";
 const char* const TRANSFER_OK = "transfer-ok";
 const char* const REDEEM_OK = "redeem-ok";
@@ -19,8 +19,8 @@ const char* const PRICE_NOT_ANCHOR = "price-not-anchor-spend";
 const char* const PRICE_ROTATION = "price-rotation";
 const char* const PRICE_BAD_RANGE = "bad-oracle-price-range";
 const char* const PRICE_SHIELDED = "price-shielded";
-const char* const SHIELDED = "yd-shielded";
-const char* const COINBASE = "yd-coinbase";
+const char* const SHIELDED = "yed-shielded";
+const char* const COINBASE = "yed-coinbase";
 const char* const MINT_NO_VAULT = "mint-invalid-no-vault";
 const char* const BAD_MINT_TIER = "bad-mint-tier";
 const char* const BAD_MINT_AMOUNT = "bad-mint-amount";
@@ -37,7 +37,7 @@ const char* const MINT_FROZEN = "mint-frozen-volatility";
 const char* const BAD_MINT_COLLATERAL = "bad-mint-collateral";
 const char* const MINT_SUPPLY_CAP = "mint-supply-cap";
 const char* const BAD_MINT_TOKEN_OUTPUT = "bad-mint-token-output";
-const char* const XFER_NO_INPUT = "xfer-no-ydollar-input";
+const char* const XFER_NO_INPUT = "xfer-no-yellowback-input";
 const char* const BAD_XFER_AMOUNT = "bad-xfer-amount";
 const char* const XFER_OVER_ASSIGNED = "xfer-over-assigned";
 } // namespace verdict
@@ -131,7 +131,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
 {
     TxLogRecord log;
     log.height = height;
-    log.verdict = verdict::NON_YDOLLAR;
+    log.verdict = verdict::NON_YELLOWBACK;
     relevant = false;
 
     const uint256 txid = tx.GetHash();
@@ -141,13 +141,13 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
     // ---- inputs (IN-1, IN-2, PRICE-1 detection)
     AnchorRecord anchor = st.GetAnchor();
     int anchorInput = -1;
-    Cents ydIn = 0;
+    Cents yedIn = 0;
     std::vector<std::pair<COutPoint, VaultRecord>> closing;
     if (!coinbase) {
         for (size_t i = 0; i < tx.vin.size(); i++) {
             const COutPoint& prev = tx.vin[i].prevout;
             if (auto tok = st.GetToken(prev)) {
-                ydIn += tok->cents;
+                yedIn += tok->cents;
                 AssignedOutput spent;
                 spent.outpoint = prev;
                 spent.cents = tok->cents;
@@ -168,7 +168,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
             }
         }
     }
-    log.ydIn = ydIn;
+    log.yedIn = yedIn;
 
     // IN-2: close vaults (before outputs; errBps from the previous block's snapshot, F1)
     if (!closing.empty()) {
@@ -197,7 +197,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
 
     // ---- payload / outputs
     std::optional<FoundPayload> fp = FindPayload(tx);
-    Cents ydOut = 0;      // cents assigned to outputs (XFER)
+    Cents yedOut = 0;      // cents assigned to outputs (XFER)
     Cents minted = 0;     // cents created (MINT)
     if (fp.has_value()) {
         relevant = true;
@@ -246,7 +246,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
             }
         } else if (p.type == PayloadType::TRANSFER || p.type == PayloadType::REDEEM) {
             const char* r = nullptr;
-            if (ydIn <= 0) {
+            if (yedIn <= 0) {
                 r = verdict::XFER_NO_INPUT;                                    // XFER-3
             } else {
                 for (const Assignment& a : p.assignments) {                    // XFER-1
@@ -255,7 +255,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
                         break;
                     }
                 }
-                if (!r && p.AssignedCents() > ydIn) r = verdict::XFER_OVER_ASSIGNED; // XFER-2
+                if (!r && p.AssignedCents() > yedIn) r = verdict::XFER_OVER_ASSIGNED; // XFER-2
             }
             if (r) {
                 log.verdict = r;                                               // everything burns (D18)
@@ -273,7 +273,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
                     ao.cents = a.cents;
                     ao.scriptPubKey = tok.scriptPubKey;
                     log.assigned.push_back(ao);
-                    ydOut += a.cents;
+                    yedOut += a.cents;
                 }
                 log.verdict = (p.type == PayloadType::TRANSFER) ? verdict::TRANSFER_OK : verdict::REDEEM_OK;
             }
@@ -332,8 +332,8 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
     }
 
     // ---- IN-3
-    const Cents burned = ydIn - ydOut;
-    log.ydOut = fp.has_value() && fp->payload.type == PayloadType::MINT ? minted : ydOut;
+    const Cents burned = yedIn - yedOut;
+    log.yedOut = fp.has_value() && fp->payload.type == PayloadType::MINT ? minted : yedOut;
     log.burned = burned;
     if (burned != 0 || !closing.empty()) {
         if (burned != 0) {
@@ -437,4 +437,4 @@ void UndoBlock(StateView& view, const UndoRecord& undo)
     }
 }
 
-} // namespace ydollar
+} // namespace yellowback

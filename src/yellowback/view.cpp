@@ -2,13 +2,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/view.h"
+#include "yellowback/view.h"
 
 #include "clientversion.h"
 #include "crypto/sha256.h"
 #include "streams.h"
 
-namespace ydollar {
+namespace yellowback {
 
 // ---------------------------------------------------------------------------
 // MemoryStateView
@@ -307,4 +307,4 @@ uint256 StateHash(const StateView& view)
     return out;
 }
 
-} // namespace ydollar
+} // namespace yellowback

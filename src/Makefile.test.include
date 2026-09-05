@@ -111,11 +111,11 @@ BITCOIN_TESTS =\
   test/univalue_tests.cpp \
   test/util_tests.cpp \
   test/sha256compress_tests.cpp \
-  test/ydollar_address_tests.cpp \
-  test/ydollar_math_tests.cpp \
-  test/ydollar_payload_tests.cpp \
-  test/ydollar_script_tests.cpp \
-  test/ydollar_state_tests.cpp
+  test/yellowback_address_tests.cpp \
+  test/yellowback_math_tests.cpp \
+  test/yellowback_payload_tests.cpp \
+  test/yellowback_script_tests.cpp \
+  test/yellowback_state_tests.cpp
 
 if ENABLE_WALLET
 BITCOIN_TESTS += \

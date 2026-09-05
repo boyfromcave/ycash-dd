@@ -2,11 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/address.h"
+#include "yellowback/address.h"
 
 #include "base58.h"
 
-namespace ydollar {
+namespace yellowback {
 
 std::string EncodeAddress(const CKeyID& keyID, const Params& params)
 {
@@ -32,4 +32,4 @@ bool IsValidAddress(const std::string& str, const Params& params)
     return DecodeAddress(str, params, id);
 }
 
-} // namespace ydollar
+} // namespace yellowback

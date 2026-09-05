@@ -2,11 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/params.h"
+#include "yellowback/params.h"
 
 #include <stdexcept>
 
-namespace ydollar {
+namespace yellowback {
 
 namespace {
 
@@ -52,7 +52,7 @@ const Params& MainParams()
         Params m;
         m.network = "main";
         SetCommon(m);
-        m.addressVersion = { 0x1F, 0xE2 };   // renders "yd…" (D10)
+        m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
         m.supplyCap = 100000000;             // $1,000,000 v1 cap
         // Genesis anchor: filled by the mainnet key ceremony (plan Phase 8).
         m.startHeight = 0;
@@ -104,7 +104,7 @@ const Params& ParamsForNetwork(const std::string& networkId)
         static Params r = RegtestParams(0, COutPoint(), CScript(), 0);
         return r;
     }
-    throw std::runtime_error("ydollar: unknown network " + networkId);
+    throw std::runtime_error("yellowback: unknown network " + networkId);
 }
 
-} // namespace ydollar
+} // namespace yellowback

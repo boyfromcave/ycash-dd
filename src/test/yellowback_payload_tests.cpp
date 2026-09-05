@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/payload.h"
+#include "yellowback/payload.h"
 
 #include "key.h"
 #include "primitives/transaction.h"
@@ -12,7 +12,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-using namespace ydollar;
+using namespace yellowback;
 
 namespace {
 
@@ -38,7 +38,7 @@ CMutableTransaction TxWithOutputs(size_t n, const CScript& opret, size_t opretIn
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(ydollar_payload_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(yellowback_payload_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(roundtrip_table)
 {
@@ -64,7 +64,7 @@ BOOST_AUTO_TEST_CASE(roundtrip_table)
         BOOST_CHECK_EQUAL(enc.size(), c.second);
         BOOST_REQUIRE(!enc.empty());
         BOOST_CHECK_EQUAL(enc[0], 0x59);
-        BOOST_CHECK_EQUAL(enc[1], 0x44);
+        BOOST_CHECK_EQUAL(enc[1], 0x42);
         BOOST_CHECK_EQUAL(enc[2], 0x01);
         Payload dec;
         BOOST_REQUIRE(DecodePayload(enc, dec));
@@ -78,14 +78,14 @@ BOOST_AUTO_TEST_CASE(fixed_width_little_endian)
     CPubKey owner = TestKey();
     std::vector<unsigned char> enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, owner));
     BOOST_REQUIRE_EQUAL(enc.size(), 50u);
-    BOOST_CHECK_EQUAL(HexStr(enc.begin(), enc.begin() + 17), "594401010204030201" "0d0c0b0a" "44332211");
+    BOOST_CHECK_EQUAL(HexStr(enc.begin(), enc.begin() + 17), "594201010204030201" "0d0c0b0a" "44332211");
     BOOST_CHECK(std::equal(owner.begin(), owner.end(), enc.begin() + 17));
 
     enc = EncodePayload(Payload::Price(0x0102030405060708ULL));
-    BOOST_CHECK_EQUAL(HexStr(enc), "594401100807060504030201");
+    BOOST_CHECK_EQUAL(HexStr(enc), "594201100807060504030201");
 
     enc = EncodePayload(Payload::Transfer({ Assignment(3, 0x00000100) }));
-    BOOST_CHECK_EQUAL(HexStr(enc), "5944010201" "03" "00010000");
+    BOOST_CHECK_EQUAL(HexStr(enc), "5942010201" "03" "00010000");
 }
 
 BOOST_AUTO_TEST_CASE(malformed_cases)
@@ -95,45 +95,45 @@ BOOST_AUTO_TEST_CASE(malformed_cases)
     Payload p;
 
     // Too short, too long.
-    BOOST_CHECK(!DecodePayload(Hex("594401"), p));
+    BOOST_CHECK(!DecodePayload(Hex("594201"), p));
     BOOST_CHECK(!DecodePayload(std::vector<unsigned char>(81, 0), p));
     // Bad magic / version / type.
     BOOST_CHECK(!DecodePayload(Hex("5945011000000000000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("594402100100000000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("594401040100000000000000"), p));   // unknown type 0x04 (forward-compat)
-    BOOST_CHECK(!DecodePayload(Hex("5944011100000000000000000"), p));  // unknown type 0x11
+    BOOST_CHECK(!DecodePayload(Hex("594202100100000000000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("594201040100000000000000"), p));   // unknown type 0x04 (forward-compat)
+    BOOST_CHECK(!DecodePayload(Hex("5942011100000000000000000"), p));  // unknown type 0x11
     // PRICE with a short body / trailing byte.
-    BOOST_CHECK(!DecodePayload(Hex("59440110010000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("59440110010000000000000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420110010000000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420110010000000000000000"), p));
     // MINT: short, long, uncompressed key prefix, invalid key prefix.
-    BOOST_CHECK(!DecodePayload(Hex("59440101" "00" "10270000" "e8030000" "b6030000") , p));
-    BOOST_CHECK(!DecodePayload(Hex("59440101" "00" "10270000" "e8030000" "b6030000" + keyhex + "00"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000") , p));
+    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + keyhex + "00"), p));
     {
         std::string bad = keyhex; bad[0] = '0'; bad[1] = '4';
-        BOOST_CHECK(!DecodePayload(Hex("59440101" "00" "10270000" "e8030000" "b6030000" + bad), p));
+        BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + bad), p));
         bad[1] = '5';
-        BOOST_CHECK(!DecodePayload(Hex("59440101" "00" "10270000" "e8030000" "b6030000" + bad), p));
+        BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + bad), p));
     }
-    BOOST_CHECK(DecodePayload(Hex("59440101" "00" "10270000" "e8030000" "b6030000" + keyhex), p));
+    BOOST_CHECK(DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + keyhex), p));
     BOOST_CHECK_EQUAL(p.cents, 10000u);
     BOOST_CHECK_EQUAL(p.lockHeight, 1000u);
     BOOST_CHECK_EQUAL(p.evalHeight, 950u);
     // TRANSFER: count/body mismatch, count > 15, cents == 0, duplicate vout.
-    BOOST_CHECK(!DecodePayload(Hex("5944010202" "0164000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5944010201" "0164000000" "00"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5944010200" "00"), p));
+    BOOST_CHECK(!DecodePayload(Hex("5942010202" "0164000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("5942010201" "0164000000" "00"), p));
+    BOOST_CHECK(!DecodePayload(Hex("5942010200" "00"), p));
     {
-        std::vector<unsigned char> sixteen = Hex("5944010210");
+        std::vector<unsigned char> sixteen = Hex("5942010210");
         for (int i = 0; i < 16; i++) { sixteen.push_back(i); sixteen.push_back(1); sixteen.push_back(0); sixteen.push_back(0); sixteen.push_back(0); }
         BOOST_CHECK_EQUAL(sixteen.size(), 85u);
         BOOST_CHECK(!DecodePayload(sixteen, p));
     }
-    BOOST_CHECK(!DecodePayload(Hex("5944010201" "0100000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5944010202" "0164000000" "0164000000"), p));
-    BOOST_CHECK(DecodePayload(Hex("5944010202" "0164000000" "0264000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("5942010201" "0100000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("5942010202" "0164000000" "0164000000"), p));
+    BOOST_CHECK(DecodePayload(Hex("5942010202" "0164000000" "0264000000"), p));
     BOOST_CHECK_EQUAL(p.AssignedCents(), 200);
     // REDEEM with count 0 is valid and self-describing.
-    BOOST_CHECK(DecodePayload(Hex("5944010300"), p));
+    BOOST_CHECK(DecodePayload(Hex("5942010300"), p));
     BOOST_CHECK(p.type == PayloadType::REDEEM);
     BOOST_CHECK(p.assignments.empty());
 
@@ -193,7 +193,7 @@ BOOST_AUTO_TEST_CASE(find_payload_in_transaction)
     BOOST_CHECK(!FindOpReturn(CTransaction(plain)).has_value());
     BOOST_CHECK(!FindPayload(CTransaction(plain)).has_value());
 
-    // Two OP_RETURN outputs: non-YDollar regardless of contents (A4).
+    // Two OP_RETURN outputs: non-Yellowback regardless of contents (A4).
     CMutableTransaction two = TxWithOutputs(3, opret, 2);
     two.vout[1].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(4, 1);
     BOOST_CHECK(!FindOpReturn(CTransaction(two)).has_value());
@@ -201,13 +201,13 @@ BOOST_AUTO_TEST_CASE(find_payload_in_transaction)
 
     // Assigned vout out of range.
     CMutableTransaction shortTx = TxWithOutputs(2, opret, 1);
-    // vout[1] is the OP_RETURN itself here: assignment (1, 200) points at it => non-YDollar.
+    // vout[1] is the OP_RETURN itself here: assignment (1, 200) points at it => non-Yellowback.
     BOOST_CHECK(!FindPayload(CTransaction(shortTx)).has_value());
     CScript opret3 = PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100), Assignment(5, 200) })));
     CMutableTransaction oor = TxWithOutputs(3, opret3, 2);
     BOOST_CHECK(!FindPayload(CTransaction(oor)).has_value());
 
-    // Malformed payload in a well-shaped OP_RETURN: non-YDollar, but FindOpReturn still sees the output.
+    // Malformed payload in a well-shaped OP_RETURN: non-Yellowback, but FindOpReturn still sees the output.
     CMutableTransaction bad = TxWithOutputs(3, CScript() << OP_RETURN << std::vector<unsigned char>(10, 0xAA), 2);
     BOOST_CHECK(FindOpReturn(CTransaction(bad)).has_value());
     BOOST_CHECK(!FindPayload(CTransaction(bad)).has_value());

@@ -2,9 +2,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-#include "ydollar/params.h"
-#include "ydollar/payload.h"
-#include "ydollar/script.h"
+#include "yellowback/params.h"
+#include "yellowback/payload.h"
+#include "yellowback/script.h"
 
 #include "chainparams.h"
 #include "coins.h"
@@ -23,7 +23,7 @@
 
 #include <boost/test/unit_test.hpp>
 
-using namespace ydollar;
+using namespace yellowback;
 
 namespace {
 
@@ -64,7 +64,7 @@ CMutableTransaction SpendingTx(const CScript& vaultScript, uint32_t lockHeight, 
     mtx.nExpiryHeight = lockHeight + 40;
     mtx.nLockTime = nLockTime;
     mtx.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0), CScript(), 0xFFFFFFFE));
-    mtx.vout.push_back(CTxOut(vaultValue - DEFAULT_YD_FEE, GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 7))))));
+    mtx.vout.push_back(CTxOut(vaultValue - DEFAULT_YELLOWBACK_FEE, GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 7))))));
     return mtx;
 }
 
@@ -88,7 +88,7 @@ bool Verify(const CMutableTransaction& mtx, const CScript& scriptPubKey, CAmount
 
 } // namespace
 
-BOOST_FIXTURE_TEST_SUITE(ydollar_script_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(yellowback_script_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(roster_script_roundtrip)
 {
@@ -226,7 +226,7 @@ BOOST_AUTO_TEST_CASE(vault_scriptsig_roundtrip)
     BOOST_CHECK(vs == vault);
     BOOST_CHECK(sig.IsPushOnly());
 
-    // Owner-only (what yd_redeem produces before co-signing).
+    // Owner-only (what yed_redeem produces before co-signing).
     sig = BuildVaultScriptSig({}, o, vault);
     BOOST_REQUIRE(ParseVaultScriptSig(sig, q, os, vs));
     BOOST_CHECK(q.empty());
@@ -373,7 +373,7 @@ BOOST_AUTO_TEST_CASE(templates_are_standard)
     fund.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
     fund.nVersion = SAPLING_TX_VERSION;
     fund.vout.push_back(CTxOut(10 * COIN, userP2PKH));      // 0: YEC input for a mint
-    fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 1: a YDollar token output
+    fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 1: a Yellowback token output
     fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 2: another
     fund.vout.push_back(CTxOut(5 * COIN, vaultSpk));        // 3: a vault
     fund.vout.push_back(CTxOut(COIN, anchorSpk));           // 4: the anchor
@@ -405,7 +405,7 @@ BOOST_AUTO_TEST_CASE(templates_are_standard)
         mtx.vout.push_back(CTxOut(5 * COIN, vaultSpk));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, 1, ownerKey.GetPubKey())))));
-        mtx.vout.push_back(CTxOut(5 * COIN - TOKEN_VALUE - DEFAULT_YD_FEE, userP2PKH));
+        mtx.vout.push_back(CTxOut(5 * COIN - TOKEN_VALUE - DEFAULT_YELLOWBACK_FEE, userP2PKH));
         BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 0, 10 * COIN, SIGHASH_ALL, branchId));
         checkStandard(mtx, "MINT");
     }
@@ -434,7 +434,7 @@ BOOST_AUTO_TEST_CASE(templates_are_standard)
         CMutableTransaction mtx = newTx(lockHeight);
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3), CScript(), 0xFFFFFFFE));
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 1)));
-        mtx.vout.push_back(CTxOut(5 * COIN + TOKEN_VALUE - DEFAULT_YD_FEE - TOKEN_VALUE, userP2PKH));
+        mtx.vout.push_back(CTxOut(5 * COIN + TOKEN_VALUE - DEFAULT_YELLOWBACK_FEE - TOKEN_VALUE, userP2PKH));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem({ Assignment(1, 100) })))));
         valtype ownerSig = Sign(ownerKey, vault, mtx, 0, 5 * COIN, branchId);
@@ -455,7 +455,7 @@ BOOST_AUTO_TEST_CASE(templates_are_standard)
         CMutableTransaction mtx = newTx(0);
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 4)));
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 5)));
-        mtx.vout.push_back(CTxOut(COIN + COIN / 2 - DEFAULT_YD_FEE, anchorSpk));
+        mtx.vout.push_back(CTxOut(COIN + COIN / 2 - DEFAULT_YELLOWBACK_FEE, anchorSpk));
         mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price(50000)))));
         // Anchor: OP_0 <13 sigs> <rosterScript>, i.e. what signrawtransaction's combiner produces.
         std::vector<valtype> sigs;
