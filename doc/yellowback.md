@@ -24,7 +24,7 @@ guide and will grow with each phase.
 | 3 — wallet RPCs (mint, send, redeem, co-sign) | done |
 | 4 — federation coordinator (`contrib/yellowback/`) | done |
 | 5 — protections (DCA, ERR, volatility) | done |
-| 6 — hardening and review | not started |
+| 6 — hardening and review | in progress (fuzz targets, stress test, review package written; external review pending) |
 
 ## Enabling
 
@@ -38,6 +38,56 @@ options: `-reindex-yellowback` (wipe and rebuild the index), `-yellowbackfee=<za
 1000), `-yellowbackmintlag=<blocks>` (default 2), `-debug=yellowback`. Regtest additionally takes
 `-yellowbackstartheight`, `-yellowbackgenesisanchor`, `-yellowbackgenesisroster` (all three together) and
 `-yellowbacksupplycap`.
+
+## Using Yellowback from `ycash-cli`
+
+Every amount is in **cents** (`10000` = $100.00). The node must have caught its index up
+(`yed_getinfo` → `synced: true`, `healthy: true`) before any of these work.
+
+```
+ycash-cli yed_getinfo                       # index height, synced, healthy, anchor, roster index
+ycash-cli yed_getstats                      # supply, collateral, price, health, DCA, ERR, freeze
+ycash-cli yed_getprotectionstatus           # the three protection systems in one view
+ycash-cli yed_getnewaddress                 # a YED address (ye… on mainnet)
+ycash-cli yed_getbalance
+ycash-cli yed_estimatecollateral 10000 1    # YEC needed now to mint $100 at tier 1 (30 days)
+ycash-cli yed_mint 10000 1                  # mint; back up wallet.dat afterwards
+ycash-cli yed_listpositions                 # your vaults: status, unlock height, required burn, canRedeem
+ycash-cli yed_send ye… 2500                 # send $25.00
+ycash-cli yed_listtransactions
+```
+
+A mint locks YEC in a vault until the tier's unlock height. The collateral requirement is fixed at
+the moment you sign (it is evaluated at the index tip minus two blocks), so what `yed_mint` reports
+is what the vault holds. Minting is refused when the system health is below 100 % (ERR), while
+minting is frozen after a volatility breach, when no price is in effect, or when the supply cap
+has no room; `yed_getprotectionstatus.mintingAllowed` says which.
+
+Redeeming (getting the collateral back) burns YED equal to the mint (more during ERR) and needs
+the federation's co-signature. From the unlock height on:
+
+```
+contrib/yellowback/yellowback-redeem --rpc-url http://user:pass@127.0.0.1:8232 \
+    --vault <mint txid> --endpoints-file operators.txt
+```
+
+which runs `yed_redeem` on your node, collects `k` co-signatures from the operators' `/cosign`
+endpoints and submits through `yed_submitredeem`. Your node re-verifies the returned transaction
+before broadcasting it; the operators cannot change where the collateral goes. If the deadline (36
+blocks after `yed_redeem`) passes, the client aborts with `yed_abortredeem` and you start over.
+Without the client: `yed_redeem <txid>` gives you the hex, each operator's `yed_cosignredeem`
+adds a signature, and `yed_submitredeem <hex>` broadcasts.
+
+Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
+every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
+them by accident; `lockunspent true` on one of them removes that protection.
+
+## Rebuilding the index
+
+The index lives under `<datadir>/yellowback/` and is rebuilt from the blocks on disk when it is
+missing, when the node was reindexed, or on `-reindex-yellowback`. `yed_getinfo.healthy: false`
+names the reason and always means "restart with `-reindex-yellowback`". Every `yed_*` call except
+`yed_getinfo` refuses while the index is unhealthy or behind the chain tip.
 
 ## Trust statement
 

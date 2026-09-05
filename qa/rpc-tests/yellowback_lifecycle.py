@@ -317,6 +317,12 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         bogus.vin[0].scriptSig = CScript([b'', hex_str_to_bytes(sigs[1]), bytes(bogus_script)])
         assert_rpc_error("RED-7", nodes[2].yed_cosignredeem, tx_to_hex(bogus))
         assert_rpc_error("RED-1", nodes[2].yed_cosignredeem, signed['hex'])  # the transfer: vin[0] is no vault
+        # D1: an input that does not exist is refused before any policy call touches it (no assert, no crash).
+        phantom = tx_from_hex(red['hex'])
+        phantom.vin[1].prevout = COutPoint(int('ab' * 32, 16), 0)
+        assert_rpc_error("unknown or spent", nodes[2].yed_cosignredeem, tx_to_hex(phantom))
+        assert_equal(nodes[2].yed_getinfo()['healthy'], True)
+        nodes[2].yed_validaterawtransaction(tx_to_hex(phantom))  # the dry run only reads the index: no crash either
         # RED-3: a price crash raises the required burn above what the redemption burns.
         self.price(1000000)  # $1: 60 YEC backing $250 => 24 % health => errBps 8000 => 12,500 cents required
         self.mine(1)

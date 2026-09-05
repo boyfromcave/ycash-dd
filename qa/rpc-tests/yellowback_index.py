@@ -179,6 +179,15 @@ class YellowbackIndexTest(BitcoinTestFramework):
             assert_equal(log['dryRun'], False)
         assert_same_statehash(nodes)
 
+        print("A node without the roster script cannot complete the signature (checklist item 14)")
+        built = nodes[0].yed_createpricetx(50500, "")
+        partial = nodes[3].signrawtransaction(built['hex'])   # node 3 holds no roster key and never ran addmultisigaddress
+        assert_equal(partial['complete'], False)
+        assert_equal(nodes[0].signrawtransaction(built['hex'])['complete'], False)  # one of two
+        both = nodes[1].signrawtransaction(nodes[0].signrawtransaction(built['hex'])['hex'])
+        assert_equal(both['complete'], True)
+        # Not broadcast: the round continues below with a fresh transaction.
+
         print("Refill: a confirmed UTXO of the exact amount is absorbed whole into the anchor (C6)")
         nodes[0].sendtoaddress(nodes[0].getnewaddress(), Decimal('0.5'))
         nodes[0].generate(1)

@@ -81,6 +81,11 @@ public:
      */
     std::function<void(const CTransaction&)> onSyncTransaction;
     std::function<void()> onReconcile;
+    /** Test only: called at the start of every block application (fault injection for the exception boundary). */
+    std::function<void()> testBeforeApply;
+
+    /** Public wrappers for unit tests of the notifier-thread entry points. */
+    void TestChainTip(const CBlockIndex* pindex, const CBlock* pblock, bool connect);
 
 protected:
     void ChainTip(const CBlockIndex* pindex, const CBlock* pblock, std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added) override;
@@ -90,8 +95,8 @@ private:
     bool ApplyOne(const CBlock& block, int height, const uint256& hash, std::string& error);
     bool UndoOne(const uint256& hash, std::string& error);
     void Wipe(const std::string& why);
-    void HandleConnect(const CBlockIndex* pindex, const CBlock& block);
-    void HandleDisconnect(const CBlockIndex* pindex);
+    void ApplyConnected(const CBlockIndex* pindex, const CBlock& block);
+    void ApplyDisconnected(const CBlockIndex* pindex);
 
     Params params;
     std::unique_ptr<YellowbackDB> db;

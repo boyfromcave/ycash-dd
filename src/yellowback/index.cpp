@@ -75,6 +75,7 @@ void YellowbackIndex::Wipe(const std::string& why)
 
 bool YellowbackIndex::ApplyOne(const CBlock& block, int height, const uint256& hash, std::string& error)
 {
+    if (testBeforeApply) testBeforeApply();
     UndoRecord undo;
     std::optional<std::string> err = ApplyBlock(*db, params, block, height, hash, undo);
     if (err.has_value()) {
@@ -174,7 +175,7 @@ bool YellowbackIndex::SyncToChain()
     return true;
 }
 
-void YellowbackIndex::HandleConnect(const CBlockIndex* pindex, const CBlock& block)
+void YellowbackIndex::ApplyConnected(const CBlockIndex* pindex, const CBlock& block)
 {
     const int h = pindex->nHeight;
     if (h < params.startHeight) return;
@@ -204,7 +205,7 @@ void YellowbackIndex::HandleConnect(const CBlockIndex* pindex, const CBlock& blo
     if (!ApplyOne(block, h, pindex->GetBlockHash(), error)) SetUnhealthy(error);
 }
 
-void YellowbackIndex::HandleDisconnect(const CBlockIndex* pindex)
+void YellowbackIndex::ApplyDisconnected(const CBlockIndex* pindex)
 {
     const int h = pindex->nHeight;
     if (h < params.startHeight) return;
@@ -232,10 +233,10 @@ void YellowbackIndex::ChainTip(const CBlockIndex* pindex, const CBlock* pblock, 
                     SetUnhealthy("ChainTip connect without block data");
                     return;
                 }
-                HandleConnect(pindex, *pblock);
+                ApplyConnected(pindex, *pblock);
                 applied = true;
             } else {
-                HandleDisconnect(pindex);
+                ApplyDisconnected(pindex);
             }
         } catch (const std::exception& e) {
             db->Discard();
@@ -271,6 +272,13 @@ void YellowbackIndex::SyncTransaction(const CTransaction& tx, const CBlock* pblo
     } catch (...) {
         LogPrintf("yellowback: SyncTransaction hook failed\n");
     }
+}
+
+void YellowbackIndex::TestChainTip(const CBlockIndex* pindex, const CBlock* pblock, bool connect)
+{
+    std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added;
+    if (connect) added = std::make_pair(SproutMerkleTree(), SaplingMerkleTree());
+    ChainTip(pindex, pblock, added);
 }
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)

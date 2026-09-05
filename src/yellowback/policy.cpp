@@ -96,6 +96,14 @@ RedeemCheck CheckRedeem(const YellowbackIndex& index, const CCoinsViewCache& vie
     }
     const bool active = vault->Status() == VaultStatus::ACTIVE;
 
+    // D1: every input must exist and be unspent in the caller's view before anything reads it
+    // (GetOutputFor and GetValueIn assert on a missing coin). Checked first so a phantom input is
+    // always reported as such, never as a short burn.
+    for (const CTxIn& txin : tx.vin) {
+        const CCoins* coins = view.AccessCoins(txin.prevout.hash);
+        if (!coins || !coins->IsAvailable(txin.prevout.n)) return Refuse(c, "RED-4", "input " + txin.prevout.ToString() + " is unknown or spent");
+    }
+
     // RED-2
     if (tx.nLockTime < vault->lockHeight) return Refuse(c, "RED-2", strprintf("nLockTime %u below lockHeight %u", tx.nLockTime, vault->lockHeight));
     if ((int64_t)c.indexHeight < (int64_t)vault->lockHeight) {
@@ -124,10 +132,6 @@ RedeemCheck CheckRedeem(const YellowbackIndex& index, const CCoinsViewCache& vie
     // RED-4
     if (!tx.vJoinSplit.empty() || !tx.vShieldedSpend.empty() || !tx.vShieldedOutput.empty() || tx.valueBalance != 0) {
         return Refuse(c, "RED-4", "transaction is not transparent-only");
-    }
-    for (const CTxIn& txin : tx.vin) {                                  // D1: before any policy call
-        const CCoins* coins = view.AccessCoins(txin.prevout.hash);
-        if (!coins || !coins->IsAvailable(txin.prevout.n)) return Refuse(c, "RED-4", "input " + txin.prevout.ToString() + " is unknown or spent");
     }
     std::string reason;
     if (!IsStandardTx(tx, reason, ::Params(), chainHeight + 1)) return Refuse(c, "RED-4", "non-standard: " + reason);

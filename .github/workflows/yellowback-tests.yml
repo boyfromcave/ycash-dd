@@ -55,6 +55,18 @@ jobs:
       - name: Build ycashd
         run: ./zcutil/build.sh -j$(nproc)
 
+      - name: Determinism audit (plan §3.10, §8.4 items 2 and 8)
+        # The state machine and the pure modules may not read the clock, the mempool, the wallet or
+        # configuration, and must never use floating point; the overlay adds no networking to the node.
+        run: |
+          set -e
+          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" \
+              src/yellowback/state.cpp src/yellowback/state.h src/yellowback/math.h src/yellowback/payload.cpp \
+              src/yellowback/payload.h src/yellowback/script.cpp src/yellowback/script.h src/yellowback/view.cpp src/yellowback/view.h
+          ! grep -n "evhttp\|socket\|connect(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp
+          # The consensus set is untouched (plan §1, §4.1).
+          test -z "$(git diff --stat ycash-legacy...HEAD -- src/main.cpp src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet src/txdb.cpp src/txdb.h configure.ac 2>/dev/null)"
+
       - name: Unit tests (yellowback_*)
         run: src/test/test_bitcoin --run_test='yellowback_*' --log_level=test_suite
 
@@ -63,7 +75,8 @@ jobs:
         # phases add scripts to BASE_SCRIPTS.
         run: |
           qa/pull-tester/rpc-tests.py -j4 --nozmq \
-            yellowback_index
+            yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore \
+            yellowback_federation yellowback_protection
 
       - name: Upload node logs on failure
         if: failure()
@@ -102,6 +115,8 @@ jobs:
       - run: ./zcutil/build.sh -j$(nproc)
       - name: Full make check
         run: make check
+      - name: Reorg stress (extended)
+        run: qa/pull-tester/rpc-tests.py -j2 --nozmq yellowback_reorg_stress
       - name: Inherited functional tests recorded as passing in Phase 0
         # Fill in from doc/yellowback.md "Build and test baseline".
         run: qa/pull-tester/rpc-tests.py -j4 --nozmq
