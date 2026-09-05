@@ -661,13 +661,14 @@ UniValue yed_createpricetx(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 1 || params.size() > 3)
         throw std::runtime_error(
-            "yed_createpricetx priceMicroUsd|\"rotate\" ( \"refillTxid:n\" \"newRosterScriptHex\" )\n"
+            "yed_createpricetx priceMicroUsd|\"rotate\" ( \"refillTxid:n\" \"rosterScriptHex\" )\n"
             "\nBuild the unsigned PRICE transaction that spends the current anchor into a new anchor with the\n"
             "same roster script plus an OP_RETURN price; or, with \"rotate\", the ROTATION transaction paying\n"
             "the anchor to a new roster script with no OP_RETURN. An optional confirmed refill input is\n"
             "absorbed whole into the new anchor (no change output). Sign with signrawtransaction on a node\n"
             "whose wallet holds the roster script (addmultisigaddress); prevtxs is what signrawtransaction\n"
-            "needs when the anchor is in neither the chain nor the signer's mempool.\n"
+            "needs when the anchor is in neither the chain nor the signer's mempool. For a PRICE, rosterScriptHex is\n"
+            "the roster the anchor pays to when it has not been revealed on chain yet (right after a rotation).\n"
             "\nResult:\n{ \"hex\": \"...\", \"prevtxs\": [...], \"anchor\": {...}, \"newAnchorValueZat\": n, \"fee\": n }\n");
 
     YellowbackIndex& index = EnsureIndex();
@@ -686,15 +687,15 @@ UniValue yed_createpricetx(const UniValue& params, bool fHelp)
         if (colon == std::string::npos || colon != 64 || !IsHex(s.substr(0, 64))) throw JSONRPCError(RPC_INVALID_PARAMETER, "refill must be txid:n");
         refill = COutPoint(uint256S(s.substr(0, 64)), (uint32_t)std::stoul(s.substr(colon + 1)));
     }
-    CScript newRoster;
-    if (rotate) {
-        if (params.size() < 3 || params[2].isNull() || !IsHex(params[2].get_str())) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, "rotate requires the new roster script hex");
-        }
+    CScript newRoster;   // rotate: the new roster; price: an optional hint for an unrevealed anchor script
+    if (params.size() > 2 && !params[2].isNull() && !params[2].get_str().empty()) {
+        if (!IsHex(params[2].get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, "roster script must be hex");
         std::vector<unsigned char> b = ParseHex(params[2].get_str());
         newRoster = CScript(b.begin(), b.end());
         Roster r;
-        if (!ParseRosterScript(newRoster, r)) throw JSONRPCError(RPC_INVALID_PARAMETER, "new roster script is not a valid k-of-n script");
+        if (!ParseRosterScript(newRoster, r)) throw JSONRPCError(RPC_INVALID_PARAMETER, "roster script is not a valid k-of-n script");
+    } else if (rotate) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "rotate requires the new roster script hex");
     }
 
     LOCK(cs_main);
@@ -705,10 +706,8 @@ UniValue yed_createpricetx(const UniValue& params, bool fHelp)
     if (!anchor.valid) throw JSONRPCError(RPC_MISC_ERROR, "anchor custody is broken; no price transactions can be built");
     std::vector<RosterRecord> rosters = st.GetRosters();
     if (rosters.empty()) throw JSONRPCError(RPC_MISC_ERROR, "index has not reached the start height");
-    const CScript& rosterScript = rosters.back().script;
-    if (P2SHScript(rosterScript) != anchor.scriptPubKey) {
-        throw JSONRPCError(RPC_MISC_ERROR, "the current anchor's roster has not been revealed yet; sign with the script agreed off-chain");
-    }
+    CScript rosterScript = rosters.back().script;
+    if (!rotate && !newRoster.empty()) rosterScript = newRoster; // hint for an unrevealed anchor script
 
     // Follow unconfirmed anchor spends through the mempool (C11): the index moves the anchor
     // only on block connect, but a price round may chain on a PRICE transaction that is still
@@ -733,7 +732,7 @@ UniValue yed_createpricetx(const UniValue& params, bool fHelp)
             anchorUnconfirmed = true;
         }
         if (P2SHScript(rosterScript) != anchor.scriptPubKey) {
-            throw JSONRPCError(RPC_MISC_ERROR, "the anchor's roster has not been revealed yet; sign with the script agreed off-chain");
+            throw JSONRPCError(RPC_MISC_ERROR, "the anchor's roster has not been revealed yet; pass the agreed roster script as the third argument");
         }
         CCoinsViewMemPool viewMempool(pcoinsTip, mempool);
         CCoinsViewCache view(&viewMempool);

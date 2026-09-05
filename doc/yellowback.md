@@ -22,7 +22,7 @@ guide and will grow with each phase.
 | 1 — pure protocol library (`src/yellowback/{params,math,payload,script,address}`) | done |
 | 2 — state machine, index, node RPCs | done |
 | 3 — wallet RPCs (mint, send, redeem, co-sign) | done |
-| 4 — federation coordinator (`contrib/yellowback/`) | not started |
+| 4 — federation coordinator (`contrib/yellowback/`) | done |
 | 5 — protections (DCA, ERR, volatility) | not started |
 | 6 — hardening and review | not started |
 
@@ -87,8 +87,8 @@ at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
   the fork does not touch — `main_tests/subsidy_limit_test` (subsidy sum) and
   `rpc_wallet_tests/rpc_z_sendmany_internals`. Everything else passes, including all 28
   `yellowback_*` cases.
-- `qa/rpc-tests/yellowback_lifecycle.py`, `yellowback_void_mint.py`, `yellowback_wallet_restore.py`:
-  green (five nodes each, 5-12 minutes).
+- `qa/rpc-tests/yellowback_lifecycle.py`, `yellowback_void_mint.py`, `yellowback_wallet_restore.py`,
+  `yellowback_federation.py`: green (five nodes each, 5-12 minutes).
 - The inherited `qa/pull-tester/rpc-tests.py` baseline (which tests at the pin pass on Ycash after
   the `ycash.conf` and `src/ycashd` framework fixes) and the `YCASH_WR=1` build are still to be run.
 - Python 3.12+ note: the inherited `test_framework/mininode.py` imports `asyncore` (removed in

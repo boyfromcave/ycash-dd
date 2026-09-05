@@ -6,9 +6,9 @@ operators over HTTPS.
 
 | File | Role | Status |
 |---|---|---|
-| `yellowback_fed.py` | Federation coordinator: price rounds (fetch, TWAP, outlier filter, ±10 % move clamp, median), builds the PRICE transaction with `yed_createpricetx`, collects partial signatures from peers with `signrawtransaction`, broadcasts; serves `POST /cosign` for redemptions by calling `yed_cosignredeem`; `rotate` sub-command | Phase 4 |
-| `yellowback-redeem` | User-side co-signature collector: `yed_redeem` → POST to each operator's `/cosign` until k signatures → `yed_submitredeem` | Phase 4 |
-| `yellowback-fed.toml.example` | Coordinator configuration (node RPC URL, operator id, peer URLs, price sources, thresholds) | Phase 4 |
+| `yellowback_fed.py` | Federation coordinator: price rounds (fetch, TWAP, outlier filter, ±10 % move clamp, median), builds the PRICE transaction with `yed_createpricetx`, collects partial signatures from peers with `signrawtransaction`, broadcasts; serves `POST /cosign` for redemptions by calling `yed_cosignredeem`; `rotate` sub-command | done |
+| `yellowback-redeem` | User-side co-signature collector: `yed_redeem` → POST to each operator's `/cosign` until k signatures → `yed_submitredeem` | done |
+| `yellowback-fed.toml` (see `doc/yellowback-federation.md`) | Coordinator configuration (node RPC URL, operator id, peer URLs, price sources) | done |
 
 Test-only flags: `--mock-price <path>` (price read from a file the test rewrites) and
 `--insecure-localhost` (plain HTTP on 127.0.0.1). The regtest functional test

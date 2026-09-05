@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""
+Yellowback redemption client (plan D16, §5).
+
+  yed_redeem on the user's node -> POST the hex to each operator's /cosign
+  until k signatures are present -> yed_submitredeem on the user's node.
+
+Every co-signature is verified by the node before broadcast (SUB-1), so
+this client and the endpoints are untrusted plumbing. Transient refusals
+(RED-0 unsynced, RED-2 not yet at lockHeight on that operator's node) are
+retried after the next block; the deadline is the redemption's expiry minus
+the mempool's expiring-soon threshold (B24). Past it the client aborts with
+yed_abortredeem so the inputs become selectable again.
+
+Usage:
+  yellowback-redeem --rpc-url http://user:pass@127.0.0.1:port --vault <txid> \
+      --endpoints https://op1.example/,https://op2.example/ [--insecure] [--endpoints-file f]
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from yellowback_fed import Node, RpcError  # noqa: E402
+
+import urllib.request
+
+
+def post(url, body, insecure):
+    if not insecure and not url.startswith("https://"):
+        raise SystemExit("endpoint %s is not https (use --insecure only against localhost)" % url)
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode()), None
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode())
+        except Exception:
+            err = {"error": str(e), "transient": e.code >= 500}
+        return None, err
+    except Exception as e:
+        return None, {"error": str(e), "transient": True}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--rpc-url", required=True)
+    ap.add_argument("--vault", required=True, help="the MINT txid of the vault to redeem")
+    ap.add_argument("--endpoints", default="", help="comma-separated operator base URLs")
+    ap.add_argument("--endpoints-file", help="file with one operator base URL per line")
+    ap.add_argument("--insecure", action="store_true", help="allow plain http:// endpoints (tests only)")
+    ap.add_argument("--wait-blocks", type=int, default=36, help="give up this many blocks after yed_redeem")
+    args = ap.parse_args(argv)
+
+    endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
+    if args.endpoints_file:
+        with open(args.endpoints_file) as f:
+            endpoints += [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    if not endpoints:
+        raise SystemExit("no operator endpoints")
+
+    node = Node(args.rpc_url)
+    red = node.yed_redeem(args.vault)
+    k = int(red["roster"]["k"])
+    deadline = int(red["deadlineHeight"])
+    print("redeem built: burn %d cents, need %d of %d signatures, deadline height %d" %
+          (red["requiredBurnCents"], k, red["roster"]["n"], deadline), file=sys.stderr)
+    hex_ = red["hex"]
+    sigs = 0
+    done = set()
+    start_height = node.getblockcount()
+    while True:
+        height = node.getblockcount()
+        if height > deadline or height - start_height > args.wait_blocks:
+            print("deadline passed; aborting the pending redemption", file=sys.stderr)
+            node.yed_abortredeem(args.vault)
+            return 2
+        progress = False
+        for ep in endpoints:
+            if ep in done:
+                continue
+            reply, err = post(ep.rstrip("/") + "/cosign", {"hex": hex_}, args.insecure)
+            if err:
+                kind = "transient" if err.get("transient") else "final"
+                print("%s: %s refusal: %s" % (ep, kind, err.get("error")), file=sys.stderr)
+                if not err.get("transient"):
+                    done.add(ep)  # a final refusal will not change; do not hammer it
+                continue
+            hex_ = reply["hex"]
+            sigs = int(reply.get("quorumSignatures", sigs + 1))
+            done.add(ep)
+            progress = True
+            print("%s: signed (%d of %d)" % (ep, sigs, k), file=sys.stderr)
+            if reply.get("complete") or sigs >= k:
+                txid = node.yed_submitredeem(hex_)["txid"]
+                print(json.dumps({"txid": txid, "signatures": sigs}))
+                return 0
+        if len(done) >= len(endpoints) and not any(True for ep in endpoints if ep not in done):
+            if sigs < k:
+                print("every endpoint answered and only %d of %d signed; aborting" % (sigs, k), file=sys.stderr)
+                node.yed_abortredeem(args.vault)
+                return 3
+        if not progress:
+            # Wait for the next block before retrying transient refusals.
+            h = node.getblockcount()
+            while node.getblockcount() == h:
+                time.sleep(2)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except RpcError as e:
+        print("node error: %s" % e, file=sys.stderr)
+        sys.exit(1)
