@@ -114,7 +114,8 @@ BITCOIN_TESTS =\
   test/ydollar_address_tests.cpp \
   test/ydollar_math_tests.cpp \
   test/ydollar_payload_tests.cpp \
-  test/ydollar_script_tests.cpp
+  test/ydollar_script_tests.cpp \
+  test/ydollar_state_tests.cpp
 
 if ENABLE_WALLET
 BITCOIN_TESTS += \
