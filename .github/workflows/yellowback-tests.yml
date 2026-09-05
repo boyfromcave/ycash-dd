@@ -1,8 +1,8 @@
-name: ydollar tests
+name: yellowback tests
 
-# Fork-local CI for the YDollar overlay. Upstream Ycash runs no tests in CI (book.yml only).
+# Fork-local CI for the Yellowback overlay. Upstream Ycash runs no tests in CI (book.yml only).
 # Uses the same zcutil/build.sh a developer runs locally so a green CI and a green laptop mean the
-# same thing. See docs/plans/ydollar-v1-development-plan.md §6.0 item 6 in the workspace.
+# same thing. See docs/plans/yellowback-v1-development-plan.md §6.0 item 6 in the workspace.
 
 on:
   push:
@@ -55,24 +55,24 @@ jobs:
       - name: Build ycashd
         run: ./zcutil/build.sh -j$(nproc)
 
-      - name: Unit tests (ydollar_*)
-        run: src/test/test_bitcoin --run_test='ydollar_*' --log_level=test_suite
+      - name: Unit tests (yellowback_*)
+        run: src/test/test_bitcoin --run_test='yellowback_*' --log_level=test_suite
 
-      - name: Functional tests (ydollar_*)
+      - name: Functional tests (yellowback_*)
         # Names must be listed explicitly: rpc-tests.py does not glob (G3). Extend this list as
         # phases add scripts to BASE_SCRIPTS.
         run: |
           qa/pull-tester/rpc-tests.py -j4 --nozmq \
-            ydollar_index
+            yellowback_index
 
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ydollar-test-logs
+          name: yellowback-test-logs
           path: |
             /tmp/**/node*/regtest/debug.log
-            /tmp/**/ydollar-fed*.log
+            /tmp/**/yellowback-fed*.log
           if-no-files-found: ignore
 
   nightly:
@@ -103,5 +103,5 @@ jobs:
       - name: Full make check
         run: make check
       - name: Inherited functional tests recorded as passing in Phase 0
-        # Fill in from doc/ydollar.md "Build and test baseline".
+        # Fill in from doc/yellowback.md "Build and test baseline".
         run: qa/pull-tester/rpc-tests.py -j4 --nozmq
