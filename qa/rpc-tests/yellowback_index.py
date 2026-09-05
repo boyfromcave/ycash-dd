@@ -24,6 +24,7 @@ from test_framework.util import (
     start_node,
     start_nodes,
     stop_node,
+    stop_nodes,
     sync_blocks,
     sync_mempools,
     wait_bitcoinds,
@@ -71,6 +72,17 @@ class YellowbackIndexTest(BitcoinTestFramework):
                 sync_blocks(self.nodes)
         else:
             super().sync_all()
+
+    def join_network(self):
+        # The framework's join_network syncs mempools between nodes 1 and 2 before the reorg has
+        # settled; here only blocks can agree (see sync_all), so rejoin and sync blocks only.
+        assert self.is_network_split
+        stop_nodes(self.nodes)
+        wait_bitcoinds()
+        self.nodes = self.setup_nodes()
+        self.reconnect_all()
+        self.is_network_split = False
+        sync_blocks(self.nodes)
 
     def reconnect_all(self):
         connect_nodes_bi(self.nodes, 0, 1)
