@@ -82,6 +82,9 @@ jobs:
       - name: Unit tests (yellowback_*)
         run: src/test/test_bitcoin --run_test='yellowback_*' --log_level=test_suite
 
+      - name: Coordinator unit tests (contrib/yellowback)
+        run: python3 -m unittest contrib/yellowback/test_yellowback_fed.py
+
       - name: Functional tests (yellowback_*)
         # Names must be listed explicitly: rpc-tests.py does not glob (G3). Extend this list as
         # phases add scripts to BASE_SCRIPTS.
