@@ -27,6 +27,18 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
 
+      - name: Install Python test prerequisites
+        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
+        # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
+        # one-line shim stands in for it). No framework file is changed.
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, zmq, simplejson, pyblake2'
+
       - name: Cache depends
         id: cache-depends
         uses: actions/cache@v4
@@ -73,8 +85,16 @@ jobs:
       - name: Functional tests (yellowback_*)
         # Names must be listed explicitly: rpc-tests.py does not glob (G3). Extend this list as
         # phases add scripts to BASE_SCRIPTS.
+        # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below
+        # does not have to glob all of /tmp (which contains root-only /tmp/snap-private-tmp on
+        # the GitHub runners and makes upload-artifact fail with EACCES).
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
-          qa/pull-tester/rpc-tests.py -j4 --nozmq \
+          mkdir -p "$TMPDIR"
+          # --nocleanup is forwarded to every script: without it test_framework.py rmtree()s its
+          # tmpdir even when the test fails, and there is nothing left for the upload step.
+          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup \
             yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore \
             yellowback_federation yellowback_protection
 
@@ -84,8 +104,8 @@ jobs:
         with:
           name: yellowback-test-logs
           path: |
-            /tmp/**/node*/regtest/debug.log
-            /tmp/**/yellowback-fed*.log
+            ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+            ${{ runner.temp }}/yellowback-tests/**/yellowback-fed*.log
           if-no-files-found: ignore
 
   nightly:
@@ -100,6 +120,18 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
+      - name: Install Python test prerequisites
+        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
+        # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
+        # one-line shim stands in for it). No framework file is changed.
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, zmq, simplejson, pyblake2'
+
       - uses: actions/cache@v4
         with:
           path: |
