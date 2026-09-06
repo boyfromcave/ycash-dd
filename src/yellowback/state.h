@@ -38,8 +38,6 @@ extern const char* const PRICE_OK;
 extern const char* const PRICE_NOT_ANCHOR;
 extern const char* const PRICE_ROTATION;
 extern const char* const PRICE_BAD_RANGE;
-extern const char* const PRICE_SHIELDED;
-extern const char* const SHIELDED;
 extern const char* const COINBASE;
 extern const char* const MINT_NO_VAULT;
 extern const char* const BAD_MINT_TIER;

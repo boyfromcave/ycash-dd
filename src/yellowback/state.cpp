@@ -18,8 +18,6 @@ const char* const PRICE_OK = "price-recorded";
 const char* const PRICE_NOT_ANCHOR = "price-not-anchor-spend";
 const char* const PRICE_ROTATION = "price-rotation";
 const char* const PRICE_BAD_RANGE = "bad-oracle-price-range";
-const char* const PRICE_SHIELDED = "price-shielded";
-const char* const SHIELDED = "yed-shielded";
 const char* const COINBASE = "yed-coinbase";
 const char* const MINT_NO_VAULT = "mint-invalid-no-vault";
 const char* const BAD_MINT_TIER = "bad-mint-tier";
@@ -43,11 +41,6 @@ const char* const XFER_OVER_ASSIGNED = "xfer-over-assigned";
 } // namespace verdict
 
 namespace {
-
-bool IsTransparentOnly(const CTransaction& tx)
-{
-    return tx.vJoinSplit.empty() && tx.vShieldedSpend.empty() && tx.vShieldedOutput.empty() && tx.valueBalance == 0;
-}
 
 /**
  * MINT-2..7. On success fills `vault` (ACTIVE) and returns MINT_OK; on
@@ -135,8 +128,12 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
     relevant = false;
 
     const uint256 txid = tx.GetHash();
+    // TX-0 covers the coinbase only. The YED accounting reads transparent inputs, vout
+    // indexes and the OP_RETURN; vShieldedSpend/vShieldedOutput/vJoinSplit and valueBalance
+    // belong to the YEC side of the transaction and change no verdict (plan revision 14, I1).
+    // YED itself can still only be assigned to transparent outputs: a payload names vout
+    // indexes, and a shielded output has none.
     const bool coinbase = tx.IsCoinBase();
-    const bool transparent = IsTransparentOnly(tx);
 
     // ---- inputs (IN-1, IN-2, PRICE-1 detection)
     AnchorRecord anchor = st.GetAnchor();
@@ -205,8 +202,6 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
         const Payload& p = fp->payload;
         if (coinbase) {
             log.verdict = verdict::COINBASE;                                   // TX-0
-        } else if (!transparent && p.type != PayloadType::PRICE) {
-            log.verdict = verdict::SHIELDED;                                   // TX-0
         } else if (p.type == PayloadType::MINT) {
             VaultRecord vault;
             CAmount collateral = 0;
@@ -308,9 +303,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
             const bool sameScript = (next.scriptPubKey == anchor.scriptPubKey);
             if (fp.has_value() && fp->payload.type == PayloadType::PRICE) {
                 const int64_t price = (int64_t)fp->payload.priceMicroUsd;
-                if (!transparent) {
-                    log.verdict = verdict::PRICE_SHIELDED;
-                } else if (!sameScript) {
+                if (!sameScript) {
                     log.verdict = verdict::PRICE_ROTATION;
                 } else if (fp->payload.priceMicroUsd < (uint64_t)PRICE_MIN || fp->payload.priceMicroUsd > (uint64_t)PRICE_MAX) {
                     log.verdict = verdict::PRICE_BAD_RANGE;

@@ -396,6 +396,74 @@ BOOST_AUTO_TEST_CASE(mint_transfer_burn_redeem)
     }
 }
 
+// Revision 14 (I1): TX-0 covers the coinbase only. The YED accounting reads transparent
+// inputs, vout indexes and the OP_RETURN; Sapling spends/outputs and valueBalance on the same
+// transaction are the YEC side's business and change no verdict.
+BOOST_AUTO_TEST_CASE(shielded_components_are_ignored)
+{
+    Fixture f;
+    f.ApplyGenesis();
+    BOOST_REQUIRE(!f.Apply({ f.PriceTx(50000) }).has_value()); // START+1, $0.05
+    f.MineTo(START + 3);
+
+    // A mint whose collateral is unshielded in the same transaction (ys1 -> vault): no
+    // transparent inputs at all, one Sapling spend, positive valueBalance.
+    const int evalH = START + 1;
+    const int mintH = START + 4;
+    CMutableTransaction mint = f.MintTx(10000, 0, evalH, mintH);
+    mint.vin.clear();
+    mint.vShieldedSpend.push_back(SpendDescription());
+    mint.valueBalance = mint.vout[0].nValue + TOKEN_VALUE + DEFAULT_YELLOWBACK_FEE;
+    BOOST_REQUIRE(!f.Apply({ mint }, mintH).has_value());
+    const uint256 mintId = CTransaction(mint).GetHash();
+    {
+        State st(f.view);
+        BOOST_CHECK_EQUAL(st.GetTxLog(mintId)->verdict, verdict::MINT_OK);
+        BOOST_REQUIRE(st.GetVault(COutPoint(mintId, 0)).has_value());
+        BOOST_CHECK(st.GetVault(COutPoint(mintId, 0))->Status() == VaultStatus::ACTIVE);
+        BOOST_CHECK_EQUAL(st.GetToken(COutPoint(mintId, 1))->cents, 10000);
+        BOOST_CHECK_EQUAL(st.GetTotals().supplyCents, 10000);
+    }
+
+    // A transfer that shields its YEC change alongside the YED assignment.
+    CMutableTransaction xfer = f.TransferTx({ COutPoint(mintId, 1) }, { Assignment(0, 10000) });
+    xfer.vShieldedOutput.push_back(OutputDescription());
+    xfer.valueBalance = -COIN;
+    BOOST_REQUIRE(!f.Apply({ xfer }).has_value());
+    const uint256 xferId = CTransaction(xfer).GetHash();
+    {
+        State st(f.view);
+        BOOST_CHECK_EQUAL(st.GetTxLog(xferId)->verdict, verdict::TRANSFER_OK);
+        BOOST_CHECK_EQUAL(st.GetToken(COutPoint(xferId, 0))->cents, 10000);
+        BOOST_CHECK_EQUAL(st.GetTxLog(xferId)->burned, 0);
+        BOOST_CHECK_EQUAL(st.GetTotals().supplyCents, 10000);
+    }
+
+    // A PRICE transaction with a shielded component still records the price: the roster's
+    // k-of-n signatures gate that shape (yed_createpricetx peers refuse it), not the state.
+    CMutableTransaction price = f.PriceTx(60000);
+    price.vShieldedOutput.push_back(OutputDescription());
+    price.valueBalance = -1;
+    BOOST_REQUIRE(!f.Apply({ price }).has_value());
+    BOOST_REQUIRE(f.Price(f.tipHeight).has_value());
+    BOOST_CHECK_EQUAL(f.Price(f.tipHeight).value(), (MicroUsd)60000);
+
+    // TX-0 proper: a coinbase carrying a MINT payload creates nothing, not even a VOID vault.
+    CMutableTransaction cb = f.MintTx(10000, 0, f.tipHeight - 1, f.tipHeight + 1);
+    cb.vin.clear();
+    cb.vin.push_back(CTxIn(COutPoint(), CScript() << OP_0));
+    BOOST_REQUIRE(CTransaction(cb).IsCoinBase());
+    BOOST_REQUIRE(!f.Apply({ cb }).has_value());
+    const uint256 cbId = CTransaction(cb).GetHash();
+    {
+        State st(f.view);
+        BOOST_CHECK_EQUAL(st.GetTxLog(cbId)->verdict, verdict::COINBASE);
+        BOOST_CHECK(!st.GetVault(COutPoint(cbId, 0)).has_value());
+        BOOST_CHECK(!st.GetToken(COutPoint(cbId, 1)).has_value());
+        BOOST_CHECK_EQUAL(st.GetTotals().supplyCents, 10000);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(void_mints)
 {
     Fixture f;
