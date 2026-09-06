@@ -96,7 +96,7 @@ jobs:
           # tmpdir even when the test fails, and there is nothing left for the upload step.
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup \
             yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore \
-            yellowback_federation yellowback_protection
+            yellowback_federation yellowback_protection yellowback_sapling
 
       - name: Upload node logs on failure
         if: failure()

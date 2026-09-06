@@ -6,6 +6,7 @@
 
 #include "chainparams.h"
 #include "consensus/upgrades.h"
+#include "key_io.h"
 #include "main.h"
 #include "script/sign.h"
 #include "script/standard.h"
@@ -15,12 +16,53 @@
 #include "yellowback/payload.h"
 #include "yellowback/policy.h"
 #include "yellowback/state.h"
+#include "zcash/Address.hpp"
+#include "zcash/address/zip32.h"
 
 #include <algorithm>
+#include <variant>
 
 namespace yellowback {
 
 namespace {
+
+/** At most this many Sapling notes in one mint (one spend proof each, seconds apiece). */
+const size_t MAX_SAPLING_SPENDS = 20;
+
+/** A funding source or collateral destination given as an address string (I2). */
+struct AddressChoice
+{
+    enum Kind { NONE, TRANSPARENT, SAPLING } kind;
+    CKeyID keyId;                                   //!< TRANSPARENT
+    libzcash::SaplingPaymentAddress sapling;        //!< SAPLING
+    std::string text;
+    AddressChoice() : kind(NONE) {}
+};
+
+/** Parse "" / s1… / ys1…; anything else (a Yellowback ye… address, a Sprout zc… address) is refused. */
+AddressChoice ParseAddressChoice(const std::string& s, const char* what)
+{
+    AddressChoice c;
+    c.text = s;
+    if (s.empty()) return c;
+    KeyIO keyIO(::Params());
+    CTxDestination dest = keyIO.DecodeDestination(s);
+    if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
+        c.kind = AddressChoice::TRANSPARENT;
+        c.keyId = *id;
+        return c;
+    }
+    if (keyIO.IsValidPaymentAddressString(s)) {
+        libzcash::PaymentAddress pa = keyIO.DecodePaymentAddress(s);
+        if (const libzcash::SaplingPaymentAddress* sa = std::get_if<libzcash::SaplingPaymentAddress>(&pa)) {
+            c.kind = AddressChoice::SAPLING;
+            c.sapling = *sa;
+            return c;
+        }
+        throw std::runtime_error(std::string(what) + ": Sprout addresses are not supported; use an s1… or ys1… address");
+    }
+    throw std::runtime_error(std::string(what) + ": not a transparent (s1…) or Sapling (ys1…) address of this network");
+}
 
 struct Context
 {
@@ -50,14 +92,29 @@ struct Context
         if (wallet.IsLocked()) throw std::runtime_error("wallet is locked; walletpassphrase first");
     }
 
-    CMutableTransaction NewTx(uint32_t expiry) const
+    void CheckExpiry(uint32_t expiry) const
     {
-        CMutableTransaction mtx = CreateNewContextualCMutableTransaction(::Params().GetConsensus(), chainHeight + 1);
-        mtx.nExpiryHeight = expiry;
         if ((int64_t)expiry < (int64_t)chainHeight + 1 + (int64_t)TX_EXPIRING_SOON_THRESHOLD) {
             throw std::runtime_error("transaction would expire too soon; the index is too far behind the chain");
         }
+    }
+
+    CMutableTransaction NewTx(uint32_t expiry) const
+    {
+        CheckExpiry(expiry);
+        CMutableTransaction mtx = CreateNewContextualCMutableTransaction(::Params().GetConsensus(), chainHeight + 1);
+        mtx.nExpiryHeight = expiry;
         return mtx;
+    }
+
+    /** A TransactionBuilder for the Sapling shapes (I2): same version/expiry/fee as NewTx, no keystore. */
+    TransactionBuilder NewBuilder(uint32_t expiry) const
+    {
+        CheckExpiry(expiry);
+        TransactionBuilder b(::Params().GetConsensus(), chainHeight + 1);
+        b.SetExpiryHeight(expiry);
+        b.SetFee(g_yellowbackFee);
+        return b;
     }
 
     CPubKey FreshKey(const std::string& purpose) const
@@ -68,8 +125,12 @@ struct Context
         return key;
     }
 
-    /** Smallest-first confirmed YEC inputs (F3) covering `needed`; returns the amount selected. */
-    CAmount SelectYec(CAmount needed, CMutableTransaction& mtx, std::vector<std::pair<CScript, CAmount>>& prevs) const
+    /**
+     * Smallest-first confirmed YEC inputs (F3) covering `needed`; returns the amount selected.
+     * `only` (I2): restrict to outputs paying that script (an s1… funding address).
+     */
+    CAmount SelectYec(CAmount needed, CMutableTransaction& mtx, std::vector<std::pair<CScript, CAmount>>& prevs,
+                      const CScript* only = nullptr, const std::string& onlyText = "") const
     {
         if (needed <= 0) return 0;
         std::vector<COutput> coins;
@@ -78,6 +139,7 @@ struct Context
         CAmount selected = 0;
         for (const COutput& c : coins) {
             if (!c.fSpendable) continue;
+            if (only && c.tx->vout[c.i].scriptPubKey != *only) continue;
             // Never spend a YED-bearing or reserved output as plain YEC (belt and braces: locked coins are already excluded).
             COutPoint o(c.tx->GetHash(), c.i);
             if (st.GetToken(o).has_value() || yw.IsReserved(o)) continue;
@@ -86,8 +148,56 @@ struct Context
             selected += c.Value();
             if (selected >= needed) break;
         }
-        if (selected < needed) throw std::runtime_error(strprintf("insufficient YEC: need %s, have %s confirmed and unlocked", FormatMoney(needed), FormatMoney(selected)));
+        if (selected < needed) {
+            throw std::runtime_error(strprintf("insufficient YEC%s: need %s, have %s confirmed and unlocked",
+                                               only ? " at " + onlyText : "", FormatMoney(needed), FormatMoney(selected)));
+        }
         return selected;
+    }
+
+    /**
+     * Sapling notes of `addr` (I2), largest-first as z_sendmany, covering `needed`. Fills the
+     * spending key, the anchor and one witness per note; requires cs_main and cs_wallet.
+     */
+    void SelectSapling(const AddressChoice& addr, CAmount needed, libzcash::SaplingExtendedSpendingKey& extsk,
+                       std::vector<SaplingNoteEntry>& sel, std::vector<SaplingWitness>& witnesses, uint256& anchor) const
+    {
+        libzcash::PaymentAddress pa = addr.sapling;
+        if (!std::visit(HaveSpendingKeyForPaymentAddress(&wallet), pa)) {
+            throw std::runtime_error("no spending key for " + addr.text + " in this wallet");
+        }
+        std::optional<libzcash::SpendingKey> sk = std::visit(GetSpendingKeyForPaymentAddress(&wallet), pa);
+        if (!sk.has_value()) throw std::runtime_error("no spending key for " + addr.text + " in this wallet");
+        extsk = std::get<libzcash::SaplingExtendedSpendingKey>(sk.value());
+
+        std::vector<SproutNoteEntry> sprout;
+        std::vector<SaplingNoteEntry> notes;
+        std::set<libzcash::PaymentAddress> filter;
+        filter.insert(pa);
+        wallet.GetFilteredNotes(sprout, notes, filter, 1, INT_MAX, true, true, true);
+        std::sort(notes.begin(), notes.end(), [](const SaplingNoteEntry& a, const SaplingNoteEntry& b) { return a.note.value() > b.note.value(); });
+        CAmount sum = 0;
+        CAmount available = 0;
+        for (const SaplingNoteEntry& e : notes) available += e.note.value();
+        for (const SaplingNoteEntry& e : notes) {
+            if (sum >= needed) break;
+            sel.push_back(e);
+            sum += e.note.value();
+        }
+        if (sum < needed) {
+            throw std::runtime_error(strprintf("insufficient YEC at %s: need %s, have %s in confirmed Sapling notes", addr.text, FormatMoney(needed), FormatMoney(available)));
+        }
+        if (sel.size() > MAX_SAPLING_SPENDS) {
+            throw std::runtime_error(strprintf("the mint would spend %u Sapling notes (limit %u); consolidate with z_mergetoaddress first", (unsigned)sel.size(), (unsigned)MAX_SAPLING_SPENDS));
+        }
+        std::vector<SaplingOutPoint> ops;
+        for (const SaplingNoteEntry& e : sel) ops.push_back(e.op);
+        std::vector<std::optional<SaplingWitness>> maybe;
+        wallet.GetSaplingNoteWitnesses(ops, maybe, anchor);
+        for (size_t i = 0; i < maybe.size(); i++) {
+            if (!maybe[i].has_value()) throw std::runtime_error("missing witness for a Sapling note; retry after the next block");
+            witnesses.push_back(maybe[i].value());
+        }
     }
 
     void SignInputs(CMutableTransaction& mtx, const std::vector<std::pair<CScript, CAmount>>& prevs, unsigned int first) const
@@ -125,10 +235,11 @@ std::vector<YedCoin> SelectYed(const Context& ctx, int64_t needed, int64_t& chan
 
 } // namespace
 
-BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& reservekey)
+BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& reservekey, const std::string& from)
 {
     Context ctx(yw);
     const Params& p = ctx.params;
+    const AddressChoice source = ParseAddressChoice(from, "from");
     if (!p.IsValidTier(tier)) throw std::runtime_error("bad-mint-tier");
     if (cents < p.minMint || cents > p.maxMint) throw std::runtime_error(strprintf("bad-mint-amount: cents must be between %d and %d", p.minMint, p.maxMint));
 
@@ -156,20 +267,48 @@ BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& re
     const uint32_t lockHeight = (uint32_t)evalHeight + p.tierBlocks[tier] + MINT_WINDOW;
     const uint32_t expiry = (uint32_t)evalHeight + MINT_WINDOW;
 
-    CMutableTransaction mtx = ctx.NewTx(expiry);
     CPubKey owner = ctx.FreshKey("yellowback-vault");
     CScript vault = VaultScript(lockHeight, owner, rosters.back().script);
     if (vault.empty()) throw std::runtime_error("cannot build the vault script");
     const CScript tokenScript = GetScriptForDestination(owner.GetID());
-    mtx.vout.push_back(CTxOut(required.value(), P2SHScript(vault)));
-    mtx.vout.push_back(CTxOut(TOKEN_VALUE, tokenScript));
     std::vector<unsigned char> payload = EncodePayload(Payload::Mint((uint8_t)tier, (uint32_t)cents, lockHeight, (uint32_t)evalHeight, owner));
     if (payload.empty()) throw std::runtime_error("cannot encode the mint payload");
+    const CAmount needed = required.value() + TOKEN_VALUE + g_yellowbackFee;
+
+    out.isMint = true;
+    out.freshKey = owner;
+    out.evalHeight = evalHeight;
+    out.lockHeight = lockHeight;
+    out.collateralZat = required.value();
+
+    if (source.kind == AddressChoice::SAPLING) {
+        // Sapling shape (I2): notes of `from` fund vout[0..2] in the same transaction; change is a
+        // Sapling output back to `from`. Proved later by FinishSapling() with no lock held.
+        libzcash::SaplingExtendedSpendingKey extsk;
+        std::vector<SaplingNoteEntry> notes;
+        std::vector<SaplingWitness> witnesses;
+        uint256 anchor;
+        ctx.SelectSapling(source, needed, extsk, notes, witnesses, anchor);
+        TransactionBuilder b = ctx.NewBuilder(expiry);
+        for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk.expsk, notes[i].note, anchor, witnesses[i]);
+        b.AddTransparentOutput(P2SHScript(vault), required.value());
+        b.AddTransparentOutput(tokenScript, TOKEN_VALUE);
+        b.AddTransparentOutput(PayloadScript(payload), 0);
+        b.SendChangeTo(source.sapling, extsk.expsk.full_viewing_key().ovk);
+        out.builder = b;
+        out.fundedFrom = "sapling";
+        return out;
+    }
+
+    CMutableTransaction mtx = ctx.NewTx(expiry);
+    mtx.vout.push_back(CTxOut(required.value(), P2SHScript(vault)));
+    mtx.vout.push_back(CTxOut(TOKEN_VALUE, tokenScript));
     mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
 
     std::vector<std::pair<CScript, CAmount>> prevs;
-    const CAmount needed = required.value() + TOKEN_VALUE + g_yellowbackFee;
-    CAmount selected = ctx.SelectYec(needed, mtx, prevs);
+    CScript onlyScript;
+    if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
+    CAmount selected = ctx.SelectYec(needed, mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
     CAmount change = selected - needed;
     if (change > 0) {
         CPubKey changeKey;
@@ -179,10 +318,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& re
     ctx.SignInputs(mtx, prevs, 0);
 
     out.tx = mtx;
-    out.freshKey = owner;
-    out.evalHeight = evalHeight;
-    out.lockHeight = lockHeight;
-    out.collateralZat = required.value();
+    out.fundedFrom = "transparent";
     out.ownYedOutputs.push_back(COutPoint(CTransaction(mtx).GetHash(), 1));
     return out;
 }
@@ -255,10 +391,11 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     return out;
 }
 
-BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid)
+BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to)
 {
     Context ctx(yw);
     const Params& p = ctx.params;
+    const AddressChoice dest = ParseAddressChoice(to, "to");
     const COutPoint vaultOut(vaultTxid, 0);
     std::optional<VaultRecord> vault = ctx.st.GetVault(vaultOut);
     if (!vault.has_value()) throw std::runtime_error("vault not found");
@@ -281,52 +418,114 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid)
     CScript vaultScript = VaultScript(vault->lockHeight, vault->ownerPubKey, rosters[vault->rosterIndex].script);
     if (vaultScript.empty()) throw std::runtime_error("cannot reconstruct the vault script");
 
-    CMutableTransaction mtx = ctx.NewTx((uint32_t)ctx.indexHeight + MINT_WINDOW);
-    mtx.nLockTime = vault->lockHeight;
-    mtx.vin.push_back(CTxIn(vaultOut, CScript(), 0xFFFFFFFE));
+    const uint32_t expiry = (uint32_t)ctx.indexHeight + MINT_WINDOW;
     BuiltTx out;
+    out.requiredBurn = requiredBurn;
+    out.burnCents = requiredBurn;
+    out.changeCents = change;
+    out.vaultScript = vaultScript;
+    out.vaultValue = vault->collateralZat;
+    out.ownerPubKey = vault->ownerPubKey;
     for (const YedCoin& c : sel) {
-        mtx.vin.push_back(CTxIn(c.outpoint));
         out.yedInputs.insert(c.outpoint);
+        out.yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));
     }
     // Outputs: collateral (+ surplus token value - fee - change token value), optional YED change, REDEEM payload (C10).
     const CAmount tokenIn = (CAmount)sel.size() * TOKEN_VALUE;
     const CAmount changeTokens = change > 0 ? TOKEN_VALUE : 0;
     const CAmount collateralOut = vault->collateralZat + tokenIn - g_yellowbackFee - changeTokens;
     if (collateralOut <= 0) throw std::runtime_error("vault value does not cover the fee");
-    CPubKey dest = ctx.FreshKey("yellowback-collateral");
-    out.freshKey = dest;
-    mtx.vout.push_back(CTxOut(collateralOut, GetScriptForDestination(dest.GetID())));
-    std::vector<Assignment> assignments;
+    CScript changeScript;
     if (change > 0) {
         CPubKey changeKey = ctx.FreshKey("yellowback-change");
-        mtx.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(changeKey.GetID())));
+        changeScript = GetScriptForDestination(changeKey.GetID());
+    }
+
+    if (dest.kind == AddressChoice::SAPLING) {
+        // Sapling shape (I2): the collateral is a single Sapling output; YED change (if any) is
+        // vout[0] and the payload vout[1]. Vault and YED inputs go in unsigned and are signed by
+        // SignRedeem() after FinishSapling() — ZIP-243 never covers a scriptSig.
+        TransactionBuilder b = ctx.NewBuilder(expiry);
+        b.SetLockTime(vault->lockHeight);
+        b.AddTransparentInputUnsigned(vaultOut, vault->collateralZat, 0xFFFFFFFE);
+        for (const YedCoin& c : sel) b.AddTransparentInputUnsigned(c.outpoint, c.token.nValue);
+        std::vector<Assignment> assignments;
+        if (change > 0) {
+            b.AddTransparentOutput(changeScript, TOKEN_VALUE);
+            assignments.push_back(Assignment(0, (uint32_t)change));
+            out.changeVout = 0;
+        }
+        std::vector<unsigned char> payload = EncodePayload(Payload::Redeem(assignments));
+        if (payload.empty()) throw std::runtime_error("cannot encode the redeem payload");
+        b.AddTransparentOutput(PayloadScript(payload), 0);
+        // Encrypt the note under the seed-derived key z_sendmany uses for t->z, so it is recoverable
+        // from the seed whether or not the destination belongs to this wallet.
+        HDSeed seed = ctx.wallet.GetHDSeedForRPC();
+        b.AddSaplingOutput(ovkForShieldingFromTaddr(seed), dest.sapling, collateralOut);
+        out.builder = b;
+        out.collateralTo = dest.text;
+        return out;
+    }
+
+    CMutableTransaction mtx = ctx.NewTx(expiry);
+    mtx.nLockTime = vault->lockHeight;
+    mtx.vin.push_back(CTxIn(vaultOut, CScript(), 0xFFFFFFFE));
+    for (const YedCoin& c : sel) mtx.vin.push_back(CTxIn(c.outpoint));
+    CScript collateralScript;
+    if (dest.kind == AddressChoice::TRANSPARENT) {
+        collateralScript = GetScriptForDestination(dest.keyId);
+        out.collateralTo = dest.text;
+    } else {
+        CPubKey fresh = ctx.FreshKey("yellowback-collateral");
+        out.freshKey = fresh;
+        collateralScript = GetScriptForDestination(fresh.GetID());
+        out.collateralTo = KeyIO(::Params()).EncodeDestination(CTxDestination(fresh.GetID()));
+    }
+    mtx.vout.push_back(CTxOut(collateralOut, collateralScript));
+    std::vector<Assignment> assignments;
+    if (change > 0) {
+        mtx.vout.push_back(CTxOut(TOKEN_VALUE, changeScript));
         assignments.push_back(Assignment(1, (uint32_t)change));
+        out.changeVout = 1;
     }
     std::vector<unsigned char> payload = EncodePayload(Payload::Redeem(assignments));
     if (payload.empty()) throw std::runtime_error("cannot encode the redeem payload");
     mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+    out.tx = mtx;
+    return out;
+}
 
+void FinishSapling(BuiltTx& out)
+{
+    if (!out.builder.has_value()) return;
+    TransactionBuilderResult r = out.builder->Build();
+    if (r.IsError()) throw std::runtime_error("Sapling build failed: " + r.GetError());
+    out.tx = CMutableTransaction(r.GetTxOrThrow());
+    out.builder.reset();
+    if (out.isMint) out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), 1));
+}
+
+void SignRedeem(BuiltTx& out, CWallet& wallet, uint32_t branchId)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    if (out.builder.has_value()) throw std::runtime_error("FinishSapling must run before SignRedeem");
+    if (out.tx.vin.size() != out.yedPrevs.size() + 1) throw std::runtime_error("redeem input count mismatch");
     // Owner signature over the vault script (manual sighash, as rpc/atomicswap.cpp does).
     CKey ownerKey;
-    if (!ctx.wallet.GetKey(vault->ownerPubKey.GetID(), ownerKey)) throw std::runtime_error("owner key not available");
-    uint256 hash = SignatureHash(vaultScript, CTransaction(mtx), 0, SIGHASH_ALL, vault->collateralZat, ctx.branchId);
+    if (!wallet.GetKey(out.ownerPubKey.GetID(), ownerKey)) throw std::runtime_error("owner key not available");
+    uint256 hash = SignatureHash(out.vaultScript, CTransaction(out.tx), 0, SIGHASH_ALL, out.vaultValue, branchId);
     valtype ownerSig;
     if (!ownerKey.Sign(hash, ownerSig)) throw std::runtime_error("owner signature failed");
     ownerSig.push_back((unsigned char)SIGHASH_ALL);
-    mtx.vin[0].scriptSig = BuildVaultScriptSig({}, ownerSig, vaultScript);
-    for (size_t i = 0; i < sel.size(); i++) {
-        if (!SignSignature(ctx.wallet, sel[i].token.scriptPubKey, mtx, i + 1, sel[i].token.nValue, SIGHASH_ALL, ctx.branchId)) {
+    out.tx.vin[0].scriptSig = BuildVaultScriptSig({}, ownerSig, out.vaultScript);
+    for (size_t i = 0; i < out.yedPrevs.size(); i++) {
+        if (!SignSignature(wallet, out.yedPrevs[i].first, out.tx, i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));
         }
     }
-
-    out.tx = mtx;
-    out.requiredBurn = requiredBurn;
-    out.burnCents = requiredBurn;
-    out.changeCents = change;
-    if (change > 0) out.ownYedOutputs.push_back(COutPoint(CTransaction(mtx).GetHash(), 1));
-    return out;
+    out.ownYedOutputs.clear();
+    if (out.changeVout >= 0) out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), out.changeVout));
 }
 
 unsigned int CountQuorumSignatures(const CTransaction& tx)
@@ -395,7 +594,8 @@ bool SameExceptSignatures(const CTransaction& a, const CTransaction& b, std::str
 {
     if (a.fOverwintered != b.fOverwintered || a.nVersion != b.nVersion || a.nVersionGroupId != b.nVersionGroupId) { why = "version differs"; return false; }
     if (a.nLockTime != b.nLockTime || a.nExpiryHeight != b.nExpiryHeight) { why = "locktime or expiry differs"; return false; }
-    if (a.valueBalance != b.valueBalance || !b.vShieldedSpend.empty() || !b.vShieldedOutput.empty() || !b.vJoinSplit.empty()) { why = "shielded components differ"; return false; }
+    if (a.valueBalance != b.valueBalance || a.vShieldedSpend != b.vShieldedSpend || a.vShieldedOutput != b.vShieldedOutput ||
+        a.vJoinSplit != b.vJoinSplit || a.bindingSig != b.bindingSig) { why = "shielded components differ"; return false; }
     if (a.vin.size() != b.vin.size() || a.vout.size() != b.vout.size()) { why = "input or output count differs"; return false; }
     for (size_t i = 0; i < a.vout.size(); i++) {
         if (a.vout[i].nValue != b.vout[i].nValue || a.vout[i].scriptPubKey != b.vout[i].scriptPubKey) { why = strprintf("output %u differs", (unsigned)i); return false; }

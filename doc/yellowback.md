@@ -52,6 +52,8 @@ ycash-cli yed_getnewaddress                 # a YED address (ye… on mainnet)
 ycash-cli yed_getbalance
 ycash-cli yed_estimatecollateral 10000 1    # YEC needed now to mint $100 at tier 1 (30 days)
 ycash-cli yed_mint 10000 1                  # mint; back up wallet.dat afterwards
+ycash-cli yed_mint 10000 1 ys1...           # the same, funded from that Sapling address in one transaction
+ycash-cli yed_mint 10000 1 s1...            # ... or from that transparent address only
 ycash-cli yed_listpositions                 # your vaults: status, unlock height, required burn, canRedeem
 ycash-cli yed_send ye… 2500                 # send $25.00
 ycash-cli yed_listtransactions
@@ -76,7 +78,9 @@ endpoints and submits through `yed_submitredeem`. Your node re-verifies the retu
 before broadcasting it; the operators cannot change where the collateral goes. If the deadline (36
 blocks after `yed_redeem`) passes, the client aborts with `yed_abortredeem` and you start over.
 Without the client: `yed_redeem <txid>` gives you the hex, each operator's `yed_cosignredeem`
-adds a signature, and `yed_submitredeem <hex>` broadcasts.
+adds a signature, and `yed_submitredeem <hex>` broadcasts. Either way, `--to <address>` /
+`yed_redeem <txid> <address>` sends the collateral to a chosen `s1…` address or, as a Sapling
+output, straight to a `ys1…` address; by default it goes to a fresh transparent address.
 
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick

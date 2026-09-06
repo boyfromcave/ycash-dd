@@ -16,6 +16,7 @@ workspace (`docs/plans/yellowback-v1-development-plan.md`, `docs/spec/yellowback
 | `src/init.cpp` | ≈ 40 | 75 (+72/−3) | help text, `-prune` incompatibility, `-yellowbackfee` floor, `-yellowbackmintlag` bounds, regtest-only argument check, index open/sync/register before the notifier thread, wallet-layer creation, shutdown sequence, wallet-RPC registration |
 | `src/experimental_features.{h,cpp}` | ≈ 8 | 7 | `fExperimentalYellowback` |
 | `src/rpc/register.h` | ≈ 6 | 5 | two registration functions |
+| `src/transaction_builder.h`, `src/transaction_builder.cpp` | 0 | ≈ 35 | plan I2 (revision 15): raw-script output, unsigned transparent input, `SetLockTime`; `Build()` skips unsigned inputs. The first logic edit outside `src/yellowback/`; wallet code in `libbitcoin_common`, not consensus |
 | `src/rpc/client.cpp` | ≈ 15 | 10 | numeric-argument conversions |
 | `src/Makefile.am`, `src/Makefile.test.include` | ≈ 25 | 34 (+33/−1) | new sources and tests |
 | `qa/pull-tester/rpc-tests.py` | ≈ 6 | 9 (+8/−1) | seven test scripts; `BITCOIND` = `src/ycashd` (the inherited runner named `src/zcashd`) |

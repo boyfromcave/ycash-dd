@@ -58,6 +58,7 @@ def main(argv=None):
     ap.add_argument("--endpoints-file", help="file with one operator base URL per line")
     ap.add_argument("--insecure", action="store_true", help="allow plain http:// endpoints (tests only)")
     ap.add_argument("--wait-blocks", type=int, default=36, help="give up this many blocks after yed_redeem")
+    ap.add_argument("--to", default=None, help="collateral destination: an s1... or ys1... address (default: a fresh transparent address)")
     args = ap.parse_args(argv)
 
     endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()]
@@ -68,7 +69,7 @@ def main(argv=None):
         raise SystemExit("no operator endpoints")
 
     node = Node(args.rpc_url)
-    red = node.yed_redeem(args.vault)
+    red = node.yed_redeem(args.vault, args.to) if args.to else node.yed_redeem(args.vault)
     k = int(red["roster"]["k"])
     deadline = int(red["deadlineHeight"])
     print("redeem built: burn %d cents, need %d of %d signatures, deadline height %d" %

@@ -19,6 +19,7 @@
 #include "script/sign.h"
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
+#include "transaction_builder.h"
 #include "utiltest.h"
 
 #include <boost/test/unit_test.hpp>
@@ -246,6 +247,53 @@ BOOST_AUTO_TEST_CASE(vault_scriptsig_roundtrip)
     // Missing leading OP_0 / too few pushes.
     BOOST_CHECK(!ParseVaultScriptSig(CScript() << o << valtype(vault.begin(), vault.end()), q, os, vs));
     BOOST_CHECK(!ParseVaultScriptSig(CScript() << OP_0, q, os, vs));
+}
+
+// Plan I2: the three-method TransactionBuilder extension the Sapling shapes rely on. An unsigned
+// input is counted for value and left for the caller; a raw-script output carries the OP_RETURN;
+// SetLockTime sets nLockTime. The signed P2PKH input still verifies after Build().
+BOOST_AUTO_TEST_CASE(transaction_builder_extension)
+{
+    RegtestActivateSapling();
+    const int height = 200;
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    CBasicKeyStore keystore;
+    CKey key;
+    key.MakeNewKey(true);
+    keystore.AddKey(key);
+    const CScript p2pkh = GetScriptForDestination(key.GetPubKey().GetID());
+    const CScript payload = CScript() << OP_RETURN << valtype(4, 0x42);
+
+    TransactionBuilder b(::Params().GetConsensus(), height, &keystore);
+    b.SetExpiryHeight(height + 20);
+    b.SetFee(1000);
+    b.SetLockTime(123);
+    b.AddTransparentInput(COutPoint(uint256S("01"), 0), p2pkh, 2 * COIN);
+    b.AddTransparentInputUnsigned(COutPoint(uint256S("02"), 3), 5 * COIN, 0xFFFFFFFE);
+    b.AddTransparentOutput(payload, 0);
+    CTxDestination dest = key.GetPubKey().GetID();
+    b.AddTransparentOutput(dest, 7 * COIN - 1000);
+    TransactionBuilderResult r = b.Build();
+    const std::string buildError = r.IsError() ? r.GetError() : std::string();
+    BOOST_REQUIRE_MESSAGE(!r.IsError(), buildError);
+    CTransaction tx = r.GetTxOrThrow();
+
+    BOOST_CHECK_EQUAL(tx.nLockTime, 123u);
+    BOOST_CHECK_EQUAL(tx.nExpiryHeight, (uint32_t)(height + 20));
+    BOOST_REQUIRE_EQUAL(tx.vin.size(), 2u);
+    BOOST_CHECK(!tx.vin[0].scriptSig.empty());
+    BOOST_CHECK(tx.vin[1].scriptSig.empty());
+    BOOST_CHECK_EQUAL(tx.vin[1].nSequence, 0xFFFFFFFEu);
+    BOOST_CHECK(tx.vin[1].prevout == COutPoint(uint256S("02"), 3));
+    BOOST_REQUIRE_EQUAL(tx.vout.size(), 2u);           // no change: 7 - 0.00001 - fee == out
+    BOOST_CHECK(tx.vout[0].scriptPubKey == payload);
+    BOOST_CHECK_EQUAL(tx.vout[0].nValue, 0);
+    BOOST_CHECK(tx.vout[1].scriptPubKey == p2pkh);
+    BOOST_CHECK(tx.vShieldedSpend.empty() && tx.vShieldedOutput.empty());
+    BOOST_CHECK_EQUAL(tx.valueBalance, 0);
+    ScriptError err;
+    BOOST_CHECK_MESSAGE(Verify(CMutableTransaction(tx), p2pkh, 2 * COIN, branchId, &err), ScriptErrorString(err));
+    RegtestDeactivateSapling();
 }
 
 BOOST_AUTO_TEST_CASE(vault_spend_verifies)

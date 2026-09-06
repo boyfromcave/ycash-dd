@@ -129,9 +129,15 @@ RedeemCheck CheckRedeem(const YellowbackIndex& index, const CCoinsViewCache& vie
     c.requiredBurn = active ? RequiredBurn(vault->mintedCents, snap->errBps) : 0;
     if (c.burned < c.requiredBurn) return Refuse(c, "RED-3", strprintf("burn %d below required %d", c.burned, c.requiredBurn));
 
-    // RED-4
-    if (!tx.vJoinSplit.empty() || !tx.vShieldedSpend.empty() || !tx.vShieldedOutput.empty() || tx.valueBalance != 0) {
-        return Refuse(c, "RED-4", "transaction is not transparent-only");
+    // RED-4. Co-signer *policy*, not a state rule (TX-0 covers the coinbase only, plan revision 14):
+    // no JoinSplits and no Sapling spends; Sapling outputs are allowed so the collateral can go
+    // straight to a ys1… address (plan I2), in which case valueBalance is negative and
+    // GetValueOut() below already counts it as an output.
+    if (!tx.vJoinSplit.empty() || !tx.vShieldedSpend.empty()) {
+        return Refuse(c, "RED-4", "transaction carries shielded spends or JoinSplits");
+    }
+    if (tx.valueBalance > 0 || (tx.valueBalance < 0 && tx.vShieldedOutput.empty())) {
+        return Refuse(c, "RED-4", "valueBalance is inconsistent with the shielded outputs");
     }
     std::string reason;
     if (!IsStandardTx(tx, reason, ::Params(), chainHeight + 1)) return Refuse(c, "RED-4", "non-standard: " + reason);

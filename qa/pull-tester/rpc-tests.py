@@ -140,6 +140,7 @@ ZMQ_SCRIPTS = [
 
 EXTENDED_SCRIPTS = [
     'yellowback_reorg_stress.py',
+    'yellowback_sapling.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',

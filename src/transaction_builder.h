@@ -84,10 +84,15 @@ struct JSDescriptionInfo {
 struct TransparentInputInfo {
     CScript scriptPubKey;
     CAmount value;
+    // Yellowback (plan I2): false for an input the caller signs after Build().
+    // ZIP-243 never covers a scriptSig, so signing afterwards keeps the
+    // binding and spend-auth signatures valid.
+    bool sign;
 
     TransparentInputInfo(
         CScript scriptPubKey,
-        CAmount value) : scriptPubKey(scriptPubKey), value(value) {}
+        CAmount value,
+        bool sign = true) : scriptPubKey(scriptPubKey), value(value), sign(sign) {}
 };
 
 class TransactionBuilderResult {
@@ -168,6 +173,17 @@ public:
     void AddTransparentInput(COutPoint utxo, CScript scriptPubKey, CAmount value);
 
     void AddTransparentOutput(const CTxDestination& to, CAmount value);
+
+    // Yellowback (plan I2): a raw-script output (the OP_RETURN payload).
+    void AddTransparentOutput(const CScript& scriptPubKey, CAmount value);
+
+    // Yellowback (plan I2): an input counted for value but left unsigned by
+    // Build() — a script the keystore cannot solve (the vault P2SH), signed by
+    // the caller afterwards. Needs no keystore.
+    void AddTransparentInputUnsigned(COutPoint utxo, CAmount value, uint32_t nSequence = 0xFFFFFFFF);
+
+    // Yellowback (plan I2): nLockTime (a vault spend sets it to lockHeight).
+    void SetLockTime(uint32_t nLockTime);
 
     void SendChangeTo(libzcash::SaplingPaymentAddress changeAddr, uint256 ovk);
 

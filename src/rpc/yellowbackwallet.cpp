@@ -190,31 +190,51 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
 
 UniValue yed_mint(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 2)
+    if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
-            "yed_mint cents tier\n"
+            "yed_mint cents tier ( \"from\" )\n"
             "\nMint YED: locks the required YEC collateral in a vault for the tier's period and creates the YED.\n"
             "The collateral requirement is fixed at the evaluation height (index tip minus the mint lag) and known before signing.\n"
             "Back up wallet.dat afterwards: the vault owner key is a fresh keypool key.\n"
-            "\nResult: { \"txid\", \"vault\", \"lockHeight\", \"evalHeight\", \"expiryHeight\", \"collateralZat\", \"collateral\", \"warning\" }\n");
+            "\nArguments:\n"
+            "1. cents   (numeric, required) amount of YED to mint, in cents\n"
+            "2. tier    (numeric, required) lock tier\n"
+            "3. \"from\"  (string, optional) fund the collateral from this address: an s1... address (its confirmed\n"
+            "             outputs only) or a ys1... address (its Sapling notes, spent in the same transaction; the change\n"
+            "             returns to it). Default: any confirmed transparent output of the wallet.\n"
+            "\nResult: { \"txid\", \"vault\", \"lockHeight\", \"evalHeight\", \"expiryHeight\", \"collateralZat\", \"collateral\", \"fundedFrom\", \"from\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     int64_t cents = params[0].get_int64();
     int tier = params[1].get_int();
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    EnsureWalletIsUnlocked();
+    const std::string from = params.size() > 2 ? params[2].get_str() : "";
     BuiltTx built;
     CReserveKey reservekey(pwalletMain);
+    uint256 txid;
     {
-        LOCK(index.cs_yellowback);
-        EnsureHealthy(index);
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildMint(yw, cents, tier, reservekey, from);
+            } catch (const std::runtime_error& e) {
+                throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+            }
+        }
+        if (!built.NeedsProving()) txid = Commit(yw, built, &reservekey);
+    }
+    if (built.NeedsProving()) {
+        // Sapling shape (I2): the spend proofs take seconds; no lock is held while they are made.
         try {
-            built = BuildMint(yw, cents, tier, reservekey);
+            FinishSapling(built);
         } catch (const std::runtime_error& e) {
             throw JSONRPCError(RPC_WALLET_ERROR, e.what());
         }
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        txid = Commit(yw, built, &reservekey);
     }
-    uint256 txid = Commit(yw, built, &reservekey);
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
     o.pushKV("vault", txid.GetHex() + ":0");
@@ -223,6 +243,8 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
     o.pushKV("expiryHeight", (int64_t)built.tx.nExpiryHeight);
     o.pushKV("collateralZat", built.collateralZat);
     o.pushKV("collateral", ValueFromAmount(built.collateralZat));
+    o.pushKV("fundedFrom", built.fundedFrom);
+    o.pushKV("from", from);
     o.pushKV("ownerKeyId", built.freshKey.GetID().GetHex());
     o.pushKV("warning", built.warning.empty() ? "back up wallet.dat: the vault owner key is a fresh keypool key" : built.warning);
     return o;
@@ -277,38 +299,71 @@ UniValue yed_sendmany(const UniValue& params, bool fHelp)
 
 UniValue yed_redeem(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() != 1)
+    if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
-            "yed_redeem \"vaultTxid\"\n"
+            "yed_redeem \"vaultTxid\" ( \"to\" )\n"
             "\nBuild and owner-sign the redemption of a vault: burns the required YED and returns the collateral.\n"
             "No network I/O: returns the hex to pass to each operator's yed_cosignredeem (or /cosign) and then to\n"
             "yed_submitredeem. Records a pending redemption for the vault; yed_abortredeem clears it.\n"
-            "\nResult: { \"hex\", \"vault\", \"roster\": {k,n,index,pubkeys}, \"requiredBurnCents\", \"burnCents\", \"changeCents\", \"expiryHeight\", \"deadlineHeight\" }\n");
+            "\nArguments:\n"
+            "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
+            "2. \"to\"         (string, optional) where the collateral goes: an s1... address, or a ys1... address\n"
+            "                  (paid as a Sapling output). Default: a fresh transparent address of this wallet.\n"
+            "\nResult: { \"hex\", \"vault\", \"roster\": {k,n,index,pubkeys}, \"requiredBurnCents\", \"burnCents\", \"changeCents\", \"collateralTo\", \"shielded\", \"expiryHeight\", \"deadlineHeight\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    EnsureWalletIsUnlocked();
+    const std::string to = params.size() > 1 ? params[1].get_str() : "";
     BuiltTx built;
     std::vector<RosterRecord> rosters;
     VaultRecord vault;
     {
-        LOCK(index.cs_yellowback);
-        EnsureHealthy(index);
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildRedeem(yw, vaultTxid, to);
+            } catch (const std::runtime_error& e) {
+                throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+            }
+            State st(index.View());
+            rosters = st.GetRosters();
+            vault = st.GetVault(COutPoint(vaultTxid, 0)).value();
+        }
+        if (!built.NeedsProving()) {
+            try {
+                SignRedeem(built, *pwalletMain, SignerBranchId());
+            } catch (const std::runtime_error& e) {
+                throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+            }
+        }
+    }
+    if (built.NeedsProving()) {
+        // Sapling shape (I2): prove the collateral output with no lock held, then re-lock to sign
+        // the vault and YED inputs (scriptSigs are outside the ZIP-243 digest).
         try {
-            built = BuildRedeem(yw, vaultTxid);
+            FinishSapling(built);
         } catch (const std::runtime_error& e) {
             throw JSONRPCError(RPC_WALLET_ERROR, e.what());
         }
-        State st(index.View());
-        rosters = st.GetRosters();
-        vault = st.GetVault(COutPoint(vaultTxid, 0)).value();
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        try {
+            SignRedeem(built, *pwalletMain, SignerBranchId());
+        } catch (const std::runtime_error& e) {
+            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+        }
     }
     PendingRedemption pr;
     pr.vault = COutPoint(vaultTxid, 0);
     pr.ownerSignedTx = CTransaction(built.tx);
     pr.reservedInputs = built.yedInputs;
-    pr.createdHeight = chainActive.Height();
+    {
+        LOCK(cs_main);
+        pr.createdHeight = chainActive.Height();
+    }
     pr.expiryHeight = built.tx.nExpiryHeight;
     if (!yw.AddPending(pr)) throw JSONRPCError(RPC_WALLET_ERROR, "a redemption of this vault is already pending");
 
@@ -329,6 +384,8 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
     o.pushKV("requiredBurnCents", built.requiredBurn);
     o.pushKV("burnCents", built.burnCents);
     o.pushKV("changeCents", built.changeCents);
+    o.pushKV("collateralTo", built.collateralTo);
+    o.pushKV("shielded", !pr.ownerSignedTx.vShieldedOutput.empty());
     o.pushKV("expiryHeight", (int64_t)built.tx.nExpiryHeight);
     o.pushKV("deadlineHeight", (int64_t)built.tx.nExpiryHeight - (int64_t)TX_EXPIRING_SOON_THRESHOLD - 1);
     return o;
