@@ -58,7 +58,7 @@ DigiDollar live in the workspace that develops this fork (`yellowback-workspace`
 | `src/rpc/yellowback.cpp`, `src/rpc/yellowbackwallet.cpp` | Node and wallet `yed_*` RPCs |
 | `src/test/yellowback_*_tests.cpp` | Unit tests (`src/test/test_bitcoin --run_test='yellowback_*'`) |
 | `qa/rpc-tests/yellowback_*.py` | Functional tests on regtest, including a three-operator federation |
-| `contrib/yellowback/` | Coordinator, redemption client, source-layer unit tests |
+| `contrib/yellowback/` | Coordinator, redemption client, source-layer unit tests, and `devnet/yellowback-devnet` (a private Yellowback network on one machine for trying the wallet) |
 | `.github/workflows/yellowback-tests.yml` | CI for all of the above |
 
 Nothing under `src/consensus/`, `src/script/`, `src/main.cpp`, `src/pow/` or
