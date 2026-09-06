@@ -131,7 +131,8 @@ at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
   been run yet.
 - Depends: the native `aarch64-apple-darwin` toolchain (clang 18.1.8, rust, boost, libevent,
   zeromq, libsodium, utfcpp, googletest, bdb) builds from `depends/` unchanged.
-- `src/test/test_bitcoin --run_test='yellowback_*'`: 28 cases green.
+- `src/test/test_bitcoin --run_test='yellowback_*'`: 31 cases green (28 after Phase 2; Phase 6
+  added the two corpus-replay cases and the index fault-injection case).
 - `qa/rpc-tests/yellowback_index.py`: green (about five minutes, four nodes).
 - Full `src/test/test_bitcoin` (450 cases): 2 failures, both pre-existing at the pin and in files
   the fork does not touch — `main_tests/subsidy_limit_test` (subsidy sum) and

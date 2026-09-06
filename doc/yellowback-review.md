@@ -13,18 +13,20 @@ workspace (`docs/plans/yellowback-v1-development-plan.md`, `docs/spec/yellowback
 
 | Existing file | Budget | Actual | What |
 |---|---|---|---|
-| `src/init.cpp` | ≈ 40 | 75 (+73/−2) | help text, `-prune` incompatibility, `-yellowbackfee` floor, `-yellowbackmintlag` bounds, regtest-only argument check, index open/sync/register before the notifier thread, wallet-layer creation, shutdown sequence, wallet-RPC registration |
+| `src/init.cpp` | ≈ 40 | 75 (+72/−3) | help text, `-prune` incompatibility, `-yellowbackfee` floor, `-yellowbackmintlag` bounds, regtest-only argument check, index open/sync/register before the notifier thread, wallet-layer creation, shutdown sequence, wallet-RPC registration |
 | `src/experimental_features.{h,cpp}` | ≈ 8 | 7 | `fExperimentalYellowback` |
 | `src/rpc/register.h` | ≈ 6 | 5 | two registration functions |
 | `src/rpc/client.cpp` | ≈ 15 | 10 | numeric-argument conversions |
-| `src/Makefile.am`, `src/Makefile.test.include` | ≈ 25 | 32 | new sources and tests |
+| `src/Makefile.am`, `src/Makefile.test.include` | ≈ 25 | 34 (+33/−1) | new sources and tests |
 | `qa/pull-tester/rpc-tests.py` | ≈ 6 | 9 (+8/−1) | seven test scripts; `BITCOIND` = `src/ycashd` (the inherited runner named `src/zcashd`) |
 | `qa/rpc-tests/test_framework/util.py`, `qa/rpc-tests/multi_rpc.py` | 2 | 2 | `zcash.conf` → `ycash.conf` (G1) |
 | `src/main.cpp`, `src/consensus/*`, `src/script/*`, `src/primitives/*`, `src/pow/*`, `src/chainparams.cpp`, `src/wallet/*`, `src/txdb.*`, `configure.ac` | **0** | **0** | verified by `git diff --stat ycash-legacy...HEAD -- <those paths>` (empty), also a CI step |
 
-Total: 54 files, +10,432 / −7 lines, of which 135 lines in existing files. New code: `src/yellowback/`
-+ `src/rpc/yellowback*.cpp` 5,618 lines; unit tests 1,852; functional tests 2,265; coordinator and
-redemption client 704 (Python); fuzz targets and corpora; documentation.
+Total (at `93805aca6`, the Phase 6 part 2 commit): 60 files, +11,263 / −7 lines, of which 138 added
+and 7 removed in existing files. New code: `src/yellowback/` + `src/rpc/yellowback*.cpp` 5,623
+lines; unit tests 1,852; functional tests 2,290 (incl. `test_framework/yellowback_util.py`);
+coordinator and redemption client 721 (Python); fuzz targets 122; CI workflow 122; documentation
+395. Regenerate with `git diff --numstat ycash-legacy...HEAD` before the review request.
 
 The `init.cpp` overshoot (75 vs 40) is the argument validation the audits asked for (C2, C4, C16)
 and the wallet-layer creation; every added line is inside `if (fExperimentalYellowback)` or the
@@ -90,5 +92,7 @@ shutdown sequence, and a node started without `-yellowback` executes none of it 
   federation key.
 - Two inherited unit tests fail at the v4.5.0 pin on this host (`main_tests/subsidy_limit_test`,
   `rpc_wallet_tests/rpc_z_sendmany_internals`); neither file is touched by the fork.
-- The wallet application (`yecwallet-dd`) has not been compiled on this host (no Qt 6); its code
-  was written against `doc/yellowback-rpc.md` and awaits a system-Qt build (plan Phase 5b).
+- The wallet application (`yecwallet-dd`) compiles against a system Qt 6 and its QTest target
+  passes offscreen, but it has not yet been run against a live node; every `yed_*` reply shape it
+  consumes was reconciled against `doc/yellowback-rpc.md` and this fork's RPC sources by reading
+  (plan Phase 5b).
