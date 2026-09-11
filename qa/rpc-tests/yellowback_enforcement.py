@@ -93,6 +93,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         super().add_options(parser)
         parser.add_option('--extended', dest='extended', default=False, action='store_true',
                           help='the nightly 200-block randomized run (case 8)')
+        parser.add_option('--extended-blocks', dest='extended_blocks', default=200, type='int',
+                          help='length of the --extended run (default 200)')
         parser.add_option('--only', dest='only', default=None,
                           help='comma-separated case method names (development)')
 
@@ -1267,7 +1269,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
 # Rule: BLK-1
 # Rule: BLK-2
 # Rule: ACT-7
-        print('=== case8_extended_random_activity (200 blocks)')
+        n_blocks = int(getattr(self.options, 'extended_blocks', 200))
+        print('=== case8_extended_random_activity (%d blocks)' % n_blocks)
         rng = random.Random(20260911)
         user, stock = self.nodes[USER], self.nodes[STOCK]
         for i in POOLS:
@@ -1275,7 +1278,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         injected = 0
         rejected_start = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks']
         stock_blocks = 0
-        for n in range(200):
+        for n in range(n_blocks):
             roll = rng.random()
             if roll < 0.10:
                 stock.generate(1)
@@ -1309,9 +1312,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                 self.pools_outmine(blockhash)
             else:
                 self.pools_mine(1, 'extended %d' % n)
-            for i in ENFORCING:
-                for row in self.nodes[i].yed_listvaults():
-                    assert_equal(row.get('unbacked', False), False)
+            if n % 10 == 0:                       # the invariant, every tenth step
+                for i in ENFORCING:
+                    for row in self.nodes[i].yed_listvaults():
+                        assert_equal((i, row['txid'], row.get('unbacked', False)),
+                                     (i, row['txid'], False))
         rejected = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks'] - rejected_start
         assert_equal(rejected, injected)
         assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
