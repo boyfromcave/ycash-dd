@@ -1601,7 +1601,8 @@ BOOST_AUTO_TEST_CASE(overlay_view_equivalence)
     block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
     block.vtx.push_back(CTransaction(f.SpendTx(v, {}, f.tip)));
     OverlayStateView outer(f.view);
-    OverlayStateView inner(outer);
+    StateView& outerBase = outer;   // nest, do not copy (the copy constructor is deleted; mapping.md section 13.6)
+    OverlayStateView inner(outerBase);
     BlockEvaluation a = EvaluateBlock(inner, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
     MemoryStateView copy = f.view;
     UndoRecord undo;

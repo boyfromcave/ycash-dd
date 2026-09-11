@@ -84,8 +84,12 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
     const std::optional<FoundPayload> fp = FindPayload(tx);
     if (!relevant && !fp.has_value()) return true;
 
-    // The dry run (one per Yellowback-relevant candidate), on a nested overlay.
-    OverlayStateView sub(view.Overlay());
+    // The dry run (one per Yellowback-relevant candidate), on a nested overlay. `templateOverlay` is
+    // bound as a StateView& on purpose: OverlayStateView sub(view.Overlay()) would pick the copy
+    // constructor (an exact match) and `sub` would then share the *index* as its base, so Commit()
+    // would write into the database (docs/mapping.md section 13.6).
+    StateView& templateOverlay = view.Overlay();
+    OverlayStateView sub(templateOverlay);
     State st(sub);
     const TxOutcome out = ProcessTx(st, p, tx, nHeight);
     const bool strict = index.GetMinerConfig().templatePolicy != "consensus";
