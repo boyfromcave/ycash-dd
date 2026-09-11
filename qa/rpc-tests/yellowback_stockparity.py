@@ -40,7 +40,9 @@ from test_framework.yellowback_util import yellowback_node_args
 GBT_VOLATILE = {'curtime', 'longpollid', 'mintime', 'transactions', 'coinbasetxn', 'target', 'bits'}
 # getinfo fields that are per-node by definition.
 GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'balance', 'walletversion',
-                    'keypoololdest', 'keypoolsize', 'paytxfee', 'relayfee', 'unlocked_until'}
+                    'keypoololdest', 'keypoolsize', 'paytxfee', 'relayfee', 'unlocked_until',
+                    # the git describe string of the build itself: v4.5.0-<commit> either way
+                    'build', 'subversion'}
 
 LEGACY, FORK = 0, 1
 
@@ -64,7 +66,12 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         if not self.have_legacy:
             print('*** no --ref-ycashd / $REF_YCASHD: BOTH nodes are the fork binary without')
             print('*** -yellowback.  The legacy half of this comparison was NOT run.')
-        args = [yellowback_node_args(yellowback=False) for _ in range(2)]
+        # -txexpirydelta keeps a wallet transaction alive across this scenario's fast mining
+        # (a transaction that expires and is re-relayed costs the sender Ycash's own tx-expired
+        # DoS 10), and -whitelist stops either node scoring the other at all: this script must
+        # compare the two binaries, not stock DoS behaviour.
+        extra = ['-txexpirydelta=200', '-whitelist=127.0.0.1']
+        args = [yellowback_node_args(list(extra), yellowback=False) for _ in range(2)]
         self.nodes = start_nodes(2, self.options.tmpdir, extra_args=args, binary=[ref, None])
         connect_nodes_bi(self.nodes, 0, 1)
         self.is_network_split = False
@@ -122,7 +129,7 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         while mined < total - 40:
             n = self.nodes[mined % 2]
             other = self.nodes[(mined + 1) % 2]
-            if n.getbalance() > 1:
+            if mined % 10 == 0 and n.getbalance() > 1:
                 try:
                     n.sendtoaddress(other.getnewaddress(), 1.0)
                     sync_mempools([a, b])
