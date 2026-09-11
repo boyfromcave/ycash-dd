@@ -38,6 +38,7 @@ BASE_SCRIPTS= [
     'yellowback_index.py',
     'yellowback_activation.py',
     'yellowback_mining.py',
+    'yellowback_quote.py',
     'yellowback_rpc_contract.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',

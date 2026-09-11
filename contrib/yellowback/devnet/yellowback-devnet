@@ -2,10 +2,14 @@
 """Five-node Yellowback v2 regtest for YecWallet.
 
 Node 0 is the funded wallet, node 1 is stock, and nodes 2-4 are signalling
-pools with fixed payout addresses. Quotes use yed_setquote directly: no
-federation, coordinators, anchors, rosters, or endpoint configuration.
+pools with fixed payout addresses. Quotes go in with yed_setquote, either
+directly from this script (the default) or, with `up --agents`, through one
+real `yellowback-quote --mock-price` process per pool reading a shared mock
+price file -- the same path a pool runs. No federation, coordinators, anchors,
+rosters or endpoint configuration.
 
-Commands: up, check, status, mine N [node], price USD, wallet, cli, down.
+Commands: up [--agents], check, status, mine N [node], price USD, wallet,
+cli [--node N | --datadir N] [-- args], down [--wipe].
 """
 import argparse
 import json
@@ -21,14 +25,35 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 WORKSPACE = os.path.dirname(REPO)
 sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
 from test_framework.util import (PortSeed, bitcoind_processes, connect_nodes_bi,
-                                 get_rpc_proxy, initialize_chain_clean, rpc_port,
-                                 rpc_url, start_node, sync_blocks)
+                                 get_rpc_proxy, initialize_chain_clean, rpc_auth_pair,
+                                 rpc_port, rpc_url, start_node, sync_blocks)
 from test_framework.yellowback_util import (ACTIVATION_BLOCKS, POOL_WIFS, address_of,
                                             pool_args, set_quote, wait_yed_healthy,
                                             yellowback_node_args)
 
 NODES, USER, POOLS = 5, 0, (2, 3, 4)
 DEFAULT_DIR = os.path.expanduser("~/yb-devnet")
+AGENT = os.path.join(REPO, "contrib", "yellowback", "yellowback-quote")
+QUOTE_MAX_AGE = 120     # -yellowbackquotemaxage on the pools under --agents (plan section 5 f): a stopped agent shows within two minutes
+AGENT_CONF = """# written by yellowback-devnet for pool node %(node)d
+[node]
+rpc_url = "http://127.0.0.1:%(port)d"
+rpc_user = "%(user)s"
+rpc_password = "%(password)s"
+
+[quote]
+poll_seconds = 5
+fail_polls = 2
+min_sources = 1
+min_venues = 1
+
+[[sources]]
+name = "nowhere"
+kind = "generic"
+venue = "nowhere"
+url = "http://127.0.0.1:1/never"
+path = "price"
+"""
 
 def path(directory): return os.path.join(directory, "devnet.json")
 def node_dir(directory, node): return os.path.join(directory, "node%d" % node)
@@ -36,6 +61,42 @@ def rpc(state, node): return get_rpc_proxy(rpc_url(node), node, timeout=30)
 def alive(state, node):
     try: rpc(state, node).getblockcount(); return True
     except Exception: return False
+def mock_path(directory): return os.path.join(directory, "mock-price")
+def agent_pids(state): return {int(k): v for k, v in (state.get("agents") or {}).items()}
+def agent_alive(pid):
+    try: os.kill(pid, 0); return True
+    except OSError: return False
+def write_mock(directory, usd):
+    tmp = mock_path(directory) + ".tmp"
+    with open(tmp, "w") as file: file.write("%s\n" % usd)
+    os.replace(tmp, mock_path(directory))
+def start_agent(directory, node):
+    """One yellowback-quote per pool, detached, reading the shared mock price file; returns its pid."""
+    user, password = rpc_auth_pair(node)
+    conf = os.path.join(directory, "quote-%d.toml" % node)
+    with open(conf, "w") as file: file.write(AGENT_CONF % {"node": node, "port": rpc_port(node), "user": user, "password": password})
+    log = open(os.path.join(directory, "quote-%d.log" % node), "a")
+    process = subprocess.Popen([sys.executable, AGENT, "--conf", conf, "--mock-price", mock_path(directory)],
+                               stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    log.close()
+    return process.pid
+def stop_agents(state):
+    for node, pid in agent_pids(state).items():
+        if agent_alive(pid):
+            try: os.kill(pid, 15); print("stopping quote agent of node%d (pid %d)" % (node, pid))
+            except OSError as error: print("agent of node%d: %s" % (node, error))
+def wait_quotes(state, since=None, timeout=60):
+    """Wait until every pool's next tag is a quote; with `since` (a wall-clock time), until each
+    pool's quote was stamped at least two seconds after it, so the agents have re-read the mock."""
+    deadline = time.time() + timeout
+    while True:
+        miners = {node: rpc(state, node).yed_getinfo()["miner"] for node in POOLS}
+        def fresh(miner):
+            if miner["quoteKind"] != "quote": return False
+            return since is None or (time.time() - since) - miner["quoteAgeSeconds"] >= 2
+        if all(fresh(miner) for miner in miners.values()): return
+        if time.time() > deadline: raise RuntimeError("quote agents did not publish within %ds: %s" % (timeout, {node: miner["quoteKind"] for node, miner in miners.items()}))
+        time.sleep(0.5)
 def load(directory):
     try:
         with open(path(directory)) as file: state = json.load(file)
@@ -92,8 +153,11 @@ def up(args):
     if not os.access(binary, os.X_OK): sys.exit("ycashd not found at %s" % binary)
     os.environ["BITCOIND"], PortSeed.n = binary, args.portseed
     addresses = [address_of(wif) for wif in POOL_WIFS]
-    node_args = [yellowback_node_args(), yellowback_node_args(yellowback=False)] + [pool_args(address) for address in addresses]
-    os.makedirs(directory); nodes = []
+    pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if args.agents else None
+    node_args = [yellowback_node_args(), yellowback_node_args(yellowback=False)] + [pool_args(address, pool_extra) for address in addresses]
+    if args.agents and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
+    os.makedirs(directory); nodes = []; agents = {}
+    state = {"portseed": args.portseed, "bitcoind": binary, "num_nodes": NODES, "pools": list(POOLS), "pool_addresses": addresses, "price_usd": str(args.price), "agents": agents, "created": time.strftime("%Y-%m-%d %H:%M:%S")}
     try:
         print("[1/4] starting five regtest nodes in %s" % directory)
         initialize_chain_clean(directory, NODES)
@@ -104,13 +168,20 @@ def up(args):
         print("[2/4] funding node0 with 101 untagged blocks")
         nodes[USER].generate(101); wait(nodes)
         if nodes[USER].getbalance() <= 0: raise RuntimeError("node0 has no mature balance")
-        print("[3/4] setting $%s quotes on pools 2-4" % args.price)
-        for node in POOLS: set_quote(nodes[node], args.price)
+        if args.agents:
+            print("[3/4] starting one yellowback-quote per pool at $%s (mock price %s)" % (args.price, mock_path(directory)))
+            write_mock(directory, args.price)
+            for node in POOLS: agents[node] = start_agent(directory, node)
+            wait_quotes(state)
+        else:
+            print("[3/4] setting $%s quotes on pools 2-4" % args.price)
+            for node in POOLS: set_quote(nodes[node], args.price)
         print("[4/4] mining 131 signalling blocks round-robin across pools")
         for block in range(ACTIVATION_BLOCKS + 2):
             nodes[POOLS[block % len(POOLS)]].generate(1); sync_blocks(nodes)
         wait(nodes)
     except Exception:
+        stop_agents(state)
         for node in nodes:
             try: node.stop()
             except Exception: pass
@@ -119,7 +190,6 @@ def up(args):
             except Exception: pass
             del bitcoind_processes[index]
         raise
-    state = {"portseed": args.portseed, "bitcoind": binary, "num_nodes": NODES, "pools": list(POOLS), "pool_addresses": addresses, "price_usd": str(args.price), "created": time.strftime("%Y-%m-%d %H:%M:%S")}
     save(directory, state); check(state, False)
     print("ready at height %d: node0 has %s YEC" % (nodes[USER].getblockcount(), nodes[USER].getbalance()))
     print("wallet: " + " ".join(wallet_command(directory)))
@@ -131,9 +201,19 @@ def command_check(args):
 def status(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     for index, role in enumerate(("user", "stock", "pool", "pool", "pool")): print("node%d %-5s rpc %d %s" % (index, role, rpc_port(index), "up" if alive(state, index) else "DOWN"))
+    if not alive(state, USER):
+        print("node0 is down: no chain state to report (`up --force` rebuilds, `down --wipe` removes the directory)"); return 1
     node = rpc(state, USER); activation, stats = node.yed_getactivation(), node.yed_getstats()
     print("height %d; activation %s; minting %s" % (node.getblockcount(), activation["status"], "allowed" if stats["mintingAllowed"] else "halted"))
-    for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s" % (row["payoutAddress"], row["registered"], row["eligible"]))
+    for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s" % (row["payoutAddress"], json.dumps(row["registered"]), json.dumps(row["eligible"])))
+    for pool in POOLS:
+        miner = rpc(state, pool).yed_getinfo()["miner"] if alive(state, pool) else {}
+        print("node%d next tag: %s (quote age %s s)" % (pool, miner.get("quoteKind", "?"), miner.get("quoteAgeSeconds")))
+    agents = agent_pids(state)
+    if agents:
+        for pool, pid in sorted(agents.items()): print("quote agent node%d pid %d %s" % (pool, pid, "up" if agent_alive(pid) else "DOWN"))
+        print("mock price file: %s ($%s)" % (mock_path(directory), state["price_usd"]))
+    else: print("quotes: set directly (`up --agents` runs the real quote agents)")
     print("wallet: " + " ".join(wallet_command(directory)))
 def mine(args):
     state = load(os.path.abspath(args.dir))
@@ -144,6 +224,13 @@ def mine(args):
 def price(args):
     state, value = load(os.path.abspath(args.dir)), Decimal(args.usd)
     if value <= 0: sys.exit("price must be positive")
+    if agent_pids(state):
+        since = time.time(); write_mock(os.path.abspath(args.dir), value)
+        state["price_usd"] = str(value); save(os.path.abspath(args.dir), state)
+        try: wait_quotes(state, since)
+        except RuntimeError as error: sys.exit(str(error))
+        print("set the mock price to $%s; the agents have pushed it, mine a pool block to publish each quote" % value)
+        return
     for node in state["pools"]: set_quote(rpc(state, node), value)
     state["price_usd"] = str(value); save(os.path.abspath(args.dir), state)
     print("set pool quotes to $%s; mine a pool block to publish each quote" % value)
@@ -155,9 +242,13 @@ def wallet(args):
     subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True); print("launched " + " ".join(command))
 def cli(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    if args.datadir is not None:
+        if not 0 <= args.datadir < state["num_nodes"]: sys.exit("node must be between 0 and 4")
+        print(node_dir(directory, args.datadir)); return 0
     return subprocess.call([os.path.join(os.path.dirname(state["bitcoind"]), "ycash-cli"), "-datadir=" + node_dir(directory, args.node)] + args.args)
 def down(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    stop_agents(state)
     for node in range(NODES):
         if alive(state, node):
             try: rpc(state, node).stop(); print("stopping node%d" % node)
@@ -169,11 +260,12 @@ def main():
     def add(name, fn):
         command = sub.add_parser(name); command.add_argument("--dir", default=DEFAULT_DIR); command.set_defaults(fn=fn); return command
     command = add("up", up); command.add_argument("--portseed", type=int, default=7); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
+    command.add_argument("--agents", action="store_true", help="run one real yellowback-quote --mock-price per pool instead of yed_setquote from this script")
     add("check", command_check); add("status", status)
     command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
     command = add("price", price); command.add_argument("usd")
     command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--print", action="store_true")
-    command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("args", nargs=argparse.REMAINDER)
+    command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("--datadir", type=int, metavar="N", help="print node N's datadir and exit"); command.add_argument("args", nargs=argparse.REMAINDER)
     command = add("down", down); command.add_argument("--wipe", action="store_true")
     args = parser.parse_args()
     if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
