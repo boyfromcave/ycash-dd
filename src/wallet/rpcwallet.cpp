@@ -2267,9 +2267,11 @@ UniValue lockunspent(const UniValue& params, bool fHelp)
 
         COutPoint outpt(uint256S(txid), nOutput);
 
-        // H5: a Yellowback-held outpoint is not unlockable here, and a call naming one applies
-        // nothing at all (the loop is checked before any lock is touched below).
-        if (yellowback::g_yellowbackWallet && yellowback::g_yellowbackWallet->IsYellowbackLocked(outpt)) {
+        // H5: a Yellowback-held outpoint is not *unlockable* here, and a call naming one applies
+        // nothing at all (the loop is checked before any lock is touched below). Only unlocking is
+        // guarded: unlocking would expose the coin to automatic selection and burn its YED, while
+        // locking one is harmless and is what the overlay itself does, so fUnlock gates the check.
+        if (fUnlock && yellowback::g_yellowbackWallet && yellowback::g_yellowbackWallet->IsYellowbackLocked(outpt)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "yed-locked-outpoint: " + outpt.ToString() +
                                " holds YED; spending it outside the overlay would burn it. Use"
                                " yed_unlockcoin \"<txid>\" <n> \"I understand this burns YED\" to release it deliberately.");

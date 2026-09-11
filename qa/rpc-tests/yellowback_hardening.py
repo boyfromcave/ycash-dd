@@ -59,6 +59,7 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         mint_b = user.yed_mint(10050, 48)
         self.sync_all()
         self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'ACTIVE')
         assert_equal(user.yed_getbalance()['confirmedCents'], 20050)
 
         self.h7_sendrawtransaction(user)
@@ -135,6 +136,27 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         print('h5_lockunspent_refuses_a_yellowback_outpoint')
         assert_rpc_error('yed-locked-outpoint', user.lockunspent, True, [token])
         assert token in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
+
+# Rule: H5
+        print('h5_lockunspent_false_may_still_lock_a_yellowback_outpoint')
+        # H5 guards *unlocking* only: unlocking exposes the coin to automatic selection and would
+        # burn its YED, while locking one is harmless and is what the overlay itself does. Guarding
+        # both directions broke every raw-builder script that locks its own inputs
+        # (yellowback_mining.py's send_locked), and the help text has always said "cannot be
+        # unlocked here" — so the direction is pinned here.
+        user.lockunspent(False, [token])
+        assert token in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
+        plain = None
+        for u in user.listunspent():
+            cand = {'txid': u['txid'], 'vout': u['vout']}
+            if cand not in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]:
+                plain = cand
+                break
+        assert plain is not None, 'no unlocked plain YEC output to check the ordinary path with'
+        user.lockunspent(False, [plain])          # an ordinary coin still locks
+        assert plain in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
+        user.lockunspent(True, [plain])           # and still unlocks, since it holds no YED
+        assert plain not in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
 
 # Rule: H5
         print('h5_lockunspent_true_reapplies_the_locks')
