@@ -136,6 +136,10 @@ class Contract(object):
 
 class YellowbackRpcContractTest(YellowbackTestFramework):
 
+    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, and this script needs
+    # a VOID vault mined to fill yed_getvault's voidReason and sweepBefore (docs/mapping.md 13.5).
+    template_policy = 'consensus'
+
     def run_test(self):
         nodes = self.nodes
         user, stock, claimant = nodes[0], nodes[STOCK], nodes[5]
