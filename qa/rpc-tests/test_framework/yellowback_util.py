@@ -316,8 +316,7 @@ def build_mint_tx(node, cents, tier, lock_height, eval_height, collateral_zat, o
     from .util import bytes_to_hex_str, hex_str_to_bytes
     if owner_pubkey is None:
         owner_pubkey = node.validateaddress(node.getnewaddress())['pubkey']
-    if roster_script_hex is None:
-        roster_script_hex = node.yed_getroster()['scriptHex']
+    assert roster_script_hex is not None, 'pass the roster script (genesis["script"]); yed_getroster is gone (Phase 0)'
     owner = hex_str_to_bytes(owner_pubkey)
     # Concatenate raw bytes: CScript + CScript would push the roster as data (PUSHDATA1), not append it.
     vault = CScript(bytes(CScript([lock_height, OP_CHECKLOCKTIMEVERIFY, OP_DROP, owner, OP_CHECKSIGVERIFY])) + hex_str_to_bytes(roster_script_hex))

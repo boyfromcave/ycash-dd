@@ -133,7 +133,7 @@ class YellowbackVoidMintTest(BitcoinTestFramework):
 
         print("No price at evalHeight (= the start block) => bad-oracle-price")
         tip = nodes[0].getblockcount()
-        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, start, 20 * 100000000)
+        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, start, 20 * 100000000, roster_script_hex=self.genesis['script'])
         void1 = self.send_mint(hex_)
         self.expect_void(void1, 'bad-oracle-price')
         assert_equal(nodes[0].yed_listpositions('VOID')[0]['vaultTxid'], void1)
@@ -147,7 +147,7 @@ class YellowbackVoidMintTest(BitcoinTestFramework):
         self.mine(3)
         eval_h = nodes[0].getblockcount() - 2
         tip = nodes[0].getblockcount()
-        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 20 * 100000000 - 1)
+        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 20 * 100000000 - 1, roster_script_hex=self.genesis['script'])
         void2 = self.send_mint(hex_)
         self.expect_void(void2, 'bad-mint-collateral')
         # The MINTPOL-1 path refuses such a mint before it is built: the wallet never under-collateralises.
@@ -159,14 +159,14 @@ class YellowbackVoidMintTest(BitcoinTestFramework):
         print("evalHeight older than MINT_WINDOW => bad-mint-eval-height")
         eval_h = nodes[0].getblockcount() - MINT_WINDOW  # H - evalHeight = 41 at confirmation
         tip = nodes[0].getblockcount()
-        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 20 * 100000000)
+        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 20 * 100000000, roster_script_hex=self.genesis['script'])
         void3 = self.send_mint(hex_)
         self.expect_void(void3, 'bad-mint-eval-height')
 
         print("Lock height outside [tier, tier + window] => bad-mint-lock-tier-duration")
         eval_h = nodes[0].getblockcount() - 2
         tip = nodes[0].getblockcount()
-        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 47, eval_h, 20 * 100000000)
+        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 47, eval_h, 20 * 100000000, roster_script_hex=self.genesis['script'])
         void4 = self.send_mint(hex_)
         self.expect_void(void4, 'bad-mint-lock-tier-duration')
 
@@ -177,7 +177,7 @@ class YellowbackVoidMintTest(BitcoinTestFramework):
         eval_h = nodes[0].getblockcount() - 2
         assert_rpc_error("minting-blocked-during-err", nodes[0].yed_mint, 10000, 0)
         tip = nodes[0].getblockcount()
-        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 30 * 100000000)
+        hex_, _ = build_mint_tx(nodes[0], 10000, 0, tip + 1 + 48, eval_h, 30 * 100000000, roster_script_hex=self.genesis['script'])
         void5 = self.send_mint(hex_)
         self.expect_void(void5, 'minting-blocked-during-err')
 

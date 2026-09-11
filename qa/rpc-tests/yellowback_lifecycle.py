@@ -128,7 +128,7 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         self.restart_all()
         self.sync_all()
         assert_yed_synced(nodes)
-        assert_equal(nodes[0].yed_getroster()['address'], roster['address'])
+        assert_equal(nodes[0].yed_getinfo()['anchor']['address'], roster['address'])
 
         print("Price and the first mint (tier 0, $100)")
         self.price(50000)
