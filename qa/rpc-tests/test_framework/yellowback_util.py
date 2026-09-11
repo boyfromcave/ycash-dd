@@ -71,6 +71,8 @@ __all__ = [
     'assert_best_hash', 'assert_rejected', 'assert_banscore_zero', 'wait_yed_healthy',
     'snapshot_ledger', 'format_ledger', 'assert_model_matches', 'assert_start_raises_init_error',
     'restart_with_yellowback', 'sync_all_nodes', 'node_pubkey', 'term_class_of', 'fee_zat',
+    'mint_vault_raw', 'redeem_vault_raw', 'malformed_vault_spend', 'mine_rejected_block',
+    'wait_for_rejection', 'debug_log_contains',
 ]
 
 # ---------------------------------------------------------------------------
@@ -392,6 +394,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         self.is_network_split = False
         self.mock_time = None
         self.pool_addresses = [address_of(w) for w in POOL_WIFS]
+        self.quotes = {}          # node index -> (usd, source_mask): re-applied by restart()
 
     # --- options ---------------------------------------------------------
 
@@ -516,6 +519,15 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def enforcing_nodes(self):
         return [self.nodes[i] for i in ENFORCING]
 
+    # --- quotes --------------------------------------------------------------
+
+    def quote(self, i, usd, source_mask=1):
+        """``yed_setquote`` on node ``i`` and remember it: the quote lives in the node's memory
+        (V6: the agent pushes it, nothing persists it), so ``restart`` re-applies it the way a
+        pool's quote agent would within a minute."""
+        self.quotes[i] = (usd, source_mask)
+        return set_quote(self.nodes[i], usd, source_mask)
+
     # --- mining ------------------------------------------------------------
 
     def _node(self, n):
@@ -549,7 +561,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         pools = list(POOLS if pools is None else pools)
         if quote_usd is not None:
             for i in pools:
-                set_quote(self.nodes[i], quote_usd)
+                self.quote(i, quote_usd)
         miners = pools + ([stock] if stock is not None else [])
         blocks = self.mine_round_robin(miners, ACTIVATION_BLOCKS)
         self.sync_all(blocks_only=True)
@@ -597,6 +609,12 @@ class YellowbackTestFramework(BitcoinTestFramework):
             self.import_pool_keys(self.nodes)
         if self.mock_time is not None:
             self.nodes[i].setmocktime(self.mock_time)
+        if i in self.quotes:
+            usd, source_mask = self.quotes[i]
+            try:
+                set_quote(self.nodes[i], usd, source_mask)
+            except Exception:
+                pass          # a node restarted without a payout address (MINER-2) holds no quote
         self.reconnect(i)
         return self.nodes[i]
 
@@ -860,7 +878,9 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     tx.deserialize(BytesIO(raw))
     if path == 'owner':
         from .key import CECKey
-        wif = owner_wif or node.dumpprivkey(vault.get('ownerAddress') or pubkey_to_address(owner))
+        # yed_getvault's ownerAddress is the ye/yt/yr rendering (§3.1); the wallet knows the key by
+        # its P2PKH address, so derive that from the owner key rather than trust the field.
+        wif = owner_wif or node.dumpprivkey(pubkey_to_address(owner))
         key = CECKey()
         key.set_secretbytes(wif_to_secret(wif))
         key.set_compressed(True)
@@ -920,6 +940,92 @@ def mine_block_raw(node, txs, coinbase=None, gbt=None, n_time=None):
     block.solve()
     result = node.submitblock(bytes_to_hex_str(block.serialize()))
     return result, '%064x' % block.sha256
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 drivers over the raw builders (N26): a vault from build_mint_tx, a rule-breaking spend
+# from build_vault_spend_raw mined by the stock node, and the assertions around a rejection.
+
+TX_EXPIRING_SOON_THRESHOLD = 3     # ref/ycash/src/consensus/consensus.h; a mempool refuses a closer expiry
+
+
+def mint_vault_raw(test, user, pool, cents=10_000, lock_blocks=48, fee=True):
+    """Mint an ACTIVE vault from ``user``'s coins with ``build_mint_tx`` (collateral from
+    ``yed_estimatecollateral``, the fee payee from ``yed_getfeepayee``), broadcast it with
+    ``sendrawtransaction`` on ``user`` and mine it on ``pool``.  Returns ``(txid, yed_getvault)``."""
+    est = user.yed_estimatecollateral(cents, lock_blocks)
+    ref = int(est['refHeight'])
+    fee_addr = None
+    if fee:
+        fee_addr = user.yed_getfeepayee(ref, int(est['requiredZat']))['default']['payoutAddress']
+    hex_, _owner = build_mint_tx(user, cents, lock_blocks, ref, int(est['requiredZat']), fee_addr=fee_addr)
+    txid = user.sendrawtransaction(hex_)
+    test.sync_all()
+    test.mine(pool)
+    vault = user.yed_getvault(txid)
+    assert_equal(vault['status'], 'ACTIVE')
+    return txid, vault
+
+
+def redeem_vault_raw(test, user, pool, vault, token_outpoints):
+    """The correct owner-path redemption of ``vault`` (RED-1..4: the REDEEM payload with
+    ``feeVout = 1``, the FEE-1 fee to the FEE-W payee, the burn of ``token_outpoints``), broadcast
+    with ``sendrawtransaction`` on ``user`` (MP-1 admits it) and mined on ``pool``.  Returns the
+    txid."""
+    ref = user.getblockcount() - REF_LAG
+    payee = user.yed_getfeepayee(ref, int(vault['collateralZat']))
+    payload = ym.encode_redeem(ref, 1, [])
+    hex_ = build_vault_spend_raw(user, vault, 'owner', token_outpoints, payload=payload,
+                                 fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                 ref_height=ref)
+    check = user.yed_validaterawtransaction(hex_)
+    assert_equal(check['blockValid'], True)
+    assert_equal(check['wouldBeRejected'], False)
+    txid = user.sendrawtransaction(hex_)
+    test.sync_all()
+    test.mine(pool)
+    return txid
+
+
+def malformed_vault_spend(user, vault, next_height):
+    """An owner-path spend with no burn and no payload: fails RED-1 (``vault-spend-malformed``)
+    on an enforcing node, an ordinary transaction to a stock node.  Expires at ``next_height +
+    TX_EXPIRING_SOON_THRESHOLD`` so it leaves every mempool a few blocks later."""
+    return build_vault_spend_raw(user, vault, 'owner', [], expiry=next_height + TX_EXPIRING_SOON_THRESHOLD)
+
+
+def mine_rejected_block(test, user, vault, stock=None):
+    """The stock node mines a block carrying a malformed spend of ``vault`` (which must be past
+    its lockHeight).  Returns ``(blockhash, txid)``; the caller asserts the rejection."""
+    stock = test.nodes[STOCK] if stock is None else stock
+    hex_ = malformed_vault_spend(user, vault, stock.getblockcount() + 1)
+    txid = stock.sendrawtransaction(hex_)
+    blockhash = stock.generate(1)[0]
+    assert txid in [t['txid'] if isinstance(t, dict) else t for t in stock.getblock(blockhash)['tx']]
+    return blockhash, txid
+
+
+def wait_for_rejection(nodes, blockhash, timeout=30):
+    """Until every node in ``nodes`` holds ``blockhash`` off its active chain with a rejection on
+    record (``assert_rejected``)."""
+    deadline = time.time() + timeout
+    for node in nodes:
+        while True:
+            try:
+                if node.getblock(blockhash)['confirmations'] == -1 and node.yed_getinfo()['rejectedBlocks'] > 0:
+                    break
+            except Exception:
+                pass
+            assert time.time() < deadline, 'block %s was not rejected within %ds' % (blockhash, timeout)
+            time.sleep(0.1)
+        assert_rejected(node, blockhash)
+
+
+def debug_log_contains(tmpdir, i, needle):
+    """True iff node ``i``'s regtest debug.log contains ``needle``."""
+    path = os.path.join(tmpdir, 'node%d' % i, 'regtest', 'debug.log')
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        return needle in f.read()
 
 
 # ---------------------------------------------------------------------------
