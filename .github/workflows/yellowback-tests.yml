@@ -107,6 +107,11 @@ jobs:
         run: src/test/test_bitcoin --log_level=test_suite
 
       - name: Functional tests (Yellowback scripts of this phase)
+        # Runs even when an earlier step failed (the job still fails overall). A step that aborts
+        # the job hides everything after it: while two inherited unit cases were failing, this
+        # step and the one below never executed at all, so no functional suite had ever run on CI.
+        # One red result must never mask twelve unknown ones.
+        if: ${{ !cancelled() }}
         # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below
         # does not have to glob all of /tmp (root-only /tmp/snap-private-tmp on the GitHub runners
         # makes upload-artifact fail with EACCES). --nocleanup is forwarded to every script:
@@ -118,6 +123,7 @@ jobs:
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
 
       - name: Functional tests (inherited stock baseline, without -yellowback)
+        if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
@@ -222,6 +228,9 @@ jobs:
           git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep -v 'g_yellowback\|#include\|^+$\|^+++' || true
 
       - name: Rule -> test tags (blocking from Phase 6, §7)
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         # Every identifier of §3.2 and §3.7-3.9 must appear on a `// Rule:` / `# Rule:` line of a
         # unit case or a functional script. TPL-1..3 arrive with Phase 4 and MINTPOL-1 with Phase 6,
         # so the loop reports until Phase 6's acceptance makes it block.
@@ -256,12 +265,21 @@ jobs:
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: pyflakes (functional tests and the shared helper)
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         run: python3 -m pyflakes qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py
       - name: pyflakes (contrib; blocking from Phase 7)
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         run: python3 -m pyflakes contrib/yellowback/*.py contrib/yellowback/yellowback-quote contrib/yellowback/pool/check-coinbase contrib/yellowback/devnet/yellowback-devnet
       - name: The quote agent's acceptance line (plan Phase 7)
         run: contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
       - name: Fuzz corpora and the embedded replay tables agree (N34)
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
         run: python3 src/test/gen_yellowback_corpus.py --check
 
@@ -304,6 +322,9 @@ jobs:
       - name: Full make check
         run: make check
       - name: Inherited functional tests recorded as passing in Phase 0
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         # The list is STOCK_BASELINE above, recorded by name in doc/yellowback.md "Build and test baseline".
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -322,6 +343,9 @@ jobs:
       # the ycash-legacy worktree build, yellowback_stockparity.py, yellowback_stock_node.py and
       # yellowback_enforcement.py --stock-binary (Phase 3+).
       - name: Fuzz smoke (N34)
+        # Independent check: runs even if an earlier step failed, so one red result
+        # does not hide the others. The job still fails overall.
+        if: ${{ !cancelled() }}
         # Ycash's harness builds one target at a time: --enable-fuzz-main replaces main() and the
         # target's fuzz.cpp is linked as src/fuzz.cpp (plan §6.0 item 0). Each Yellowback target
         # runs 10 minutes from its corpus; findings land in <Target>/output and are uploaded, and
