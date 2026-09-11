@@ -1059,6 +1059,46 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
 }
 
 // Rule: MINER-1
+BOOST_AUTO_TEST_CASE(coinbase_flags_empty_without_flag)
+{
+    // Plan §8.4 item 2, the central claim of §1 (a): the two `+ COINBASE_FLAGS` appends in
+    // miner.cpp (CreateCoinbaseTransaction :328 and IncrementExtraNonce :725) are the only
+    // unguarded behaviour-bearing insertions in the mining path, and without -yellowback they
+    // must be byte-level no-ops, so a node without the flag builds v4.5.0's coinbase exactly.
+    //
+    // COINBASE_FLAGS is assigned only at miner.cpp:370, from the module when g_yellowback is
+    // non-null and from a default-constructed CScript otherwise; in this binary nothing ever
+    // sets the module, which is the without-the-flag configuration.
+    BOOST_CHECK(g_yellowback == nullptr);
+    BOOST_CHECK(COINBASE_FLAGS.empty());
+
+    // The BIP34 height push changes width at these boundaries (CScriptNum encoding), so the
+    // append is checked against each: a wider push must not make the concatenation differ.
+    const int heights[] = {1, 16, 17, 127, 128, 65535, 65536, 16777215, 16777216};
+    for (int nHeight : heights) {
+        const CScript stockCreate = CScript() << nHeight << OP_0;
+        const CScript forkCreate = (CScript() << nHeight << OP_0) + COINBASE_FLAGS;
+        BOOST_CHECK_MESSAGE(forkCreate == stockCreate,
+                            "CreateCoinbaseTransaction scriptSig differs at height " << nHeight);
+        BOOST_CHECK_EQUAL(forkCreate.size(), stockCreate.size());
+
+        for (unsigned int nExtraNonce : {0u, 1u, 0xffffu}) {
+            const CScript stockIncr = CScript() << nHeight << CScriptNum(nExtraNonce);
+            const CScript forkIncr = (CScript() << nHeight << CScriptNum(nExtraNonce)) + COINBASE_FLAGS;
+            BOOST_CHECK_MESSAGE(forkIncr == stockIncr,
+                                "IncrementExtraNonce scriptSig differs at height " << nHeight);
+            // The coinbase length limit of main.cpp:1456 is 100 bytes; the stock form is far
+            // below it and the empty append cannot move it.
+            BOOST_CHECK(forkIncr.size() <= 100u);
+        }
+    }
+
+    // An empty COINBASE_FLAGS also carries no tag, so a stock-configured node's coinbase is not
+    // merely byte-identical but invisible to the tag reader (TAG-1).
+    BOOST_CHECK(!FindTag((CScript() << 200 << OP_0) + COINBASE_FLAGS, 200).has_value());
+}
+
+// Rule: MINER-1
 // Rule: MINER-2
 // Rule: MINER-3
 BOOST_AUTO_TEST_CASE(miner_tag_script)

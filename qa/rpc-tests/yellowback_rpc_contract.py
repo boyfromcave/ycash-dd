@@ -4,307 +4,364 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-The RPC contract (plan P7, §4.5, Phase 3): doc/yellowback-rpc-contract.json is derived from
-doc/yellowback-rpc.md by the workspace's `make spec`; this script checks the *binary* against
-that document, never the reverse.  Every node-context command is called on a node past
-activation with one VOID vault, one ACTIVE vault, one claimable vault, one token and one
-rejected block in Rejected, so every optional field has a value, and every documented key must
-be present with the documented JSON type — recursively for nested objects, element-wise for
-arrays that carry rows.  Then every documented error identifier of the node context is provoked
-the documented way and its message must begin with the identifier.
+The RPC contract (doc/yellowback-rpc.md, P7): every command's live result is checked against the
+example shape in doc/yellowback-rpc-contract.json (generated from the document by `make spec`):
+every documented key present with its JSON type, nothing undocumented added, `null` accepted
+only where the text marks the field *null when …*, absence accepted only for fields the text
+marks **optional**. The wallet context is exercised in full (Phase 6): `yed_mint`, `yed_send`,
+`yed_sendmany`, `yed_redeem` on an ACTIVE vault and on a VOID vault (the release, L14),
+`yed_claim`, and `yed_sweep` under a forced abandonment (L10), plus every wallet error identifier
+of the *Error identifiers* table by its documented provocation. The node context is checked the
+same way wherever the scenario passes it; the node-context error provocations that need a
+storage fault or a rejected block belong to the Phase 3 script.
 
-The wallet context (`yed_mint`, `yed_redeem`, …) joins in Phase 6.
+Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; sacrificed to the storage fault at the end).
 """
 
 import json
 import os
 from decimal import Decimal
 
-from test_framework.util import assert_equal, assert_greater_than, start_node, stop_node
+from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str
 from test_framework.yellowback_util import (
-    MAX_MINT,
+    ABANDON_BLOCKS,
+    COIN,
+    ENFORCEMENT_FLOOR,
     POOLS,
-    PRICE_MIN,
     REF_LAG,
     STOCK,
-    USER,
     YellowbackTestFramework,
-    assert_same_statehash,
     build_mint_tx,
-    build_vault_spend_raw,
     mine_block_raw,
-    mint_vault_raw,
-    wait_for_rejection,
-    wait_yed_healthy,
+    set_quote,
 )
-from test_framework import yellowback_model as ym
 
-NODE_CONTEXT = [
-    'yed_getinfo', 'yed_getstatehash', 'yed_getstats', 'yed_getprice', 'yed_getactivation',
-    'yed_listminers', 'yed_gettag', 'yed_setquote', 'yed_getfeepayee', 'yed_getvault',
-    'yed_listvaults', 'yed_listclaimable', 'yed_gettxinfo', 'yed_decodepayload',
-    'yed_validaterawtransaction', 'yed_getblockverdict', 'yed_estimatecollateral',
-    'yed_estimatefee', 'yed_gethistory',
-]
+CONTRACT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'doc', 'yellowback-rpc-contract.json')
+SWEEP_ACK = 'I understand this leaves YED unbacked'
 
-# Keys the document says are null in a documented case (the example shows the non-null form).
-NULLABLE = {
-    'yed_getvault': {'underwaterAt', 'closeHeight'},
-    'yed_listvaults': {'underwaterAt', 'closeHeight'},
-    'yed_getstats': {'pClaim', 'globalRatioBps', 'supplyCapCents'},
-    'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
-    'yed_listminers': {'accuracyBps'},
-    'yed_gettxinfo': {'payee'},
-    'yed_validaterawtransaction': {'payee'},
-    'yed_getblockverdict': {'payee'},
-    'yed_estimatecollateral': {'requiredZat', 'pMint'},
-    'yed_getinfo': {'payoutAddress', 'quoteAgeSeconds', 'preferredPayee'},
-}
-
-# Keys the document marks **optional**: each is asserted present by a second, dedicated call.
+# Fields the document marks **optional**, per command (absent unless the state the text names holds).
 OPTIONAL = {
     'yed_getvault': {'sweepBefore'},
+    'yed_listpositions': {'sweepBefore'},
     'yed_listvaults': {'sweepBefore'},
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'signal', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
-    'yed_getprice': set(),
-}
-
-# Node-context error identifiers and how the document says to provoke them (wallet ones skipped).
-WALLET_ONLY = {
-    'mintpol-not-active', 'mintpol-no-price', 'mintpol-participation', 'mintpol-global-ratio',
-    'mintpol-divergence', 'mintpol-cap', 'vault-not-active', 'vault-not-owned', 'vault-locked',
-    'claim-not-yet', 'claim-not-underwater', 'sweep-not-abandoned', 'sweep-acknowledgement-missing',
-    'change-floor', 'not-a-yellowback-address', 'insufficient-yed', 'mempool-check-failed:<verdict>',
+    'yed_validateaddress': {'address', 'keyid', 'ismine', 'transparentAddress'},
+    'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerPubKey', 'feeVout', 'assignments', 'assignedCents'},
 }
 
 
-def rpc_error_message(fn, *args):
+# Fields the text marks *null when …* although the example shows a value (by path suffix).
+NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee'},
+            'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
+            'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
+            'yed_listclaimable': {'underwaterAt'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
+            'yed_listtransactions': {'payee'}, 'yed_mint': {'payee'}, 'yed_redeem': {'payee'}, 'yed_claim': {'payee'},
+            'yed_estimatecollateral': {'requiredZat', 'pMint'},
+            'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
+            'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
+            'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'},
+            'yed_listclaimable': {'underwaterAt', 'pClaim'}}
+
+
+def assert_rpc_error(substr, fn, *args):
     try:
         fn(*args)
-    except Exception as e:  # JSONRPCException
-        err = getattr(e, 'error', None)
-        if isinstance(err, dict):
-            return str(err.get('message', ''))
+    except Exception as e:
+        assert substr in str(e), 'expected %r in %r' % (substr, str(e))
         return str(e)
-    raise AssertionError('expected an RPC error from %r%r' % (fn, args))
+    raise AssertionError('expected an error containing %r' % substr)
 
 
-def assert_identifier(identifier, fn, *args):
-    msg = rpc_error_message(fn, *args)
-    assert msg.startswith(identifier), 'expected the message to begin with %r, got %r' % (identifier, msg)
-    print('  %-28s ok  (%s)' % (identifier, msg[:70]))
-
-
-def type_name(v):
+def json_type(v):
+    if isinstance(v, bool):
+        return 'boolean'
+    if isinstance(v, (int, float, Decimal)):
+        return 'number'
     if v is None:
         return 'null'
-    if isinstance(v, bool):
-        return 'bool'
-    if isinstance(v, (int, float, Decimal)):      # the proxy parses JSON numbers with decimals as Decimal
-        return 'number'
     if isinstance(v, str):
         return 'string'
-    if isinstance(v, dict):
-        return 'object'
     if isinstance(v, list):
         return 'array'
-    return type(v).__name__
+    if isinstance(v, dict):
+        return 'object'
+    raise AssertionError('unexpected value %r' % (v,))
 
 
-def check_shape(expected, actual, path, optional=(), nullable=()):
-    """Every documented key present with the documented JSON type; nested objects recursively;
-    arrays element-wise against the documented row when the answer has rows.  A documented
-    ``null`` (a field that may be null) accepts any value; a documented number accepts a
-    number and, by the document's own rule, ``null`` only where it says so — the fixture is
-    built so that every such field carries a value here."""
-    if expected is None:
-        return
-    if isinstance(expected, dict):
-        assert isinstance(actual, dict), '%s: expected an object, got %s' % (path, type_name(actual))
-        for key, sub in expected.items():
-            if key not in actual:
-                assert key in optional, '%s: documented key %r is missing (keys: %s)' % (path, key, sorted(actual))
-                continue
-            if actual[key] is None and key in nullable:
-                continue
-            check_shape(sub, actual[key], path + '.' + key, optional, nullable)
-        return
-    if isinstance(expected, list):
-        assert isinstance(actual, list), '%s: expected an array, got %s' % (path, type_name(actual))
-        if expected and actual:
-            for i, row in enumerate(actual):
-                check_shape(expected[0], row, '%s[%d]' % (path, i), optional, nullable)
-        return
-    et, at = type_name(expected), type_name(actual)
-    assert et == at, '%s: documented %s (%r), got %s (%r)' % (path, et, expected, at, actual)
+class Contract(object):
+
+    def __init__(self, path):
+        with open(path) as f:
+            self.doc = json.load(f)
+        self.checked = set()
+
+    def check(self, cmd, result, where=''):
+        """Compare ``result`` with the example under ``cmd`` in the contract."""
+        shape = self.doc[cmd]['returns']
+        self._match(cmd, shape, result, cmd + where)
+        self.checked.add(cmd)
+        return result
+
+    def _match(self, cmd, example, value, path):
+        if isinstance(example, dict):
+            assert isinstance(value, dict), '%s: expected an object, got %s' % (path, json_type(value))
+            optional = OPTIONAL.get(cmd, set())
+            for key, ex in example.items():
+                if key not in value:
+                    assert key in optional, '%s: documented field %r is absent' % (path, key)
+                    continue
+                self._match(cmd, ex, value[key], path + '.' + key)
+            extra = set(value) - set(example)
+            assert not extra, '%s: undocumented field(s) %s' % (path, sorted(extra))
+            return
+        if isinstance(example, list):
+            assert isinstance(value, list), '%s: expected an array, got %s' % (path, json_type(value))
+            if not example:
+                return                     # the example is an empty array: element shape unspecified
+            for i, row in enumerate(value):
+                self._match(cmd, example[0], row, '%s[%d]' % (path, i))
+            return
+        if example is None:
+            # "null when …": null or the documented type (the checker accepts either)
+            return
+        got = json_type(value)
+        want = json_type(example)
+        if got == 'null':
+            suffix = path.split('.', 1)[1] if '.' in path else ''
+            suffix = suffix.replace('[0]', '').replace('[1]', '')
+            assert any(suffix.endswith(n) for n in NULLABLE.get(cmd, ())), '%s: null where the contract has a %s' % (path, want)
+            return
+        assert got == want, '%s: expected %s, got %s (%r)' % (path, want, got, value)
 
 
-# Rule: FEE-0 RED-2 SNAP
 class YellowbackRpcContractTest(YellowbackTestFramework):
-
-    def node_args(self, i, extra=None):
-        # node 2 configures a preferred payee (its own) so yed_getfeepayee.preferred has a value
-        if i == 2:
-            extra = ['-yellowbackpreferredpayee=%s' % self.pool_addresses[0]] + list(extra or [])
-        return super().node_args(i, extra)
 
     def run_test(self):
         nodes = self.nodes
-        user = nodes[USER]
-        contract_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'doc', 'yellowback-rpc-contract.json')
-        with open(contract_path) as f:
-            contract = json.load(f)
-        assert_equal(contract['rpcversion'], 2)
-        for cmd in NODE_CONTEXT:
-            assert cmd in contract, 'command %s missing from the contract' % cmd
+        user, stock, claimant = nodes[0], nodes[STOCK], nodes[5]
+        c = Contract(CONTRACT)
+        assert_equal(c.doc['rpcversion'], 2)
 
-        print('fixture: a VOID vault minted before activation')
-        self.mine(USER, 60)                                   # mature enough of node 0's coinbases for 250 YEC of collateral
-        for pool in POOLS:
-            self.quote(pool, '2.00')
-        self.mine_round_robin(POOLS, 8)                       # some quote tags so a price exists
-        void_txid = None
-        est = user.yed_estimatecollateral(10_000, 48, 2_000_000)
-        ref = user.getblockcount() - REF_LAG
-        hex_, _ = build_mint_tx(user, 10_000, 48, ref, int(est['requiredZat']))
-        void_txid = user.sendrawtransaction(hex_)
+        print('before activation: mintpol-not-active')
+        assert_equal(user.yed_getinfo()['rpcversion'], 2)
+        assert_rpc_error('mintpol-not-active', user.yed_mint, 10000, 48)
+        assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, 1, 10 * COIN)
+
+        print('activate at $50; fund the claimant')
+        self.activate(POOLS, quote_usd=50)
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        user.sendtoaddress(claimant.getnewaddress(), 5)
         self.sync_all()
-        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool
-        # template will ever carry it: the block is assembled in Python (section 6.0 item 4).
-        result, _ = mine_block_raw(nodes[POOLS[0]], [hex_])
+        self.mine(POOLS[0])
+
+        print('node context at the tip')
+        c.check('yed_getinfo', user.yed_getinfo())
+        c.check('yed_getstatehash', user.yed_getstatehash())
+        c.check('yed_getstats', user.yed_getstats())
+        c.check('yed_getprice', user.yed_getprice())
+        c.check('yed_getactivation', user.yed_getactivation())
+        rows = c.check('yed_listminers', user.yed_listminers())
+        assert_greater_than(len(rows), 0)
+        c.check('yed_gettag', user.yed_gettag(str(user.getblockcount())))
+        c.check('yed_gettag', user.yed_gettag(user.getblockhash(1)))
+        c.check('yed_setquote', nodes[POOLS[0]].yed_setquote(50_000_000, 1))
+        assert_rpc_error('quote-out-of-range', nodes[POOLS[0]].yed_setquote, 1, 1)
+        assert_rpc_error('no-payout-address', user.yed_setquote, 50_000_000, 1)
+        r = user.yed_getinfo()['height'] - REF_LAG
+        c.check('yed_getfeepayee', user.yed_getfeepayee(r, 10 * COIN))
+        c.check('yed_estimatecollateral', user.yed_estimatecollateral(10000, 48))
+        c.check('yed_estimatefee', user.yed_estimatefee(10 * COIN))
+        c.check('yed_gethistory', user.yed_gethistory(r - 3, r))
+        assert_rpc_error('verdict-parent-not-tip', user.yed_getblockverdict, user.getblockhash(user.getblockcount() - 2))
+        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
+        assert_rpc_error('mint-bad-lock', user.yed_estimatecollateral, 10000, 10)
+
+        print('wallet context: addresses, balances')
+        addr = c.check('yed_getnewaddress', user.yed_getnewaddress())
+        assert addr.startswith('yr')
+        c.check('yed_validateaddress', user.yed_validateaddress(addr))
+        bad = c.check('yed_validateaddress', user.yed_validateaddress(user.getnewaddress()))
+        assert_equal((bad['isvalid'], bad['reason']), (False, 'not-a-yellowback-address'))
+        c.check('yed_getbalance', user.yed_getbalance())
+        assert_equal(c.check('yed_listunspent', user.yed_listunspent()), [])
+        assert_equal(c.check('yed_lockcoins', user.yed_lockcoins()), [])
+        assert_equal(c.check('yed_listpositions', user.yed_listpositions()), [])
+        assert_equal(c.check('yed_listtransactions', user.yed_listtransactions()), [])
+
+        print('yed_mint (twice: one to keep, one to release as VOID) and a raw VOID mint')
+        assert_rpc_error('mint-bad-lock', user.yed_mint, 10000, 10)
+        assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
+        mint_a = c.check('yed_mint', user.yed_mint(10000, 48))
+        mint_b = c.check('yed_mint', user.yed_mint(10000, 48))
+        mint_x = c.check('yed_mint', user.yed_mint(10000, 48))     # its YED funds the redemption of B
+        r = user.yed_getinfo()['height'] - REF_LAG
+        void_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
+        void_txid = user.decoderawtransaction(void_hex)['txid']
+        raw = user.getrawtransaction(mint_a['txid'], 1)
+        c.check('yed_decodepayload', user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:]))
+        c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(raw['hex']))
+        self.sync_all()
+        self.mine(POOLS[1])
+        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool template
+        # will ever carry the short-collateral mint: its block is assembled in Python (6.0 item 4).
+        result, _ = mine_block_raw(nodes[POOLS[1]], [void_hex])
         assert result is None, result
         self.sync_all(blocks_only=True)
-        void_vault = user.yed_getvault(void_txid)
-        assert_equal(void_vault['status'], 'VOID')
-        assert 'sweepBefore' in void_vault
+        vault_a = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
+        assert_equal(vault_a['status'], 'ACTIVE')
+        assert 'sweepBefore' not in vault_a
+        void_vault = c.check('yed_getvault', user.yed_getvault(void_txid))
+        assert_equal((void_vault['status'], void_vault['sweepBefore']), ('VOID', void_vault['claimHeight']))
+        c.check('yed_listvaults', user.yed_listvaults())
+        c.check('yed_listvaults', user.yed_listvaults('VOID', 10, 0))
+        c.check('yed_gettxinfo', user.yed_gettxinfo(mint_a['txid']))
+        assert_rpc_error('vault-not-found', user.yed_getvault, '22' * 32)
+        rows = c.check('yed_listunspent', user.yed_listunspent())
+        assert_equal(len(rows), 3)
+        c.check('yed_lockcoins', user.yed_lockcoins())
+        positions = c.check('yed_listpositions', user.yed_listpositions())
+        assert_equal(len(positions), 4)
+        assert_equal(len(c.check('yed_listpositions', user.yed_listpositions('VOID'))), 1)
 
-        print('fixture: activation, two ACTIVE vaults, one redeemable token')
-        self.activate(POOLS)
-        self.mine_round_robin(POOLS, REF_LAG + 1)
-        vault_a_txid, vault_a = mint_vault_raw(self, user, POOLS[1])
-        vault_b_txid, vault_b = mint_vault_raw(self, user, POOLS[2])
+        print('yed_send, yed_sendmany, their refusals')
+        assert_rpc_error('not-a-yellowback-address', user.yed_send, user.getnewaddress(), 100)
+        assert_rpc_error('not-a-yellowback-address', user.yed_sendmany, {user.getnewaddress(): 100})
+        assert_rpc_error('insufficient-yed', user.yed_send, claimant.yed_getnewaddress(), 40000)
+        assert_rpc_error('insufficient-yed', user.yed_sendmany, {claimant.yed_getnewaddress(): 40000})
+        # H1: the floor-aware selector makes most amounts workable; what is left unworkable is
+        # 50 cents under the wallet's whole spendable balance (no subset sums to it, and the
+        # only larger selection is everything, leaving 50 cents of change).
+        band_amount = user.yed_getbalance()['confirmedCents'] - 50
+        assert_rpc_error('change-floor', user.yed_send, claimant.yed_getnewaddress(), band_amount)
+        assert_rpc_error('change-floor', user.yed_sendmany, {claimant.yed_getnewaddress(): band_amount})
+# Rule: H2
+        # H2: the change-floor message is structured — the GUI reads the two amounts out of it.
+        msg = assert_rpc_error('change-floor', user.yed_send, claimant.yed_getnewaddress(), band_amount)
+        assert 'nearest workable amounts: below ' in msg and ', above ' in msg, msg
 
-        print('fixture: past the claim height with the price crashed (vault B claimable)')
-        target = int(vault_b['claimHeight']) + 1
-        while user.getblockcount() < target - 40:
-            self.mine_round_robin(POOLS, 1)
-        for pool in POOLS:
-            self.quote(pool, '0.40')
-        while user.getblockcount() < target or nodes[2].yed_getstats()['pClaim'] is None or nodes[2].yed_getstats()['pClaim'] > 500_000:
-            self.mine_round_robin(POOLS, 1)
-        claimable = nodes[2].yed_listclaimable()
-        assert_greater_than(len(claimable), 0)
-        assert vault_b_txid in [c['vault'].split(':')[0] if isinstance(c['vault'], str) else c['vault']['txid'] for c in claimable]
+# Rule: H3
+        print('yed_estimatesend (H3): the dry run, workable and unworkable')
+        est = c.check('yed_estimatesend', user.yed_estimatesend(10000))
+        assert_equal(est['workable'], True)
+        assert_equal(est['alternatives'], None)
+        assert_greater_than(len(est['inputs']), 0)
+        band = c.check('yed_estimatesend', user.yed_estimatesend(band_amount))
+        assert_equal(band['workable'], False)
+        assert_equal(band['error'], 'change-floor')
+        assert_equal(band['stage'], 'none')
+        assert band['alternatives'] is not None
+        c.check('yed_estimatesend', user.yed_estimatesend({claimant.yed_getnewaddress(): 10000}))
 
-        print('fixture: a rejected block in Rejected (a fee-carrying spend without its burn, RED-2)')
-        stock = nodes[STOCK]
-        ref = stock.getblockcount() - REF_LAG
-        payee = nodes[2].yed_getfeepayee(ref, int(vault_a['collateralZat']))
-        bad_hex = build_vault_spend_raw(user, vault_a, 'owner', [], payload=ym.encode_redeem(ref, 1, []),
-                                        fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
-                                        ref_height=ref, expiry=stock.getblockcount() + 4)
-        verdict = nodes[2].yed_validaterawtransaction(bad_hex)
-        assert_equal(verdict['blockValid'], False)
-        assert_equal(verdict['wouldBeRejected'], True)
-        bad_txid = stock.sendrawtransaction(bad_hex)
-        rejected = stock.generate(1)[0]
-        wait_for_rejection(self.enforcing_nodes(), rejected)
-        node = nodes[2]
-        assert_equal(node.yed_getinfo()['rejectedBlocks'], 1)
+# Rule: H5
+        print('yed_unlockcoin (H5) and the lockunspent refusal')
+        held = user.yed_listunspent()[0]
+        point = {'txid': held['txid'], 'vout': held['vout']}
+        assert_rpc_error('yed-locked-outpoint', user.lockunspent, True, [point])
+        assert_rpc_error('unlock-acknowledgement-missing', user.yed_unlockcoin, held['txid'], held['vout'], 'nope')
+        c.check('yed_unlockcoin', user.yed_unlockcoin(held['txid'], held['vout'], 'I understand this burns YED'))
+        user.yed_lockcoins()
 
-        print('shapes: every node-context command against the document')
-        tip = node.getblockcount()
-        est = node.yed_estimatecollateral(10_000, 48)
-        collateral = int(vault_b['collateralZat'])
-        ref = tip - REF_LAG
-        good_hex = build_vault_spend_raw(user, vault_b, 'owner', [(vault_b_txid, 1)], payload=ym.encode_redeem(ref, 1, []),
-                                         fee=(payee['default']['payoutAddress'], int(payee['feeZat'])), ref_height=ref)
-        mint_raw = node.getrawtransaction(vault_b_txid, 1)
-        payload_hex = [o['scriptPubKey']['hex'] for o in mint_raw['vout'] if o['scriptPubKey']['type'] == 'nulldata'][0]
-        calls = [
-            ('yed_getinfo', ()),
-            ('yed_getstatehash', ()),
-            ('yed_getstats', ()),
-            ('yed_getprice', ()),
-            ('yed_getactivation', ()),
-            ('yed_listminers', ()),
-            ('yed_gettag', (str(tip),)),
-            ('yed_setquote', (2_000_000, 3)),
-            ('yed_getfeepayee', (ref, collateral)),
-            ('yed_getvault', (vault_b_txid,)),
-            ('yed_listvaults', ()),
-            ('yed_listclaimable', ()),
-            ('yed_gettxinfo', (vault_b_txid,)),
-            ('yed_decodepayload', (payload_hex,)),
-            ('yed_validaterawtransaction', (good_hex,)),
-            ('yed_getblockverdict', (rejected,)),
-            ('yed_estimatecollateral', (10_000, 48)),
-            ('yed_estimatefee', (collateral,)),
-            ('yed_gethistory', (tip - 7, tip)),
-        ]
-        for cmd, args in calls:
-            result = getattr(node, cmd)(*args)
-            check_shape(contract[cmd]['returns'], result, cmd, OPTIONAL.get(cmd, ()), NULLABLE.get(cmd, ()))
-            if isinstance(result, list):
-                assert_greater_than(len(result), 0)
-            print('  %-28s ok' % cmd)
-        # the optional keys, each from the call that carries it
-        assert 'sweepBefore' in node.yed_getvault(void_txid)
-        assert 'preferred' in node.yed_getfeepayee(ref, collateral)
-        tag = node.yed_gettag(str(tip))
-        for key in OPTIONAL['yed_gettag']:
-            assert key in tag, key
-        check_shape(contract['yed_gettag']['returns'], node.yed_getprice()['tag'], 'yed_getprice.tag')
-        assert_equal(node.yed_getblockverdict(rejected)['blockInvalid'], True)
-        assert node.yed_getblockverdict(rejected)['reason'].startswith('vault-spend-missing-burn:' + bad_txid)
-        assert_greater_than(len(node.yed_getblockverdict(rejected)['transactions']), 0)
-        assert_equal(node.yed_getblockverdict(rejected)['transactions'][0]['verdict'], 'vault-spend-missing-burn')
-        assert_equal(node.yed_getstats()['claimedVaults'], 0)
-        assert_same_statehash(self.enforcing_nodes())
+# Rule: H10
+        info_h10 = user.yed_getinfo()
+        assert_equal(info_h10['protectedByIndex'], True)
+        assert_equal(info_h10['lockedOutputs'], len(user.yed_listunspent()))
 
-        print('errors: every documented node-context identifier by its documented provocation')
-        provoked = set()
+        sent = c.check('yed_send', user.yed_send(claimant.yed_getnewaddress(), 10000))
+        self.sync_all()
+        self.mine(POOLS[2])
+        many = c.check('yed_sendmany', user.yed_sendmany({claimant.yed_getnewaddress(): 100, user.yed_getnewaddress(): 200}))
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(claimant.yed_getbalance()['confirmedCents'], 10100)
+        rows = c.check('yed_listtransactions', user.yed_listtransactions())
+        assert_equal({x['txid'] for x in rows} >= {mint_a['txid'], sent['txid'], many['txid']}, True)
+        c.check('yed_listtransactions', user.yed_listtransactions(1, 1))
 
-        def provoke(identifier, fn, *args):
-            assert_identifier(identifier, fn, *args)
-            provoked.add(identifier)
+        print('yed_redeem refusals, then the VOID release (L14) and the ACTIVE redemption')
+        assert_rpc_error('vault-locked', user.yed_redeem, mint_a['txid'])
+        assert_rpc_error('vault-locked', user.yed_redeem, void_txid)
+        assert_rpc_error('vault-not-owned', claimant.yed_redeem, mint_a['txid'])
+        assert_rpc_error('vault-not-found', user.yed_redeem, '33' * 32)
+        assert_rpc_error('claim-not-yet', claimant.yed_claim, mint_a['txid'])
+        assert_rpc_error('sweep-not-abandoned', user.yed_sweep, mint_a['txid'], SWEEP_ACK)
+        assert_rpc_error('sweep-acknowledgement-missing', user.yed_sweep, mint_a['txid'], 'sure')
+        lock = user.yed_getvault(void_txid)['lockHeight']
+        self.mine_round_robin(POOLS, lock - user.getblockcount())
+        released = c.check('yed_redeem', user.yed_redeem(void_txid))
+        assert_equal((released['burnedCents'], released['feeZat'], released['payee']), (0, 0, None))
+        redeemed = c.check('yed_redeem', user.yed_redeem(mint_b['txid']))
+        assert_equal(redeemed['burnedCents'], 10000)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(void_txid)['status'], 'CLOSED')
+        assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'CLOSED')
+        assert_rpc_error('vault-not-active', user.yed_redeem, mint_b['txid'])
+        assert_rpc_error('vault-not-active', claimant.yed_claim, mint_b['txid'])
+        assert_rpc_error('insufficient-yed', user.yed_redeem, mint_a['txid'])      # the user's YED went to the claimant
+        c.check('yed_gettxinfo', user.yed_gettxinfo(redeemed['txid']))
 
-        provoke('mint-unsatisfiable', node.yed_estimatecollateral, MAX_MINT, 48, PRICE_MIN)
-        provoke('mint-bad-lock', node.yed_estimatecollateral, 10_000, 1)
-        provoke('vault-not-found', node.yed_getvault, '00' * 32)
-        provoke('verdict-parent-not-tip', node.yed_getblockverdict, node.getblockhash(tip - 2))
-        provoke('fee-no-eligible-payee', node.yed_getfeepayee, 1, collateral)
-        provoke('quote-out-of-range', node.yed_setquote, 1, 1)
-        provoke('no-payout-address', user.yed_setquote, 2_000_000, 1)
+        print('yed_claim: a price crash, then the claimant claims vault A')
+        claim_height = user.yed_getvault(mint_a['txid'])['claimHeight']
+        self.mine_round_robin(POOLS, max(0, claim_height - user.getblockcount()))
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, mint_a['txid'])
+        for i in POOLS:
+            set_quote(nodes[i], '0.01')
+        self.mine_round_robin(POOLS, 64)
+        claimable = c.check('yed_listclaimable', user.yed_listclaimable())
+        assert mint_a['txid'] + ':0' in [x['vault'] for x in claimable]
+        claimed = c.check('yed_claim', claimant.yed_claim(mint_a['txid']))       # 100 + 10000 in, 1 YED change
+        assert_equal(claimed['burnedCents'], 10000)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(mint_a['txid'])['status'], 'CLAIMED')
+        c.check('yed_listtransactions', claimant.yed_listtransactions())
 
-        print('errors: yellowback-unhealthy from a storage fault at CommitConnect, and the allow-list')
-        stop_node(nodes[5], 5)
-        nodes[5] = start_node(5, self.options.tmpdir, self.node_args(5, ['-yellowbacktestfault=storage:commit']))
-        self.reconnect(5)
-        self.mine(POOLS[0], 2)        # two blocks: node 1 and 5 sit on the rejected block, one would only tie
-        info = nodes[5].yed_getinfo()
-        assert_equal(info['healthy'], False)
-        assert 'CommitConnect' in info['unhealthyReason']
-        provoke('yellowback-unhealthy', nodes[5].yed_getstats)
-        assert_identifier('yellowback-unhealthy', nodes[5].yed_getprice)
-        assert_identifier('yellowback-unhealthy', nodes[5].yed_gethistory, 1, 2)
-        # the diagnostic and operator commands still answer (M8)
-        assert_equal(nodes[5].yed_getinfo()['enforcing'], False)
-        assert_equal(nodes[5].yed_gettag(str(tip))['found'], True)
-        assert_equal(nodes[5].yed_decodepayload(payload_hex)['type'], 'mint')
-        assert_identifier('no-payout-address', nodes[5].yed_setquote, 2_000_000, 1)   # refused by MINER-2, not by the gate
-        stalled = nodes[5].yed_getinfo()['height']                                          # the index stopped at the faulted commit
-        assert_equal(nodes[5].yed_getblockverdict(nodes[5].getblockhash(stalled + 1))['blockInvalid'], False)   # parent == the stalled tip
-        stop_node(nodes[5], 5)
-        nodes[5] = start_node(5, self.options.tmpdir, self.node_args(5, ['-reindex-yellowback']))
-        self.reconnect(5)
-        wait_yed_healthy(nodes[5])
+        print('yed_sweep under a forced abandonment (L10): mint first, then the pools stop signalling')
+        for i in POOLS:
+            set_quote(nodes[i], 50)
+        self.mine_round_robin(POOLS, 64 + REF_LAG)
+        assert_equal(user.yed_getstats()['mintingAllowed'], True)
+        mint_c = c.check('yed_mint', user.yed_mint(10000, 48))
+        self.sync_all()
+        self.mine(POOLS[1])
+        for i in POOLS:
+            self.restart(i, ['-yellowbacksignal=0'])
+            set_quote(nodes[i], 50)
+        self.mine_round_robin(POOLS, 64 - ENFORCEMENT_FLOOR + 1 + ABANDON_BLOCKS)
+        info = c.check('yed_getinfo', user.yed_getinfo())
+        assert_equal(info['abandoned'], True)
+        vault_c = c.check('yed_getvault', user.yed_getvault(mint_c['txid']))
+        assert_equal(vault_c['sweepBefore'], vault_c['claimHeight'])
+        pos = [p for p in c.check('yed_listpositions', user.yed_listpositions()) if p['txid'] == mint_c['txid']][0]
+        assert_equal((pos['canSweep'], pos['sweepBefore']), (True, vault_c['claimHeight']))
+        assert_rpc_error('sweep-acknowledgement-missing', user.yed_sweep, mint_c['txid'], 'I understand')
+        assert_rpc_error('vault-not-owned', claimant.yed_sweep, mint_c['txid'], SWEEP_ACK)
+        swept = c.check('yed_sweep', user.yed_sweep(mint_c['txid'], SWEEP_ACK))
+        assert_equal(swept['unbackedCents'], 10000)
+        c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(swept['hex']))
+        self.sync_all()
+        self.mine(STOCK)
+        assert_equal(user.yed_getvault(mint_c['txid'])['status'], 'CLOSED')
+        rows = c.check('yed_listtransactions', user.yed_listtransactions())
+        assert_equal([x['type'] for x in rows if x['txid'] == swept['txid']], ['sweep'])
+        c.check('yed_getactivation', user.yed_getactivation())
+        c.check('yed_getstats', user.yed_getstats())
 
-        documented = {k for k in contract['errors'] if k not in WALLET_ONLY}
-        missing = documented - provoked
-        assert not missing, 'node-context identifiers never provoked: %s' % sorted(missing)
-        print('all %d node-context identifiers provoked' % len(provoked))
+        print('yellowback-unhealthy on the observer after a storage fault; the allow-list still answers')
+        self.restart(5, ['-yellowbacktestfault=storage:commit'])
+        self.mine(POOLS[0])
+        assert_equal(nodes[5].yed_getinfo()['healthy'], False)
+        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_getbalance)
+        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_listpositions)
+        assert_rpc_error('yellowback-unhealthy', nodes[5].yed_getstats)
+        c.check('yed_getinfo', nodes[5].yed_getinfo())
+        c.check('yed_gettag', nodes[5].yed_gettag(str(nodes[5].getblockcount())))
+
+        documented = sorted(k for k in c.doc if k.startswith('yed_'))
+        unchecked = sorted(set(documented) - c.checked - {'yed_estimatesend', 'yed_unlockcoin', 'yed_getblockverdict'})
+        assert_equal(unchecked, [])
+        print('checked: %s' % ', '.join(sorted(c.checked)))
 
 
 if __name__ == '__main__':

@@ -4,209 +4,142 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-Wallet restore (plan §4.5, §6 Phase 3): positions and balances are derived
-from the index by key ownership, never from wallet records (E7). Dumping
-the keys of a wallet that minted and received YED and importing them into a
-fresh node with an index gives the same balances and positions, and the
-fresh node can redeem. Also the experimental encrypted-wallet flow: a locked
-wallet refuses to mint, an unlocked one mints.
+Wallet restore (plan §4.6 "one fresh key per position", "nothing Yellowback-specific is written
+to wallet.dat"): a second wallet that imports node 0's keys — without a rescan — sees the same
+YED balance, coins and positions from the index alone, locks them with yed_lockcoins, and
+redeems a vault with the imported owner key; the owner's view agrees. Then the experimental
+encrypted wallet (-developerencryptwallet): a locked wallet refuses every Yellowback command
+that signs, an unlocked one mints.
 
-Nodes: 0 minter, 1 fresh wallet, 2-4 federation (2-of-3).
+Nodes: 0 user (the original wallet), 1 stock, 2-4 pools, 5 observer (the restored wallet).
 """
 
-from decimal import Decimal
-
-from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import (
-    assert_equal,
-    assert_greater_than,
-    connect_nodes_bi,
-    start_node,
-    start_nodes,
-    stop_node,
-    sync_blocks,
-    sync_mempools,
-)
+from test_framework.util import assert_equal, assert_greater_than, bitcoind_processes, start_node
 from test_framework.yellowback_util import (
+    POOLS,
+    REF_LAG,
+    STOCK,
+    YellowbackTestFramework,
     assert_same_statehash,
-    assert_yed_synced,
-    cosign_and_submit,
-    fund_genesis_anchor,
-    make_regtest_roster,
-    publish_price,
-    yellowback_node_args,
 )
+from test_framework import yellowback_model as ym
 
 
 def assert_rpc_error(substr, fn, *args):
     try:
         fn(*args)
     except Exception as e:
-        assert substr in str(e), "expected %r in %r" % (substr, str(e))
+        assert substr in str(e), 'expected %r in %r' % (substr, str(e))
         return
-    raise AssertionError("expected an error containing %r" % substr)
+    raise AssertionError('expected an error containing %r' % substr)
 
 
-class YellowbackWalletRestoreTest(BitcoinTestFramework):
-
-    def __init__(self):
-        super().__init__()
-        self.num_nodes = 5
-        self.setup_clean_chain = True
-        self.genesis = None
-        self.encrypt = False
-
-    def node_args(self, i):
-        extra = ['-developerencryptwallet'] if (i == 0 and self.encrypt) else None
-        return yellowback_node_args(extra=extra, genesis=self.genesis, yellowback=(self.genesis is not None))
-
-    def setup_nodes(self):
-        return start_nodes(self.num_nodes, self.options.tmpdir,
-                           extra_args=[self.node_args(i) for i in range(self.num_nodes)])
-
-    def setup_network(self, split=False):
-        self.nodes = self.setup_nodes()
-        self.reconnect_all()
-        self.is_network_split = False
-        self.sync_all()
-
-    def reconnect_all(self):
-        for i in range(self.num_nodes - 1):
-            connect_nodes_bi(self.nodes, i, i + 1)
-
-    def restart_all(self):
-        for i in range(self.num_nodes):
-            stop_node(self.nodes[i], i)
-        for i in range(self.num_nodes):
-            self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i))
-        self.reconnect_all()
-
-    def restart(self, i):
-        stop_node(self.nodes[i], i)
-        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i))
-        self.reconnect_all()
-        sync_blocks(self.nodes)
-
-    def mine(self, n=1):
-        self.nodes[0].generate(n)
-        self.sync_all()
-        assert_yed_synced(self.nodes)
-
-    def price(self, p):
-        publish_price(self.nodes[2], [self.nodes[2], self.nodes[3]], p)
-        sync_mempools(self.nodes)
-
-    def mine_to(self, height, price):
-        while self.nodes[0].getblockcount() < height:
-            step = min(40, height - self.nodes[0].getblockcount())
-            self.price(price)
-            self.mine(step)
+class YellowbackWalletRestoreTest(YellowbackTestFramework):
 
     def run_test(self):
         nodes = self.nodes
-        print("Funding, roster, genesis anchor, restart with -yellowback")
-        nodes[0].generate(110)
-        self.sync_all()
-        for i in (2, 3, 4):
-            nodes[0].sendtoaddress(nodes[i].getnewaddress(), Decimal('2'))
-        nodes[0].generate(1)
-        self.sync_all()
-        roster = make_regtest_roster(nodes[2:5], 2)
-        self.genesis = fund_genesis_anchor(nodes[0], roster, Decimal('1.0'))
-        self.sync_all()
-        self.restart_all()
-        self.sync_all()
-        assert_yed_synced(nodes)
+        user, restored = nodes[0], nodes[5]
 
-        print("Node 0 mints twice and receives a send; node 1 holds nothing")
-        self.price(50000000)
-        self.mine(3)
-        m1 = nodes[0].yed_mint(10000, 0)
-        self.mine(1)
-        nodes[0].yed_mint(20000, 1)
-        self.mine(1)
-        recv = nodes[0].yed_getnewaddress()
-        nodes[0].yed_send(recv, 5000)
-        self.mine(1)
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 30000)
-        positions0 = sorted(p['vaultTxid'] for p in nodes[0].yed_listpositions())
-        assert_equal(len(positions0), 2)
-        assert_equal(nodes[1].yed_getbalance()['confirmedCents'], 0)
-        assert_equal(nodes[1].yed_listpositions(), [])
-        coins0 = sorted((c['txid'], c['vout'], c['cents']) for c in nodes[0].yed_listunspent())
+        print('activate at $50')
+        self.activate(POOLS, quote_usd=50)
+        self.mine_round_robin(POOLS, REF_LAG + 1)
 
-        print("Dump every key node 0 used, import into node 1 without rescan (B23)")
-        # Vault owner keys and YED output keys are keypool keys; the address book holds them all.
-        keys = nodes[0].getaddressesbyaccount("")  # every keypool key the builder drew is in the address book
-        owner_addrs = []
-        for p in nodes[0].yed_listpositions():
-            # ownerKeyId -> the transparent address of that key via the address book listing
-            owner_addrs.append(p['ownerKeyId'])
-        yed_addrs = set()
-        for c in nodes[0].yed_listunspent():
-            yed_addrs.add(c['address'])
+# Rule: MINT-3 XFER-1
+        print('node 0 mints twice (class A and class B) and sends 50 YED to a fresh own address; node 5 holds nothing')
+        m1 = user.yed_mint(10000, 48)
+        m2 = user.yed_mint(20000, 100)
+        assert_equal(m2['termClass'], 'B')
+        self.sync_all()
+        self.mine(POOLS[0])
+        sent = user.yed_send(user.yed_getnewaddress(), 5000)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getbalance()['confirmedCents'], 30000)
+        positions0 = sorted(p['txid'] for p in user.yed_listpositions())
+        assert_equal(positions0, sorted([m1['txid'], m2['txid']]))
+        assert_equal(restored.yed_getbalance()['confirmedCents'], 0)
+        assert_equal(restored.yed_listpositions(), [])
+        coins0 = sorted((c['txid'], c['vout'], c['cents']) for c in user.yed_listunspent())
+        assert_equal(sorted(c[2] for c in coins0), [5000, 5000, 20000])
+        owner_keyids = sorted(p['ownerKeyId'] for p in user.yed_listpositions())
+        yed_addrs = {c['address'] for c in user.yed_listunspent()}
+
+        print('dump every key node 0 used and import it into node 5 without a rescan')
         imported = 0
-        for addr in set(keys):
-            info = nodes[0].validateaddress(addr)
+        for addr in set(user.getaddressesbyaccount('')):
+            info = user.validateaddress(addr)
             if not info.get('ismine', False) or info.get('isscript', False):
                 continue
-            nodes[1].importprivkey(nodes[0].dumpprivkey(addr), "", False)
+            restored.importprivkey(user.dumpprivkey(addr), '', False)
             imported += 1
         assert_greater_than(imported, 2)
-        # The YED addresses decode to the same keys.
         for a in yed_addrs:
-            assert_equal(nodes[1].yed_validateaddress(a)['ismine'], True)
+            assert_equal(restored.yed_validateaddress(a)['ismine'], True)
+            assert_equal(user.yed_validateaddress(a)['transparentAddress'], restored.yed_validateaddress(a)['transparentAddress'])
 
-        print("Node 1 sees the same balance, coins and positions from the index alone")
-        assert_equal(nodes[1].yed_getbalance()['confirmedCents'], 30000)
-        assert_equal(sorted((c['txid'], c['vout'], c['cents']) for c in nodes[1].yed_listunspent()), coins0)
-        assert_equal(sorted(p['vaultTxid'] for p in nodes[1].yed_listpositions()), positions0)
-        for p in nodes[1].yed_listpositions():
-            assert p['ownerKeyId'] in owner_addrs
-        # yed_lockcoins locks every YED output that is now mine on node 1.
-        locked = nodes[1].yed_lockcoins()
+        print('node 5 sees the same balance, coins and positions from the index alone')
+        assert_equal(restored.yed_getbalance()['confirmedCents'], 30000)
+        assert_equal(sorted((c['txid'], c['vout'], c['cents']) for c in restored.yed_listunspent()), coins0)
+        assert_equal(sorted(p['txid'] for p in restored.yed_listpositions()), positions0)
+        assert_equal(sorted(p['ownerKeyId'] for p in restored.yed_listpositions()), owner_keyids)
+        for p in restored.yed_listpositions():
+            assert_equal(set(p) >= {'txid', 'vout', 'status', 'ownerPubKey', 'ownerKeyId', 'ownerAddress', 'termClass',
+                                    'lockHeight', 'claimHeight', 'collateralZat', 'collateral', 'mintedCents', 'mintHeight',
+                                    'refHeight', 'feePaidZat', 'closeHeight', 'closingTxid', 'burnedCents', 'unbacked',
+                                    'claimable', 'underwaterAt', 'voidReason', 'canRedeem', 'canClaim', 'canSweep'}, True)
+        locked = restored.yed_lockcoins()
         assert_equal(len(locked), len(coins0))
-        hist1 = nodes[1].yed_listtransactions()
-        assert_equal(sorted(h['type'] for h in hist1), ['mint', 'mint', 'send'])
+        assert_equal(sorted((l['txid'], l['vout']) for l in locked), sorted((c[0], c[1]) for c in coins0))
+        assert_equal([c['locked'] for c in restored.yed_listunspent()], [True] * 3)
+        hist = restored.yed_listtransactions()
+        assert_equal(sorted(h['type'] for h in hist), ['mint', 'mint', 'send'])
+        assert_equal([h for h in hist if h['txid'] == sent['txid']][0]['amountCents'], 0)   # own to own
 
-        print("Node 1 redeems the tier-0 vault with the imported owner key")
-        lock1 = nodes[1].yed_getvault(m1['txid'])['lockHeight']
-        self.mine_to(lock1, 50000000)
-        red = nodes[1].yed_redeem(m1['txid'])
-        assert_equal(red['requiredBurnCents'], 10000)
-        cosign_and_submit(nodes[1], [nodes[2], nodes[3]], red['hex'])
-        sync_mempools(nodes)
-        self.mine(1)
-        assert_equal(nodes[4].yed_getvault(m1['txid'])['status'], 'CLOSED')
-        assert_equal(nodes[1].yed_getbalance()['confirmedCents'], 20000)
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 20000)  # same keys, same view
-        assert_same_statehash(nodes)
+# Rule: RED-1 RED-2 RED-3
+        print('node 5 redeems the class-A vault with the imported owner key')
+        lock1 = restored.yed_getvault(m1['txid'])['lockHeight']
+        self.mine_round_robin(POOLS, lock1 - user.getblockcount())
+        assert_equal([p['canRedeem'] for p in restored.yed_listpositions() if p['txid'] == m1['txid']], [True])
+        red = restored.yed_redeem(m1['txid'])
+        assert_equal(red['burnedCents'], 10000)
+        self.sync_all()
+        self.mine(POOLS[2])
+        for node in (user, restored, nodes[2]):
+            assert_equal(node.yed_getvault(m1['txid'])['status'], 'CLOSED')
+        assert_equal(restored.yed_getbalance()['confirmedCents'], 20000)
+        assert_equal(user.yed_getbalance()['confirmedCents'], 20000)          # same keys, same view
+        assert_equal([h['type'] for h in restored.yed_listtransactions() if h['txid'] == red['txid']], ['redeem'])
+        assert_equal([h['type'] for h in user.yed_listtransactions() if h['txid'] == red['txid']], ['redeem'])
+        assert_same_statehash(self.enforcing_nodes())
+        # node 0's stage-(iii) reconciliation pruned the spent outpoint and keeps the rest locked
+        assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [20000])
+        assert_equal(sorted(c['cents'] for c in restored.yed_listunspent()), [20000])
+        assert_equal([c['locked'] for c in user.yed_listunspent()], [True] * len(user.yed_listunspent()))
 
-        print("Encrypted wallet (experimental, -developerencryptwallet): locked refuses to mint, unlocked mints")
-        self.encrypt = True
-        self.restart(0)
-        nodes = self.nodes
-        assert_yed_synced(nodes)
-        nodes[0].encryptwallet("pass")
+        print('encrypted wallet (experimental, -developerencryptwallet): locked refuses to sign, unlocked mints')
+        self.restart(0, ['-developerencryptwallet'])
+        user = nodes[0]
+        user.encryptwallet('pass')
         # encryptwallet shuts the node down by itself; wait for the process, then restart it.
-        from test_framework.util import bitcoind_processes
         bitcoind_processes[0].wait()
         del bitcoind_processes[0]
-        nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0))
-        self.reconnect_all()
-        sync_blocks(nodes)
-        assert_yed_synced(nodes)
-        assert_rpc_error("walletpassphrase", nodes[0].yed_mint, 10000, 0)
-        assert_rpc_error("walletpassphrase", nodes[0].yed_send, nodes[1].yed_getnewaddress(), 100)
-        nodes[0].walletpassphrase("pass", 60)
-        self.price(50000000)
-        self.mine(3)
-        m3 = nodes[0].yed_mint(10000, 0)
-        self.mine(1)
-        assert_equal(nodes[4].yed_getvault(m3['txid'])['status'], 'ACTIVE')
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 30000)
-        assert_same_statehash(nodes)
-        print("Done")
+        nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, ['-developerencryptwallet']))
+        user = nodes[0]
+        self.reconnect(0)
+        self.sync_all(blocks_only=True)
+        assert_rpc_error('walletpassphrase', user.yed_mint, 10000, 48)
+        assert_rpc_error('walletpassphrase', user.yed_send, restored.yed_getnewaddress(), 100)
+        assert_rpc_error('walletpassphrase', user.yed_redeem, m2['txid'])
+        assert_equal(user.yed_getbalance()['confirmedCents'], 20000)          # reading needs no passphrase
+        user.walletpassphrase('pass', 120)
+        m3 = user.yed_mint(10000, 48)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(nodes[2].yed_getvault(m3['txid'])['status'], 'ACTIVE')
+        assert_equal(user.yed_getbalance()['confirmedCents'], 30000)
+        assert_equal(restored.yed_getbalance()['confirmedCents'], 20000)      # the new key is not in the restored wallet
+        ym.assert_model_matches(nodes[2], full=True)
+        self.checkpoint('restore')
 
 
 if __name__ == '__main__':

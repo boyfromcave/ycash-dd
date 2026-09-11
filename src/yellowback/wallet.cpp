@@ -8,6 +8,7 @@
 #include "util.h"
 #include "wallet/wallet.h"
 #include "yellowback/payload.h"
+#include "yellowback/state.h"
 
 namespace yellowback {
 
@@ -136,10 +137,79 @@ void YellowbackWallet::Reconcile()
     }
 }
 
+size_t YellowbackWallet::LockedCount() const
+{
+    LOCK(wallet->cs_wallet);
+    return ourLocks.size();
+}
+
+bool YellowbackWallet::IsYellowbackLocked(const COutPoint& out) const
+{
+    LOCK(wallet->cs_wallet);
+    return ourLocks.count(out) != 0;
+}
+
+bool YellowbackWallet::ReleaseLock(const COutPoint& out)
+{
+    LOCK(wallet->cs_wallet);
+    const bool was = ourLocks.erase(out) != 0;
+    COutPoint o = out;
+    wallet->UnlockCoin(o);
+    return was;
+}
+
+void YellowbackWallet::ReapplyLocks()
+{
+    LOCK(wallet->cs_wallet);
+    for (COutPoint o : ourLocks) {
+        if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
+    }
+}
+
 std::set<COutPoint> YellowbackWallet::Locked() const
 {
     LOCK(wallet->cs_wallet);
     return ourLocks;
+}
+
+bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
+{
+    if (!g_yellowbackWallet) return false;
+    YellowbackWallet& yw = *g_yellowbackWallet;
+    YellowbackIndex* index = yw.Index();
+    if (!index) return false;
+
+    // A payload that assigns cents to an output reassigns the YED; a REDEEM's burn is its own
+    // rule (RED-2) and its change assignment is an assignment like any other. No payload at all,
+    // or a payload with no assignments, means the YED simply disappears.
+    // A REDEEM payload (a vault spend: a redemption, a claim) is overlay business and is judged
+    // by MP-1, never here — its burn is the rule, not an accident. A TRANSFER payload reassigns
+    // the YED unless it assigns nothing at all. Everything else (no payload, an unreadable one, a
+    // MINT payload) leaves the spent cents with nowhere to go: the state machine burns them.
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) return false;
+    if (fp.has_value() && fp->payload.type == PayloadType::TRANSFER && !fp->payload.assignments.empty()) return false;
+
+    int64_t cents = 0;
+    std::string outpoints;
+    {
+        LOCK(index->cs_yellowback);
+        if (!index->IsHealthy()) return false;
+        State st(index->View());
+        LOCK(yw.Wallet()->cs_wallet);
+        for (const CTxIn& in : tx.vin) {
+            std::optional<TokenRecord> t = st.GetToken(in.prevout);
+            if (!t.has_value()) continue;
+            if (!yw.IsMineScript(t->scriptPubKey)) continue;
+            cents += t->cents;
+            if (!outpoints.empty()) outpoints += ", ";
+            outpoints += in.prevout.ToString();
+        }
+    }
+    if (cents <= 0) return false;
+    reason = strprintf("this transaction spends %d cents of this wallet's YED (%s) and its payload reassigns none of it,"
+                       " so that YED would be destroyed.", cents, outpoints);
+    return true;
 }
 
 } // namespace yellowback

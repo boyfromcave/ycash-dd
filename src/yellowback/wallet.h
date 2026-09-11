@@ -63,6 +63,18 @@ public:
     void Reconcile();
     /** Outpoints this layer has locked. */
     std::set<COutPoint> Locked() const;
+    /** How many (H10: yed_getinfo.lockedOutputs). */
+    size_t LockedCount() const;
+    /** True iff this layer holds `out` locked — what lockunspent refuses to undo (H5). */
+    bool IsYellowbackLocked(const COutPoint& out) const;
+    /**
+     * H5: give one outpoint back to plain YEC coin selection (yed_unlockcoin). Returns whether
+     * this layer held it. The YED it carries burns if it is then spent outside the overlay, and
+     * the next Reconcile() locks it again.
+     */
+    bool ReleaseLock(const COutPoint& out);
+    /** H5: re-apply every lock this layer holds, after `lockunspent true` unlocked everything. */
+    void ReapplyLocks();
 
     CWallet* Wallet() const { return wallet; }
     YellowbackIndex* Index() const { return index; }
@@ -72,6 +84,16 @@ private:
     YellowbackIndex* index;
     std::set<COutPoint> ourLocks; //!< cs_wallet
 };
+
+/**
+ * H7: does this raw transaction destroy YED that belongs to this wallet? True when it spends a
+ * `Tokens` outpoint the wallet owns and carries no payload assigning cents to any output — the
+ * state machine then burns those cents. `reason` is filled with a human sentence naming the
+ * outpoints and the cents at stake. False without -yellowback, without a wallet, while the index
+ * is unhealthy, and for any transaction that spends none of this wallet's YED. Takes
+ * cs_yellowback and cs_wallet itself; the caller holds cs_main (sendrawtransaction does).
+ */
+bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason);
 
 /** The wallet layer, or nullptr without a wallet or without -yellowback. */
 extern YellowbackWallet* g_yellowbackWallet;

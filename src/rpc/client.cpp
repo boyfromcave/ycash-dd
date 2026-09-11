@@ -92,6 +92,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "signrawtransaction", 1 },
     { "signrawtransaction", 2 },
     { "sendrawtransaction", 1 },
+    { "sendrawtransaction", 2 },   // allowyedburn (Phase 8 H7)
     { "fundrawtransaction", 1 },
     { "gettxout", 1 },
     { "gettxout", 2 },
@@ -168,6 +169,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_mint", 1 },
     { "yed_send", 1 },
     { "yed_sendmany", 0 },
+    { "yed_estimatesend", 0 },      // H3: the recipients object or the plain cents number
+    { "yed_unlockcoin", 1 },        // H5: the vout
     { "z_sendmany", 1},
     { "z_sendmany", 2},
     { "z_sendmany", 3},

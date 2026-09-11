@@ -44,6 +44,9 @@ BASE_SCRIPTS= [
     'yellowback_wallet_lifecycle.py',
     'yellowback_void_mint.py',
     'yellowback_wallet_restore.py',
+    'yellowback_claim.py',
+    'yellowback_pricefeed.py',
+    'yellowback_hardening.py',
     'yellowback_enforcement.py',
     'yellowback_stock_node.py',
     # Scripts that are run by the travis build process
