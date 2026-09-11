@@ -10,6 +10,7 @@
 #include "consensus/validation.h"
 #include "dbwrapper.h"
 #include "hash.h"
+#include "key_io.h"
 #include "main.h"
 #include "pow.h"
 #include "txmempool.h"
@@ -19,6 +20,9 @@
 #include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
+#include "yellowback/tag.h"
+
+#include <univalue.h>
 
 #include <boost/algorithm/string.hpp>
 
@@ -235,6 +239,15 @@ bool YellowbackIndex::SyncToChain()
     if (tip.has_value() && (tip->schemaVersion != SCHEMA_VERSION || tip->network != params.network)) {
         Wipe("schema or network changed");
         tip = std::nullopt;
+    }
+    if (tip.has_value()) {
+        // The four hashed regtest values (M13) are part of every state; a node restarted with a
+        // different set rebuilds rather than carrying rows computed under the old one.
+        std::optional<ParamsRecord> stored = State(*db).GetParamsRecord();
+        if (stored.has_value() && SerializeRecord(stored.value()) != SerializeRecord(ParamsRecord(params))) {
+            Wipe("parameters changed");
+            tip = std::nullopt;
+        }
     }
 
     const CBlockIndex* chainTip = chainActive.Tip();
@@ -678,14 +691,9 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     if (IsAbandonedLocked()) return std::nullopt;       // L13: a sweep is an ordinary transaction under abandonment
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
-    // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW.
-    std::optional<FoundPayload> fp = FindPayload(tx);
-    int64_t refHeight = -1;
-    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) refHeight = fp->payload.refHeight;
-    if (tx.nExpiryHeight == 0 || refHeight < 0 || (int64_t)tx.nExpiryHeight > refHeight + p.refWindow) {
-        return std::string("mempool-expiry");
-    }
-    // The two-transaction pseudo-block (§4.3): EvaluateBlock reads vtx[0] as the coinbase (TAG-1, TX-0).
+    // RED-1..4 at the next height over the two-transaction pseudo-block (§4.3): EvaluateBlock reads
+    // vtx[0] as the coinbase (TAG-1, TX-0). The RED verdict comes first so that a malformed spend is
+    // named by its rule (K7: mempool-check-failed:<verdict>), the expiry bound second.
     CMutableTransaction cb;
     cb.vin.resize(1);
     cb.vin[0].prevout.SetNull();
@@ -695,9 +703,19 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     pseudo.vtx.push_back(tx);
     OverlayStateView overlay(*db);
     BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0);
-    if (!ev.blockInvalid) return std::nullopt;
-    const std::string::size_type colon = ev.reason.find(':');
-    return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
+    if (ev.blockInvalid) {
+        const std::string::size_type colon = ev.reason.find(':');
+        return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
+    }
+    // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW, so the spend
+    // expires from every mempool (stock nodes enforce expiry) before RED-1's window closes.
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    int64_t refHeight = -1;
+    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) refHeight = fp->payload.refHeight;
+    if (tx.nExpiryHeight == 0 || refHeight < 0 || (int64_t)tx.nExpiryHeight > refHeight + p.refWindow) {
+        return std::string("mempool-expiry");
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckReason(const CTransaction& tx)
@@ -781,6 +799,41 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
         }
     }
     return s;
+}
+
+UniValue YellowbackIndex::TemplateInfo(int64_t now) const
+{
+    AssertLockHeld(cs_main);
+    const MinerStatus ms = GetMinerStatus(now);
+    LOCK(cs_yellowback);
+    // The tag the template carries: COINBASE_FLAGS as CreateNewBlock set it (V5, one source of truth),
+    // decoded through the same scan a node applies to the mined block (TAG-1..5).
+    const int nextHeight = chainActive.Height() + 1;
+    const std::optional<CoinbaseTag> tag = COINBASE_FLAGS.empty() ? std::nullopt
+                                          : FindTag((CScript() << nextHeight << OP_0) + COINBASE_FLAGS, nextHeight);
+    KeyIO keyIO(::Params());
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("tag", HexStr(COINBASE_FLAGS.begin(), COINBASE_FLAGS.end()));
+    o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
+    o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
+    o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
+    o.pushKV("signal", tag.has_value() && tag->Signal());
+    std::optional<CKeyID> payout = tag.has_value() ? std::optional<CKeyID>(CKeyID(tag->payoutKey)) : ms.payoutKey;
+    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(CTxDestination(payout.value()))) : NullUniValue);
+    o.pushKV("registered", ms.registered);
+    o.pushKV("eligible", ms.eligible);
+    State st(*db);
+    const int tip = TipHeight();
+    const std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
+    const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
+    o.pushKV("activation", a.Status() == ActivationStatus::ACTIVE ? "active" : a.Status() == ActivationStatus::LOCKED_IN ? "locked_in" : "signaling");
+    o.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
+    o.pushKV("enforcing", miner.enforce && healthy && !valveTripped && !IsSunsetLocked());
+    o.pushKV("valveTripped", valveTripped);
+    o.pushKV("sunset", IsSunsetLocked());
+    o.pushKV("healthy", healthy);
+    o.pushKV("templatePolicy", miner.templatePolicy);
+    return o;
 }
 
 // ---------------------------------------------------------------------------

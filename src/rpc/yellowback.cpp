@@ -530,8 +530,9 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
     State st(index.View());
     const int tip = IndexHeight(index);
     const int h = HeightArg(params.size() > 0 ? params[0] : NullUniValue, tip);
-    if (h < p.startHeight || h > tip) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("height must be between %d and %d", p.startHeight, tip));
-    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)h);
+    if (h < 0 || h > tip) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("height must be between 0 and %d", tip));
+    // Below startHeight every price is undefined: the virtual snapshot (§3.6), no fill, no tag lookup of the index.
+    std::optional<Snapshot> snap = h >= p.startHeight ? st.GetSnapshot((uint32_t)h) : std::nullopt;
     const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
     UniValue o(UniValue::VOBJ);
     o.pushKV("height", h);
@@ -544,7 +545,7 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
     const std::pair<const char*, int> windows[] = { { "fast", p.pFastWindow }, { "mid", p.pMidWindow }, { "slow", p.pSlowWindow } };
     for (const auto& w : windows) {
         UniValue f(UniValue::VOBJ);
-        f.pushKV("quoteTags", QuoteTagsIn(st, p, h, w.second));
+        f.pushKV("quoteTags", h >= p.startHeight ? QuoteTagsIn(st, p, h, w.second) : 0);
         f.pushKV("window", w.second);
         f.pushKV("minFill", p.MinFill(w.second));
         fill.pushKV(w.first, f);
@@ -1176,7 +1177,8 @@ UniValue yed_gethistory(const UniValue& params, bool fHelp)
     EnsureHealthy(index);
     const yellowback::Params& p = index.GetParams();
     const int tip = IndexHeight(index);
-    if (from < p.startHeight || to < from || to > tip || to - from >= 2016) {
+    if (from < p.startHeight) from = p.startHeight;   // rows exist from startHeight only (index_start_height_above_tip)
+    if (from < 0 || to < from || to > tip || to - from >= 2016) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("range must satisfy %d <= from <= to <= %d with at most 2016 rows", p.startHeight, tip));
     }
     State st(index.View());

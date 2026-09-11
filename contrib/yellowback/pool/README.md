@@ -38,9 +38,11 @@ every coinbase the node builds:
    its own text ≤ ~55 bytes.
 3. A stratum layer that honours neither `coinbasetxn` nor `coinbaseaux.flags` uses the per-stack
    note below, or switches to the `coinbasetxn` path.
-4. Verify with `check-coinbase <height|blockhash> [-- -datadir=…]` (prints `kind: quote|signal|none`
-   plus the decoded fields) and watch the node with `monitor-quote.sh` (reads `yed_getinfo.miner`;
-   exit 0 only while the node holds a fresh quote and the payout key is eligible).
+4. Verify with `check-coinbase <height|blockhash> [-regtest] [-datadir=…]` (prints `kind:
+   quote|signal|none`, the decoded fields and `payoutAddress` for the node's network, so the lines
+   compare with `ycash-cli yed_gettag <height>` one for one) and watch the node with
+   `monitor-quote.sh` (reads `yed_getinfo.miner`; exit 0 only while the node holds a fresh quote
+   and the payout key is eligible).
 
 `check-coinbase` decodes the block's coinbase locally with the same TAG-1..5 rules the node uses
 (`../yellowback_price.py`), so it also works against a node without the module; `yed_gettag` on an
@@ -49,9 +51,12 @@ offline (useful on a pool's coinbase before it is mined).
 
 ## Per-stack notes (skeleton — survey §12 Q9 pending)
 
-The survey of which stacks Ycash pools actually run needs the operators (Phase 7, §12 Q9). Each
-note below is the expected shape from reading the stack's public source; **every item marked
-TODO is unverified against a live pool.**
+The survey of which stacks Ycash pools actually run **needs the operators** and is the one Phase 7
+item that code cannot close (Phase 7 checkbox 3, §12 Q9): it is done by asking each pool, during
+the outreach of Phase 10, which stack it runs and whether that stack honours `coinbasetxn` or
+`coinbaseaux.flags`, and by recording the answer here. Each note below is the expected shape from
+reading the stack's public source; **every item marked TODO is unverified against a live pool.**
+The one-line patches described are not shipped in this repository until a pool has run them.
 
 ### node-stratum-pool lineage (s-nomp / z-nomp / zcash-equihash stratum)
 

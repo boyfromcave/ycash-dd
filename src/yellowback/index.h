@@ -26,6 +26,7 @@
 class CBlockHeader;
 class CBlockIndex;
 class CTxMemPool;
+class UniValue;
 
 /**
  * The Yellowback index (plan V2, §4.2a, §4.3): the overlay state kept
@@ -271,6 +272,12 @@ public:
     QuoteHolder GetQuote() const;
     /** What the next template's tag would be, given `now` (cs_yellowback). */
     MinerStatus GetMinerStatus(int64_t now) const;
+    /**
+     * The getblocktemplate "yellowback" object (§4.4; V26): the tag the template carries
+     * (COINBASE_FLAGS as CreateNewBlock set it, decoded), the quote's age, the miner's
+     * standing and the node's state. Caller holds cs_main; `now` is the RPC's clock (M11).
+     */
+    UniValue TemplateInfo(int64_t now) const;
 
     /** Parse -yellowbacktestfault (regtest only); an error string on a bad spec. */
     std::optional<std::string> SetTestFault(const std::string& spec);

@@ -368,6 +368,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
     {
         LOCK2(cs_main, mempool.cs);
         COINBASE_FLAGS = yellowback::g_yellowback ? yellowback::policy::TagScript(*yellowback::g_yellowback) : CScript();
+        std::optional<yellowback::TemplateView> ybview;
+        if (yellowback::g_yellowback) ybview.emplace(yellowback::g_yellowback->TemplateView());
         CBlockIndex* pindexPrev = chainActive.Tip();
         const int nHeight = pindexPrev->nHeight + 1;
         uint32_t consensusBranchId = CurrentEpochBranchId(nHeight, chainparams.GetConsensus());
@@ -581,6 +583,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
                 saplingValue = saplingValueDummy;
             }
 
+            if (ybview && !yellowback::policy::FilterTemplate(*ybview, tx, nHeight)) continue;
             UpdateCoins(tx, view, nHeight);
 
             // Added
