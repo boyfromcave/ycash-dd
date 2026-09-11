@@ -1942,6 +1942,19 @@ def subsidy_from_rpc(node, height):
     return int((total * COIN).to_integral_value())
 
 
+def model_transaction(model, tx, height):
+    """The accounting half as one call (P8): apply one non-coinbase transaction (a ``getblock 2``
+    dict or a Tx) to ``model`` at ``height`` per section 3.8 (IN-1..3, TX-0, MINT-1..8, XFER-1..3,
+    RED-1..4) and return ``(txlog_record_or_None, failing_red_verdict_or_None)``.  ``feed_block``
+    does exactly this for every transaction of a block before the SNAP; this entry point lets a
+    test model one transaction against an in-block state without a block."""
+    t = tx_from_json(tx) if isinstance(tx, dict) else tx
+    if t.is_coinbase:
+        return None, None
+    failing = model._apply_tx(t, height)
+    return model.txlog.get(t.txid), failing
+
+
 def build_model_from_node(node, params=None, check_tags=True):
     """Rebuild the model from a live node over [0, tip] via getblockcount/getblockhash/getblock 2."""
     if params is None:

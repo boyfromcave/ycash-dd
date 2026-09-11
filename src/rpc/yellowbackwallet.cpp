@@ -645,7 +645,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
             else type = l.path == "owner" ? "sweep" : "claimed";
         }
         else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }
-        else if (spent > 0 && !ok && l.verdict != verdict::BURNED) { type = "burn"; }
+        else if (spent > 0 && l.burned > 0 && l.yedOut == received) { type = "burn"; }   // nothing left this wallet but the burn
         else if (spent > received) { type = "send"; }
         else { type = "receive"; }
         UniValue o(UniValue::VOBJ);
