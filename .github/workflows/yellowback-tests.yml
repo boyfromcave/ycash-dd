@@ -3,12 +3,15 @@ name: yellowback tests
 # Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
 # The same zcutil/build.sh a developer runs locally, so a green CI and a green laptop mean the
 # same thing. Layout per the workspace plan (docs/plans/yellowback-v2-development-plan.md, §6.0
-# item 6): `main`, `audit` and `python` block merges; `nightly` opens an issue. `lockorder`,
-# `sanitizers` and `coverage` arrive with Phase 3, `weekly-fuzz` with Phase 2.
+# item 6): `main`, `audit` and `python` block merges; `nightly` and `weekly-fuzz` open an issue.
+# `lockorder`, `sanitizers` and `coverage` arrive with Phase 3.
 #
 # Functional scripts are listed by name: rpc-tests.py does not glob. YELLOWBACK_SCRIPTS is the
-# current phase's list (Phase 0: the retained v1 flows; they leave at Phase 2's first commit and
-# return at Phase 6). STOCK_BASELINE is the inherited Ycash suite that must keep passing against
+# current phase's list (Phase 2: yellowback_index only — the four wallet-flow scripts left at
+# Phase 2's first commit because the payload is version 2 and the state machine follows the v2
+# rules while the wallet RPCs still build v1 transactions until Phase 6, N26; yellowback_activation,
+# yellowback_mining and yellowback_enforcement join as Phases 3-5 land; the four return at Phase 6).
+# STOCK_BASELINE is the inherited Ycash suite that must keep passing against
 # the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
 # doc/yellowback.md "Build and test baseline".
 
@@ -21,10 +24,11 @@ on:
       - feature/yellowback-sf
   schedule:
     - cron: '0 3 * * *'
+    - cron: '0 4 * * 0'
   workflow_dispatch:
 
 env:
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore yellowback_sapling
+  YELLOWBACK_SCRIPTS: yellowback_index
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
@@ -220,10 +224,12 @@ jobs:
       - name: pyflakes (contrib; blocking from Phase 7 when yellowback_fed.py is replaced)
         continue-on-error: true
         run: python3 -m pyflakes contrib/yellowback/*.py
-      # Phase 2 adds: python3 src/test/gen_yellowback_corpus.py --check
+      - name: Fuzz corpora and the embedded replay tables agree (N34)
+        # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
+        run: python3 src/test/gen_yellowback_corpus.py --check
 
   nightly:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -277,7 +283,30 @@ jobs:
       # BITCOIND=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
       # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
       # the ycash-legacy worktree build, yellowback_stockparity.py, yellowback_stock_node.py and
-      # yellowback_enforcement.py --stock-binary (Phase 3+); the fuzz smoke (Phase 2).
+      # yellowback_enforcement.py --stock-binary (Phase 3+).
+      - name: Fuzz smoke (N34)
+        # Ycash's harness builds one target at a time: --enable-fuzz-main replaces main() and the
+        # target's fuzz.cpp is linked as src/fuzz.cpp (plan §6.0 item 0). Each Yellowback target
+        # runs 10 minutes from its corpus; findings land in <Target>/output and are uploaded, and
+        # every file copied into <Target>/crashes/ is replayed by yellowback_fuzz_tests forever.
+        run: |
+          set -e
+          sudo apt-get install -y clang
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
+            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee; do
+            ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            make -C src -j$(nproc) ycashd
+            mkdir -p src/fuzzing/$t/output
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=600
+          done
+      - name: Upload fuzz findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yellowback-fuzz-findings
+          path: src/fuzzing/Yellowback*/output/crash-*
+          if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -292,3 +321,60 @@ jobs:
         run: |
           gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+
+  weekly-fuzz:
+    # Two hours per Yellowback target with corpus minimisation, then a PR with the new corpus
+    # files and the regenerated C++ replay table (plan §6.0 item 6, §7 "Fuzzing"). Never blocks.
+    if: github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 900
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake libtinfo5 clang
+      - uses: actions/cache@v4
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - name: Fuzz every target for two hours and minimise the corpus
+        run: |
+          set -e
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
+            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee; do
+            ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            make -C src -j$(nproc) ycashd
+            mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=7200 || true
+            # Crashes become permanent replay cases; the minimised corpus (seeds + new coverage) replaces input/.
+            for c in src/fuzzing/$t/output/crash-*; do [ -f "$c" ] && cp "$c" "src/fuzzing/$t/crashes/$(date +%Y%m%d)-$(basename "$c")"; done
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd -merge=1 src/fuzzing/$t/merged src/fuzzing/$t/input src/fuzzing/$t/output
+            i=0; for f in src/fuzzing/$t/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
+          done
+          python3 src/test/gen_yellowback_corpus.py --write || true
+          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp
+      - name: Open a PR with the new corpus files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --cached --quiet; then echo "no new corpus files"; exit 0; fi
+          branch="weekly-fuzz/$(date +%Y%m%d)"
+          git config user.name "yellowback-weekly-fuzz"
+          git config user.email "weekly-fuzz@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d))"
+          git push origin "$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base feature/yellowback-sf --head "$branch" \
+            --title "fuzz: weekly corpus update $(date +%Y-%m-%d)" \
+            --body "New corpus files and crashes from the weekly 2 h/target libFuzzer run; the C++ replay table was regenerated by gen_yellowback_corpus.py --write. Any file under crashes/ is a finding to fix before merging." || true

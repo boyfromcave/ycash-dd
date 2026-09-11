@@ -4,11 +4,13 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 """Seed corpora for the Yellowback fuzz targets (plan §7 "Fuzzing", N34).
 
-One deterministic generator owns three corpora:
+One deterministic generator owns five corpora:
 
     src/fuzzing/YellowbackTag/input/*.bin       LE32(nHeight) ‖ coinbase scriptSig
     src/fuzzing/YellowbackPayload/input/*.bin   OP_RETURN payload bytes (version 2)
     src/fuzzing/YellowbackScript/input/*.bin    vault scripts and vault scriptSigs
+    src/fuzzing/YellowbackEvaluate/input/*.bin  the prefix grammar of src/test/yellowback_fuzz_harness.h ‖ a CBlock
+    src/fuzzing/YellowbackPayee/input/*.bin     the FEE-W grammar of the same header
 
 and the C++ tables embedded in src/test/yellowback_fuzz_tests.cpp between the
 BEGIN/END GENERATED CORPUS markers, so `make check` replays every seed (and
@@ -17,7 +19,8 @@ without a fuzzing build or a path.
 
     gen_yellowback_corpus.py            print the C++ tables
     gen_yellowback_corpus.py --write    write input/*.bin and update the C++ file
-    gen_yellowback_corpus.py --check    exit 1 unless input/ and the C++ file match (CI)
+    gen_yellowback_corpus.py --check    exit 1 unless input/ and the C++ file match (CI); also checks that
+                                        src/test/data/yellowback_golden.json equals the qa/ copy the model pins
 
 Run from anywhere; paths are relative to this file. No third-party modules.
 """
@@ -31,7 +34,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(HERE)
 FUZZ_DIR = os.path.join(SRC, "fuzzing")
 CPP = os.path.join(HERE, "yellowback_fuzz_tests.cpp")
-TARGETS = ("YellowbackTag", "YellowbackPayload", "YellowbackScript")
+TARGETS = ("YellowbackTag", "YellowbackPayload", "YellowbackScript", "YellowbackEvaluate", "YellowbackPayee")
+GOLDEN_SRC = os.path.join(HERE, "data", "yellowback_golden.json")
+GOLDEN_QA = os.path.join(os.path.dirname(SRC), "qa", "rpc-tests", "test_framework", "yellowback_golden.json")
 BEGIN = "// BEGIN GENERATED CORPUS (src/test/gen_yellowback_corpus.py; do not edit by hand)"
 END = "// END GENERATED CORPUS"
 
@@ -296,10 +301,211 @@ def script_corpus():
     ]
 
 
+# ---------------------------------------------------------------- evaluate (§3.8; grammar in yellowback_fuzz_harness.h)
+SAPLING_VERSION = 4
+SAPLING_GROUP = 0x892F2085
+START = 1
+GRACE = 24
+
+
+def compact(n):
+    if n < 253:
+        return bytes([n])
+    if n < 0x10000:
+        return b"\xfd" + struct.pack("<H", n)
+    return b"\xfe" + struct.pack("<I", n)
+
+
+def tx_v4(vin, vout, lock_time=0, expiry=0):
+    """A transparent-only Sapling (v4) transaction: vin [(txid32, n, scriptSig, seq)], vout [(value, script)]."""
+    r = struct.pack("<I", (1 << 31) | SAPLING_VERSION) + struct.pack("<I", SAPLING_GROUP) + compact(len(vin))
+    for txid, n, ss, seq in vin:
+        r += txid + struct.pack("<I", n) + compact(len(ss)) + ss + struct.pack("<I", seq)
+    r += compact(len(vout))
+    for val, spk in vout:
+        r += struct.pack("<q", val) + compact(len(spk)) + spk
+    r += struct.pack("<II", lock_time, expiry) + struct.pack("<q", 0) + compact(0) + compact(0) + compact(0)
+    return r
+
+
+def block(txs):
+    """CBlock: the Zcash header (version, prev, merkle, light-client root, time, bits, 32-byte nonce, solution) and vtx."""
+    return struct.pack("<I", 4) + bytes(32) * 3 + struct.pack("<II", 1700000000, 0x207fffff) + bytes(32) + compact(0) + compact(len(txs)) + b"".join(txs)
+
+
+def coinbase(height, tag_bytes=b""):
+    return tx_v4([(bytes(32), 0xFFFFFFFF, push_num(height) + tag_bytes, 0xFFFFFFFF)], [(625000000, p2pkh(bytes(20)))])
+
+
+def p2pkh(key_hash):
+    return op(OP_DUP, 0xA9) + push(key_hash) + op(0x88, OP_CHECKSIG)
+
+
+def p2sh(redeem):
+    import hashlib as _h
+    h = _h.new("ripemd160", _h.sha256(redeem).digest()).digest()
+    return op(0xA9) + push(h) + op(0x87)
+
+
+def opret(data):
+    return op(OP_RETURN) + push(data)
+
+
+def fill(b):
+    return bytes([b]) * 32
+
+
+def key20(i):
+    return bytes([i]) * 20
+
+
+def ev_tag(dh, price, key_idx, flags=1, mask=7):
+    return bytes([dh, flags]) + struct.pack("<QH", price, mask) + bytes([key_idx])
+
+
+def ev_vault(status, term, lock, collateral, minted, ref):
+    return bytes([status, term]) + struct.pack("<Iqqi", lock, collateral, minted, ref)
+
+
+def ev_token(cents):
+    return struct.pack("<q", cents)
+
+
+def ev_prev(status=2, mask=0, p_fast=50000, p_mid=50000, p_slow=50000, sigma=10000, issued=10 ** 11):
+    return bytes([status]) + struct.pack("<Iqqqiq", mask, p_fast, p_mid, p_slow, sigma, issued)
+
+
+def ev_act(status=2, lock_in=64, activate=128):
+    return bytes([status]) + struct.pack("<ii", lock_in, activate)
+
+
+def ev_input(tags, vaults, tokens, prev, act, hsel, blk):
+    return (bytes([len(tags)]) + b"".join(tags) + bytes([len(vaults)]) + b"".join(vaults)
+            + bytes([len(tokens)]) + b"".join(tokens) + prev + act + bytes([hsel]) + blk)
+
+
+def evaluate_corpus():
+    # H = START - 2 + (hsel % 75) on regtest (VOL_WINDOW 64): hsel 10 => H = 9 with the seeded Snapshots[8].
+    H = 9
+    hsel = H - (START - 2)
+    quotes = [ev_tag(dh, 50000 + dh * 10, dh % 3) for dh in range(0, 9)]          # tags at 1..9 (E(R) non-empty)
+    vault_script = vault(lock=100, claim=100 + GRACE)
+    active = ev_vault(0, 0, 100, 10 ** 12, 10000, 5)                               # Vaults[fill(1):0] ACTIVE
+    void = ev_vault(1, 0, 100, 10 ** 12, 5000, 5)                                  # Vaults[fill(2):0] VOID
+    tokens = [ev_token(10000), ev_token(6000)]                                     # Tokens[fill(0x80):0], [fill(0x81):0]
+    cb = coinbase(H, tag_push())
+    fee = p2pkh(key20(8 % 3))                                                      # the key quoted at R = 8
+    mint_pl = mint(term=0, cents=10000, lock=8 + 48, ref=8, key=KEY, fee=3)
+    mint_tx = tx_v4([(fill(0x50), 0, b"", 0xFFFFFFFF)],
+                    [(10 ** 12, p2sh(vault(lock=56, claim=56 + GRACE))), (10000, p2pkh(KEY[1:21])), (0, opret(mint_pl)), (2500000000, fee)])
+    owner_sig = push(FAKE_SIG) + op(OP_1) + push(vault_script)
+    claim_sig_ = op(OP_0) + push(vault_script)
+    redeem_pl = redeem(8, 1, [])
+    redeem_tx = tx_v4([(fill(1), 0, owner_sig, 0xFFFFFFFE), (fill(0x80), 0, b"", 0xFFFFFFFF)],
+                      [(10 ** 12 - 1000, p2pkh(bytes(20))), (2500000000, fee), (0, opret(redeem_pl))], lock_time=100)
+    claim_tx = tx_v4([(fill(1), 0, claim_sig_, 0xFFFFFFFE), (fill(0x80), 0, b"", 0xFFFFFFFF)],
+                     [(10 ** 12 - 1000, p2pkh(bytes(20))), (2500000000, fee), (0, opret(redeem_pl))], lock_time=124)
+    short_tx = tx_v4([(fill(1), 0, owner_sig, 0xFFFFFFFE), (fill(0x81), 0, b"", 0xFFFFFFFF)],
+                     [(10 ** 12 - 1000, p2pkh(bytes(20))), (2500000000, fee), (0, opret(redeem_pl))], lock_time=100)
+    sweep_tx = tx_v4([(fill(1), 0, owner_sig, 0xFFFFFFFE)], [(10 ** 12 - 1000, p2pkh(bytes(20)))], lock_time=100)
+    void_spend = tx_v4([(fill(2), 0, claim_sig_, 0xFFFFFFFE)], [(10 ** 12 - 1000, p2pkh(bytes(20)))])
+    xfer_tx = tx_v4([(fill(0x80), 0, b"", 0xFFFFFFFF)], [(10000, p2pkh(key20(1))), (10000, p2pkh(key20(2))), (0, opret(transfer([(0, 6000), (1, 4000)])))])
+    over_tx = tx_v4([(fill(0x81), 0, b"", 0xFFFFFFFF)], [(10000, p2pkh(key20(1))), (0, opret(transfer([(0, 9000)])))])
+    plain_tx = tx_v4([(fill(0x60), 0, b"", 0xFFFFFFFF)], [(1000, p2pkh(key20(5)))])
+    garbage_tx = tx_v4([(fill(0x61), 0, b"", 0xFFFFFFFF)], [(0, opret(rnd("garbage", 80)))])
+    base = dict(tags=quotes, vaults=[active, void], tokens=tokens, prev=ev_prev(), act=ev_act(), hsel=hsel)
+
+    def mk(name, blk=None, **kw):
+        a = dict(base)
+        a.update(kw)
+        return (name, ev_input(a["tags"], a["vaults"], a["tokens"], a["prev"], a["act"], a["hsel"], blk if blk is not None else block([cb])))
+
+    seeds = [
+        mk("empty_block"),
+        mk("no_state", tags=[], vaults=[], tokens=[]),
+        mk("untagged_coinbase", blk=block([coinbase(H)])),
+        mk("mint_ok", blk=block([cb, mint_tx])),
+        mk("mint_void_not_active", blk=block([cb, mint_tx]), prev=ev_prev(status=0, mask=1)),
+        mk("mint_and_xfer_chained", blk=block([cb, mint_tx, xfer_tx])),
+        mk("redeem_owner_ok", blk=block([cb, redeem_tx])),
+        mk("redeem_short_burn", blk=block([cb, short_tx])),
+        mk("claim_not_underwater", blk=block([cb, claim_tx])),
+        mk("claim_underwater", blk=block([cb, claim_tx]), prev=ev_prev(p_fast=9000, p_mid=9000, p_slow=9000)),
+        mk("sweep_no_payload", blk=block([cb, sweep_tx])),
+        mk("sweep_enforcement_suspended", blk=block([cb, sweep_tx]), prev=ev_prev(mask=0x24)),
+        mk("void_vault_spend", blk=block([cb, void_spend])),
+        mk("transfer_ok", blk=block([cb, xfer_tx])),
+        mk("transfer_over_assigned", blk=block([cb, over_tx])),
+        mk("plain_and_garbage", blk=block([cb, plain_tx, garbage_tx])),
+        mk("everything", blk=block([cb, mint_tx, xfer_tx, redeem_tx, void_spend, plain_tx])),
+        mk("below_start", hsel=0),                                                  # H = START - 2: ignored
+        mk("at_start", hsel=2, tags=[], vaults=[], tokens=[]),                      # H = START: virtual Snapshots[H - 1]
+        mk("first_sigma_sample", hsel=64 + 2 + 0),                                  # H = START + VOL_WINDOW
+        mk("top_of_range", hsel=74),                                                # H = START + VOL_WINDOW + 8
+        mk("hsel_wraps", hsel=255),
+        mk("no_coinbase_first", blk=block([plain_tx])),
+        mk("max_tags_and_vaults", tags=[ev_tag(i, 100 + i, i % 5, flags=i & 1) for i in range(64)],
+           vaults=[ev_vault(i % 4, i % 3, 60 + i, 10 ** 12, 10000, 5) for i in range(16)], tokens=[ev_token(100 + i) for i in range(16)]),
+        mk("inconsistent_totals_seed", tokens=[ev_token(-5)]),
+        mk("truncated_block", blk=block([cb])[:40]),                                 # discarded
+        mk("empty_rest", blk=b""),                                                   # discarded
+        ("random1", rnd("evaluate-random1", 300)),
+        ("random2", rnd("evaluate-random2", 900)),
+        ("empty", b""),
+    ]
+    return seeds
+
+
+# ---------------------------------------------------------------- payee (§3.7 FEE-W)
+def pt(dh, price, key_idx, jb):
+    return bytes([dh]) + struct.pack("<Q", price) + bytes([key_idx, jb])
+
+
+def payee_input(tags, rsel, selector, penalty=12, window=24, tilt=10000, pref=0xFF):
+    return (bytes([len(tags)]) + b"".join(tags) + bytes([rsel, len(selector)]) + selector
+            + bytes([penalty, window]) + struct.pack("<H", tilt) + bytes([pref]))
+
+
+def payee_corpus():
+    judged = [pt(dh, 50000, dh % 2, 0b0111 if dh % 2 == 0 else 0b0011) for dh in range(0, 60)]   # A in band, B not
+    penalised_b = [pt(dh, 50000, dh % 2, 0b0111 if dh % 2 == 0 else 0b1011) for dh in range(0, 60)]
+    all_penalised = [pt(dh, 50000, dh % 2, 0b1011) for dh in range(0, 60)]
+    unjudged = [pt(dh, 50000, dh % 3, 0) for dh in range(0, 60)]
+    sel = KEY
+    return [
+        ("no_tags", payee_input([], 10, sel)),
+        ("one_quote", payee_input([pt(5, 50000, 0, 0)], 10, sel)),
+        ("signal_only", payee_input([pt(5, 0, 0, 0)], 10, sel)),                    # price 0: not a quote, E(R) empty
+        ("window_edge_in", payee_input([pt(0, 50000, 0, 0)], 9, sel)),
+        ("window_edge_out", payee_input([pt(0, 50000, 0, 0)], 10, sel)),
+        ("two_pools_judged", payee_input(judged, 59, sel)),
+        ("two_pools_tilt0", payee_input(judged, 59, sel, tilt=0)),
+        ("two_pools_max_tilt", payee_input(judged, 59, sel, tilt=65535)),
+        ("penalised_skipped", payee_input(penalised_b, 59, sel)),
+        ("all_penalised_fallback", payee_input(all_penalised, 59, sel)),
+        ("penalty_zero", payee_input(all_penalised, 59, sel, penalty=0)),
+        ("window_zero", payee_input(judged, 59, sel, window=0)),
+        ("unjudged", payee_input(unjudged, 59, sel)),
+        ("preferred_in_set", payee_input(judged, 59, sel, pref=1)),
+        ("preferred_not_in_set", payee_input(judged, 59, sel, pref=7)),
+        ("empty_selector", payee_input(judged, 59, b"")),
+        ("long_selector", payee_input(judged, 59, rnd("sel", 200))),
+        ("outpoint_selector", payee_input(judged, 59, rnd("op", 36))),
+        ("r_before_tags", payee_input(judged, 0, sel)),
+        ("r_far_after", payee_input(judged, 255, sel)),
+        ("max_tags", payee_input([pt(i, 100 + i, i % 8, i & 15) for i in range(64)], 63, sel)),
+        ("random1", rnd("payee-random1", 200)),
+        ("random2", rnd("payee-random2", 600)),
+        ("empty", b""),
+    ]
+
+
 CORPORA = {
     "YellowbackTag": tag_corpus,
     "YellowbackPayload": payload_corpus,
     "YellowbackScript": script_corpus,
+    "YellowbackEvaluate": evaluate_corpus,
+    "YellowbackPayee": payee_corpus,
 }
 
 
@@ -396,6 +602,15 @@ def check_all():
         text = f.read()
     if splice(text, cpp_block()) != text:
         print("%s: embedded corpus table is stale (run --write)" % CPP)
+        ok = False
+    # The golden vector the C++ statehash_golden_vector replays is a copy of the model's (N18, N23).
+    try:
+        with open(GOLDEN_SRC, "rb") as a, open(GOLDEN_QA, "rb") as b:
+            if a.read() != b.read():
+                print("%s differs from %s (copy the qa/ file over)" % (GOLDEN_SRC, GOLDEN_QA))
+                ok = False
+    except OSError as e:
+        print("golden vector: %s" % e)
         ok = False
     return ok
 

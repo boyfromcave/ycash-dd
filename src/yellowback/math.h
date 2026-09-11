@@ -22,7 +22,7 @@
  * the clock or configuration, so every function is callable from a unit test
  * (§3.10). No IssuedZat: the subsidy is EvaluateBlock's argument (N22).
  *
- * DigiByte computes the same quantities in double precision on wall-clock
+ * DigiByte computes the same quantities in IEEE-754 arithmetic on wall-clock
  * price history (ref/digibyte/src/consensus/volatility.cpp:212-251,
  * digidollar/validation.cpp:1145-1161); here they are pure integer functions
  * of the chain (V17, mapping.md §13). The prototype's DCA/ERR/health tables

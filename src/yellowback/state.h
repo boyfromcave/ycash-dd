@@ -22,7 +22,7 @@
  * The Yellowback v2 state machine (plan §3.7–3.9): IN-1..3, TX-0, MINT-1..8,
  * XFER-1..3, RED-1..4, REG-4, ACT-1..6, PRICE-1..2, SIGMA-1, HALT-1..4, SNAP
  * and UNDO as pure functions of (block, state view, height, params, block
- * subsidy). Nothing here reads the clock, the mempool, the wallet or
+ * subsidy). Nothing here reads the clock, the transaction pool, the wallet or
  * configuration (§3.10); the block subsidy is an argument so this file links
  * against nothing in main.cpp (N22).
  *

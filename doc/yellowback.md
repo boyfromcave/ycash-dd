@@ -19,8 +19,8 @@ by `make spec`); the design record, the decisions and the phase plan are the wor
 | Phase | State |
 |---|---|
 | 0 — branch `feature/yellowback-sf`, strip the federation, re-baseline | node side done (this tree); wallet side and workspace manifest in the same series |
-| 1 — pure library (params, math, tag, payload, script) | not started |
-| 2 — state machine and view (v2 rules, `EvaluateBlock`) | not started |
+| 1 — pure library (params, math, tag, payload, script) | done (this tree) |
+| 2 — state machine and view (v2 rules, `EvaluateBlock`) | done (this tree; the 8 CPU-hour fuzz run is the Linux jobs') |
 | 3 — index hooks, node RPCs, `rpcversion 2` | not started |
 | 4 — mining policy (template filter, coinbase tag) | not started |
 | 5 — enforcement (the `main.cpp` hook), devnet on the v2 topology | not started |
@@ -253,6 +253,41 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
 - The runner (`rpc-tests.py`) execs each script through `#!/usr/bin/env python3`: put the
   workspace venv's `bin` first on `PATH` or the scripts start under the system interpreter and
   fail on `import simplejson`.
+
+### Recorded baseline (Phase 2, 2026-09-10, node side)
+
+Recorded from this tree on `feature/yellowback-sf` after the Phase 2 commits (state machine v2,
+view schema 2, fuzz targets), same host and build recipe as above.
+
+- **The four wallet-flow scripts left the CI `main` job's list at Phase 2's first commit**
+  (`yellowback_lifecycle`, `yellowback_void_mint`, `yellowback_wallet_restore`,
+  `yellowback_sapling`; plan §6 preamble, N26): the payload is now version 2 and the state
+  machine follows the v2 rules while `yed_mint`/`yed_redeem` still build v1 transactions
+  (`BuildMint`/`BuildRedeem` throw "lands in Phase 6" until then), so they cannot pass. They
+  return at Phase 6. `YELLOWBACK_SCRIPTS` is `yellowback_index` alone until Phases 3–5 add
+  `yellowback_activation`, `yellowback_mining` and `yellowback_enforcement`.
+- `src/test/test_bitcoin --run_test='yellowback_*'`: all green — `yellowback_state_tests` was
+  rewritten (53 cases, every rule of plan §3.7–3.9 tagged `// Rule:`), including
+  `statehash_golden_vector`, which replays the Python model's 224-block vector
+  (`src/test/data/yellowback_golden.json`, a copy of `qa/rpc-tests/test_framework/
+  yellowback_golden.json` that `gen_yellowback_corpus.py --check` keeps equal) and reproduces the
+  pinned hash `6eb05394…8682`; `yellowback_fuzz_tests` gained `evaluate_corpus_replay` and
+  `payee_corpus_replay` over the two new targets' corpora.
+- Fuzz targets: `src/fuzzing/YellowbackEvaluate` (the prefix grammar of
+  `src/test/yellowback_fuzz_harness.h`, four properties: apply/undo identity, overlay
+  equivalence, `blockInvalid ⇒ enforcementOn` computed at `H`, `supplyCents == Σ Tokens`) and
+  `src/fuzzing/YellowbackPayee` (the FEE-W pick is in `E(R)`, nullopt iff `E(R)` is empty).
+  Corpora 30 + 24 seeds; the CI `nightly` job runs every target 10 minutes under libFuzzer and
+  `weekly-fuzz` two hours with corpus minimisation. **The 8 CPU-hour `YellowbackEvaluate` run of
+  Phase 2's exit was not run on this host** (Apple clang ships no libFuzzer runtime,
+  `docs/mapping.md` §13.1); it runs on the Linux jobs.
+- Removed with the prototype (§4.2, N20, N21): the v1 payload codec (version 1 is non-Yellowback,
+  V23), `Payload::Price`, the tier tables, `Health`/`DcaBps`/`ErrBps`/`RequiredBurn`/
+  `VolatilityBreach`, the genesis anchor and roster parameters and their regtest flags
+  (`-yellowbackgenesisanchor`, `-yellowbackgenesisroster`, `-yellowbacksupplycap`; the four v2
+  flags are `-yellowbackstartheight`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps`,
+  `-yellowbackenforceuntil`), `yed_getprice` and `yed_getprotectionstatus`. The node RPCs render
+  the v2 records in a transitional shape; Phase 3 rewrites them per plan §4.5.
 
 ### Open items carried over from the prototype's Phase 0
 
