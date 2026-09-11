@@ -118,6 +118,28 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             assert_same_statehash(enforcing, label)
         return nodes[0].getbestblockhash()
 
+    def reset_peer_scores(self):
+        """Drop and re-make every connection of the current topology.
+
+        ``banscore`` lives in ``CNodeState``, which is per *connection*, and it never decays.
+        This script manufactures many reorgs, and two v4.5.0 DoS paths fire on them --
+        ``tx-expired`` when node 1 re-relays a spend past its expiry, and ``bad-prevblk``
+        "prev block not found" at DoS 10 when a peer fetches a reconnected branch's tip block
+        before its headers (``ref/ycash/src/main.cpp:4555``).  Neither is a Yellowback verdict:
+        Yellowback only ever uses ``DoS(0)`` and the ``DoS([1-9]`` grep over ``src/yellowback``
+        and ``src/rpc/yellowback*.cpp`` is empty.  Re-making the connections gives every peer a
+        fresh ``CNodeState``, so the N1 assertions that follow measure Yellowback alone."""
+        cross = self._cross_edges() if self.is_network_split else []
+        edges = [(a, b) for a, b in self.EDGES if (a, b) not in cross]
+        for a, b in edges:
+            self._disconnect_pair(a, b)
+        time.sleep(1.5)
+        for a, b in edges:
+            if self.nodes[a] is not None and self.nodes[b] is not None:
+                connect_nodes_bi(self.nodes, a, b)
+        time.sleep(2)
+        assert_banscore_zero([n for n in self.nodes if n is not None])
+
     def pools_mine(self, n, label='', group=None):
         """Mine ``n`` blocks round-robin over the pools, one at a time, checkpointing the
         enforcing group after each (N35)."""
@@ -812,7 +834,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             print('  -yellowbacktestfault=%s' % fault)
             self.storage_fault_run(POOLS[1], fault)
         self.tpl3_template_fault_disagrees(POOLS[1])
+        self.reset_peer_scores()      # the storage-fault reorgs accrue stock DoS points (above)
         self.k1_totality()
+        self.reset_peer_scores()      # so do K1's, and cases 5, 9 and 15 assert banscore == 0
 
     def storage_fault_run(self, pool, fault):
         tip = self.nodes[pool].getblockcount()
