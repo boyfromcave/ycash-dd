@@ -245,12 +245,13 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert txid in stock.getblock(blockhash)['tx']
         return blockhash, txid
 
-    def assert_rejected_everywhere(self, blockhash, nodes=None):
+    def assert_rejected_everywhere(self, blockhash, nodes=None, banscore=True):
         """Every enforcing node rejected ``blockhash`` at DoS 0, still peers with node 1, and can
         explain the rejection (``yed_getblockverdict``, case 7)."""
         nodes = ENFORCING if nodes is None else nodes
         wait_for_rejection([self.nodes[i] for i in nodes], blockhash)
-        assert_banscore_zero([self.nodes[i] for i in nodes])
+        if banscore:
+            assert_banscore_zero([self.nodes[i] for i in nodes])
         for i in nodes:
             verdict = self.nodes[i].yed_getblockverdict(blockhash)
             assert_equal(verdict['blockInvalid'], True)
@@ -845,7 +846,12 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         healthy = [i for i in ENFORCING if i != pool]
         self.cp('before the fail-open block', healthy)
         blockhash, _ = self.stock_block_with(bad)
-        self.assert_rejected_everywhere(blockhash, nodes=healthy)
+        # banscore is not asserted here: this case manufactures its reorg by isolating a pool and
+        # reconnecting it, and a node that receives such a branch's tip *block* before the header
+        # chain hits Ycash's own "prev block not found" at DoS 10 (ref/ycash/src/main.cpp:4555),
+        # which has nothing to do with a Yellowback verdict (Yellowback only ever uses DoS 0).
+        # N1 itself is asserted in cases 1, 9, 11, 12, 13 and 15, which build natural reorgs.
+        self.assert_rejected_everywhere(blockhash, nodes=healthy, banscore=False)
         self.rejected_hashes.append(blockhash)
         deadline = time.time() + 60
         while node.getbestblockhash() != blockhash:
