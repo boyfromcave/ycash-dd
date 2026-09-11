@@ -85,10 +85,6 @@ def coin_of(node, cents):
 
 class YellowbackClaimTest(YellowbackTestFramework):
 
-    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so the pools would
-    # never mine the deliberately invalid mints this script needs (docs/mapping.md section 13.5).
-    template_policy = 'consensus'
-
     def sync_all(self, blocks_only=False):
         """Blocks everywhere; mempools among the overlay nodes only — the stock node keeps the raw
         claim of a healthy vault that every overlay mempool refuses (MP-1), so a six-node mempool
@@ -136,9 +132,14 @@ class YellowbackClaimTest(YellowbackTestFramework):
             mints[name] = user.yed_mint(10000, 48)
         r = user.yed_getinfo()['height'] - REF_LAG
         z_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
-        z_txid = user.sendrawtransaction(z_hex)
+        z_txid = user.decoderawtransaction(z_hex)['txid']
         self.sync_all()
         self.mine(POOLS[1])
+        # TPL-2 (strict, the daemon default) skips a MINT whose verdict would be VOID, so no
+        # node's template will ever carry Z: its block is assembled in Python (6.0 item 4).
+        result, _ = mine_block_raw(nodes[POOLS[2]], [z_hex])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         for name, m in mints.items():
             assert_equal(user.yed_getvault(m['txid'])['status'], 'ACTIVE')
         assert_equal(user.yed_getvault(z_txid)['status'], 'VOID')

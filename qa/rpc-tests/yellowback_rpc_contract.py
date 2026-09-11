@@ -32,6 +32,7 @@ from test_framework.yellowback_util import (
     STOCK,
     YellowbackTestFramework,
     build_mint_tx,
+    mine_block_raw,
     set_quote,
 )
 
@@ -136,10 +137,6 @@ class Contract(object):
 
 class YellowbackRpcContractTest(YellowbackTestFramework):
 
-    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, and this script needs
-    # a VOID vault mined to fill yed_getvault's voidReason and sweepBefore (docs/mapping.md 13.5).
-    template_policy = 'consensus'
-
     def run_test(self):
         nodes = self.nodes
         user, stock, claimant = nodes[0], nodes[STOCK], nodes[5]
@@ -200,12 +197,17 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         mint_x = c.check('yed_mint', user.yed_mint(10000, 48))     # its YED funds the redemption of B
         r = user.yed_getinfo()['height'] - REF_LAG
         void_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
-        void_txid = user.sendrawtransaction(void_hex)
+        void_txid = user.decoderawtransaction(void_hex)['txid']
         raw = user.getrawtransaction(mint_a['txid'], 1)
         c.check('yed_decodepayload', user.yed_decodepayload(raw['vout'][2]['scriptPubKey']['hex'][4:]))
         c.check('yed_validaterawtransaction', user.yed_validaterawtransaction(raw['hex']))
         self.sync_all()
         self.mine(POOLS[1])
+        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool template
+        # will ever carry the short-collateral mint: its block is assembled in Python (6.0 item 4).
+        result, _ = mine_block_raw(nodes[POOLS[1]], [void_hex])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         vault_a = c.check('yed_getvault', user.yed_getvault(mint_a['txid']))
         assert_equal(vault_a['status'], 'ACTIVE')
         assert 'sweepBefore' not in vault_a

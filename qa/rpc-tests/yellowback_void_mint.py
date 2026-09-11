@@ -36,6 +36,7 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     assert_same_statehash,
     fee_zat,
+    mine_block_raw,
     node_pubkey,
     set_quote,
     term_class_of,
@@ -55,10 +56,6 @@ def assert_rpc_error(substr, fn, *args):
 
 
 class YellowbackVoidMintTest(YellowbackTestFramework):
-
-    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so the pools would
-    # never mine the deliberately invalid mints this script needs (docs/mapping.md section 13.5).
-    template_policy = 'consensus'
 
     initial_blocks = 112     # eleven mature coinbases (68.75 YEC) fund the pre-activation raw mint
 
@@ -106,9 +103,15 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         return signed['hex']
 
     def send_and_mine(self, node, hex_, miner):
-        txid = node.sendrawtransaction(hex_)
-        self.sync_all()
-        self.mine(miner)
+        """Mine ``hex_`` in a block of its own, assembled in Python on ``miner``.  TPL-2 (strict,
+        the daemon default) skips a MINT whose verdict would be VOID, so no node's template will
+        ever carry the mints this script is about: the block is built by hand (plan 6.0 item 4,
+        docs/mapping.md section 13.5).  ``miner``'s own coinbase tag is used, so the price and
+        signal windows advance exactly as they would with ``generate``."""
+        txid = node.decoderawtransaction(hex_)['txid']
+        result, _ = mine_block_raw(self.nodes[miner], [hex_])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         return txid
 
     def expect_void(self, txid, reason):

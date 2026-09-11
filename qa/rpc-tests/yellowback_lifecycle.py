@@ -72,11 +72,6 @@ def coin_of(node, cents):
 
 class YellowbackLifecycleTest(YellowbackTestFramework):
 
-    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID and a TRANSFER whose
-    # verdict would burn, so no overlay node would mine the under-assigned raw transfer this
-    # script needs (docs/mapping.md section 13.5).
-    template_policy = 'consensus'
-
     def owner_wif(self, node, vault):
         return node.dumpprivkey(pubkey_to_address(hex_str_to_bytes(vault['ownerPubKey'])))
 
@@ -221,9 +216,13 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
                 (0, bytes([ym.OP_RETURN]) + ym.push(payload)),
                 (yec_zat - YELLOWBACK_FEE, ym.p2pkh_script(ym.address_key_hash(user.getnewaddress())))]
         raw = ym.serialize_tx_v4(vin, vout, 0, user.getblockcount() + REF_WINDOW)
-        under_txid = user.sendrawtransaction(user.signrawtransaction(bytes_to_hex_str(raw))['hex'])
-        self.sync_all()
-        self.mine(POOLS[0])
+        under_hex = user.signrawtransaction(bytes_to_hex_str(raw))['hex']
+        under_txid = user.decoderawtransaction(under_hex)['txid']
+        # TPL-2 (strict, the daemon default) skips a TRANSFER whose verdict would burn, so no
+        # node's template will carry this one: the block is assembled in Python (6.0 item 4).
+        result, _ = mine_block_raw(nodes[POOLS[0]], [under_hex])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         info = nodes[2].yed_gettxinfo(under_txid)
         assert_equal((info['yedIn'], info['yedOut'], info['burned']), (9900, 9800, 100))
         assert_equal(user.yed_getbalance()['confirmedCents'], 30800)

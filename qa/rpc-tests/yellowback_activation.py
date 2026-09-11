@@ -212,10 +212,16 @@ class YellowbackActivationTest(YellowbackTestFramework):
         assert_equal((a['status'], a['activateHeight']), ('active', activate_height))
         est = user.yed_estimatecollateral(10_000, 48)
         ref = user.getblockcount() - REF_LAG                           # activateHeight - 1: not yet ACTIVE
-        void_hex, _ = build_mint_tx(user, 10_000, 48, ref, int(est['requiredZat']))
-        void_txid = user.sendrawtransaction(void_hex)
-        self.sync_all()
-        nodes[3].generate(1)                                           # A: activateHeight + 1, the first enforced height
+        # nExpiryHeight is the height of A's block itself, so when B wins the reorg returns the
+        # transaction to the branch-A mempools and the very next ConnectTip expires it again —
+        # nodes 1 and 5 never saw it, and a lingering copy would desync every later sync_all.
+        void_hex, _ = build_mint_tx(user, 10_000, 48, ref, int(est['requiredZat']),
+                                    expiry=activate_height + 1)
+        void_txid = ym.tx_from_hex(void_hex).txid
+        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool's own
+        # template will ever carry this transaction: node 3's block is assembled in Python.
+        result, _ = mine_block_raw(nodes[3], [void_hex])               # A: activateHeight + 1, the first enforced height
+        assert result is None, result
         self.sync_all(blocks_only=True)
         void_vault = user.yed_getvault(void_txid)
         assert_equal(void_vault['status'], 'VOID')
@@ -333,7 +339,11 @@ class YellowbackActivationTest(YellowbackTestFramework):
         eligible = nodes[3].yed_getfeepayee(tip - REF_LAG, int(vault2['collateralZat']))['eligible']
         assert pool2 not in eligible
         assert_equal(sorted(eligible), sorted(self.pool_addresses[1:]))
-        assert_equal(self.count(), SIGNAL_WINDOW)                      # signal-only tags still count
+        # Signal-only tags still count: the only block in the trailing window without the signal
+        # bit is node 5's single block from the MINER-1 case above (41 blocks back of 64).
+        assert_equal(self.count(), SIGNAL_WINDOW - 1)
+        window = [nodes[2].yed_gettag(str(h)) for h in range(tip - N_REG * 5 // 3 + 1, tip + 1)]
+        assert_equal([t['signal'] for t in window], [True] * (N_REG * 5 // 3))
         self.quote(2, '2.00')
 
         # ------------------------------------------------------------------ act5_past_sunset_accepts
