@@ -54,20 +54,30 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     idx1.phashBlock = &hash1;
     CBlock block;
 
-    // Fault injection: an exception in ApplyBlock is caught, marks the index unhealthy, does not propagate.
+    // Fault injection: an exception in CheckConnect is caught, marks the index unhealthy, does not propagate.
     index.testBeforeApply = [] { throw std::runtime_error("injected fault"); };
-    BOOST_CHECK_NO_THROW(index.TestChainTip(&idx1, &block, true));
+    {
+        LOCK(cs_main);
+        BOOST_CHECK_NO_THROW(index.CheckConnect(block, &idx1, false));
+    }
     BOOST_CHECK(!index.IsHealthy());
     BOOST_CHECK(index.UnhealthyReason().find("injected fault") != std::string::npos);
     // Further deliveries are ignored while unhealthy.
     index.testBeforeApply = nullptr;
-    BOOST_CHECK_NO_THROW(index.TestChainTip(&idx1, &block, true));
+    {
+        LOCK(cs_main);
+        BOOST_CHECK_NO_THROW(index.CheckConnect(block, &idx1, false));
+    }
     BOOST_CHECK(!index.IsHealthy());
 
     // Fresh index: the start block applies (v2 has no genesis anchor; an empty block is a valid start).
     YellowbackIndex index2(params, pathTemp / "yellowback-test2", 1 << 20, true);
     BOOST_CHECK(index2.SyncToChain());
-    BOOST_CHECK_NO_THROW(index2.TestChainTip(&idx1, &block, true));
+    {
+        LOCK(cs_main);
+        BOOST_CHECK_NO_THROW(index2.CheckConnect(block, &idx1, false));
+        BOOST_CHECK(index2.CommitConnect(block, &idx1));
+    }
     BOOST_CHECK(index2.IsHealthy());
     {
         LOCK(index2.cs_yellowback);
@@ -81,15 +91,19 @@ BOOST_AUTO_TEST_CASE(exception_boundary)
     index3.Stop();
     BOOST_CHECK(index3.IsStopped());
     index3.testBeforeApply = [] { throw std::runtime_error("must not run"); };
-    BOOST_CHECK_NO_THROW(index3.TestChainTip(&idx1, &block, true));
+    {
+        LOCK(cs_main);
+        BOOST_CHECK_NO_THROW(index3.CheckConnect(block, &idx1, false));
+    }
     BOOST_CHECK(index3.IsHealthy());
 
     // A disconnect of a block the index never had is ignored; below startHeight nothing happens.
     YellowbackIndex index4(params, pathTemp / "yellowback-test4", 1 << 20, true);
     BOOST_CHECK(index4.SyncToChain());
-    BOOST_CHECK_NO_THROW(index4.TestChainTip(&idx1, &block, false));
-    BOOST_CHECK(index4.IsHealthy());
-    BOOST_CHECK_NO_THROW(index4.TestChainTip(genesis, &block, true));
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(index4.UndoDisconnect(genesis));
+    }
     BOOST_CHECK(index4.IsHealthy());
     {
         LOCK(index4.cs_yellowback);

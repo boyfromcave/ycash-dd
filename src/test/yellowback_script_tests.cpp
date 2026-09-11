@@ -197,7 +197,7 @@ BOOST_AUTO_TEST_CASE(mint3_vault_script_sizes_sigops_and_parse)
               << OP_ELSE << (int64_t)100 << OP_CHECKLOCKTIMEVERIFY << OP_DROP << OP_TRUE << OP_ENDIF;
             rejects(z, "zero lock");
         }
-        // The prototype's roster-shaped vault is not a v2 vault.
+        // The prototype's multisig-shaped vault is not a v2 vault.
         rejects(CScript() << (int64_t)120000 << OP_CHECKLOCKTIMEVERIFY << OP_DROP << valtype(pub.begin(), pub.end()) << OP_CHECKSIGVERIFY << OP_1 << valtype(pub.begin(), pub.end()) << OP_1 << OP_CHECKMULTISIG, "v1 vault");
         rejects(GetScriptForDestination(pub.GetID()), "P2PKH");
     }
@@ -661,48 +661,6 @@ BOOST_AUTO_TEST_CASE(transaction_builder_extension)
     BOOST_CHECK_EQUAL(tx.valueBalance, 0);
     ScriptError err;
     BOOST_CHECK_MESSAGE(Verify(CMutableTransaction(tx), p2pkh, 2 * COIN, branchId, &err), ScriptErrorString(err));
-    RegtestDeactivateSapling();
-}
-
-// ---------------------------------------------------------------------------
-// v1, retained: the roster script and the roster-typed vault are still linked
-// (state.cpp / txbuilder.cpp until Phases 2-3). One case keeps them exercised.
-
-BOOST_AUTO_TEST_CASE(v1_retained_roster_vault)
-{
-    RegtestActivateSapling();
-    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
-    std::vector<CKey> keys;
-    std::vector<CPubKey> pubs;
-    for (int i = 0; i < 3; i++) { keys.push_back(NewKey()); pubs.push_back(keys.back().GetPubKey()); }
-    pubs = SortKeys(pubs);
-    std::vector<CKey> sorted;
-    for (const CPubKey& p : pubs) for (const CKey& k : keys) if (k.GetPubKey() == p) sorted.push_back(k);
-    CScript rosterScript = RosterScript(2, pubs);
-    Roster roster;
-    BOOST_REQUIRE(ParseRosterScript(rosterScript, roster));
-    BOOST_CHECK_EQUAL(roster.k, 2u);
-    BOOST_CHECK_EQUAL(roster.n(), 3u);
-    const CKey ownerKey = NewKey();
-    const uint32_t lockHeight = 120000;
-    CScript vault = VaultScript(lockHeight, ownerKey.GetPubKey(), roster);
-    BOOST_CHECK_EQUAL(vault.size(), VaultScriptSize(3, 3));
-    uint32_t lock;
-    CPubKey owner;
-    Roster r2;
-    BOOST_REQUIRE(ParseVaultScript(vault, lock, owner, r2));
-    BOOST_CHECK_EQUAL(lock, lockHeight);
-    const CAmount vaultValue = 5 * COIN;
-    CMutableTransaction mtx = SpendingTx(vaultValue, lockHeight);
-    valtype ownerSig = Sign(ownerKey, vault, mtx, 0, vaultValue, branchId);
-    std::vector<valtype> qsigs = { Sign(sorted[0], vault, mtx, 0, vaultValue, branchId), Sign(sorted[2], vault, mtx, 0, vaultValue, branchId) };
-    mtx.vin[0].scriptSig = BuildVaultScriptSig(qsigs, ownerSig, vault);
-    std::vector<valtype> parsedSigs;
-    valtype parsedOwner;
-    CScript parsedVault;
-    BOOST_CHECK(ParseVaultScriptSig(mtx.vin[0].scriptSig, parsedSigs, parsedOwner, parsedVault));
-    ScriptError err;
-    BOOST_CHECK_MESSAGE(Verify(mtx, P2SHScript(vault), vaultValue, branchId, &err), ScriptErrorString(err));
     RegtestDeactivateSapling();
 }
 

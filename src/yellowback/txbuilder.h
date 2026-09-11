@@ -211,14 +211,10 @@ BuiltTx BuildSweep(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
 /** Sapling shape: run TransactionBuilder::Build() (proofs, binding signature). No lock may be held. */
 void FinishSapling(BuiltTx& out);
 
-/** The branch id a transaction confirming at `nextHeight` is signed under (§3.4): CurrentEpochBranchId(nextHeight). */
-uint32_t SignerBranchId(int nextHeight);
-
-/** True iff every input of `tx` passes VerifyScript under STANDARD_SCRIPT_VERIFY_FLAGS against `view` at the next height's branch id. Requires cs_main. */
-bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, std::string& error);
-
-/** The FEE-W selection knobs in force on this node: the §3.1 defaults of `params` overridden by -yellowbackpayee* and -yellowbackpreferredpayee (L6). */
-PayeePolicy NodePayeePolicy(const Params& params);
+/**
+ * SignerBranchId() and VerifyAllInputs() stay in policy.h (libbitcoin_server): the node-context
+ * yed_validaterawtransaction uses them and cannot link the wallet library (mapping §13.5).
+ */
 
 /** The FEE-W selector of a vault spend: the 36-byte serialised vault outpoint (§3.7). */
 std::vector<unsigned char> OutPointSelector(const COutPoint& out);

@@ -3,335 +3,77 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-"""
-Yellowback index: prices, anchor custody, rotation, reorg, restart, rebuild
-(plan §6 Phase 2, §7).
+"""Live v2 index smoke test: quote tags, snapshots, activation and restart."""
 
-Four regtest nodes, all with every upgrade active from height 1. They start
-WITHOUT -yellowback; the test creates a 2-of-3 anchor from the wallets of nodes
-0-2 (node 3 holds no roster key), mines it, then restarts every node with
--yellowback and the three regtest genesis arguments (C2).
-"""
-
-from decimal import Decimal
-
-from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import (
-    assert_equal,
-    assert_greater_than,
-    assert_start_raises_init_error,
-    connect_nodes_bi,
-    start_node,
-    start_nodes,
-    stop_node,
-    stop_nodes,
-    sync_blocks,
-    sync_mempools,
-    wait_bitcoinds,
-)
+from test_framework.util import assert_equal
 from test_framework.yellowback_util import (
-    PRICE_MAX_AGE,
-    YELLOWBACK_FEE,
+    ACTIVATION_BLOCKS,
+    P_FAST_WINDOW,
+    P_MID_WINDOW,
+    P_SLOW_WINDOW,
+    POOLS,
+    YellowbackTestFramework,
+    assert_best_hash,
     assert_same_statehash,
-    assert_yed_synced,
-    build_price_tx,
-    fund_genesis_anchor,
-    genesis_args,
-    make_regtest_roster,
-    publish_price,
-    yellowback_node_args,
+    set_quote,
+    wait_yed_healthy,
 )
 
 
-class YellowbackIndexTest(BitcoinTestFramework):
-
-    def __init__(self):
-        super().__init__()
-        self.num_nodes = 4
-        self.setup_clean_chain = True
-        self.genesis = None
-
-    def node_args(self, i):
-        return yellowback_node_args(genesis=self.genesis, yellowback=(self.genesis is not None))
-
-    def setup_nodes(self):
-        return start_nodes(self.num_nodes, self.options.tmpdir,
-                           extra_args=[self.node_args(i) for i in range(self.num_nodes)])
-
-    def restart(self, i, extra=None):
-        stop_node(self.nodes[i], i)  # stop_node waits for that process; wait_bitcoinds() would wait for all
-        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i) + (extra or []))
-
-    def sync_all(self):
-        # Across the reorg join only blocks can be synced: the undone price transaction is
-        # resurrected into the mempools of nodes 0/1 only, and mempools never resync on reconnect.
-        if getattr(self, 'blocks_only', False):
-            if self.is_network_split:
-                sync_blocks(self.nodes[:2])
-                sync_blocks(self.nodes[2:])
-            else:
-                sync_blocks(self.nodes)
-        else:
-            super().sync_all()
-
-    def join_network(self):
-        # The framework's join_network syncs mempools between nodes 1 and 2 before the reorg has
-        # settled; here only blocks can agree (see sync_all), so rejoin and sync blocks only.
-        assert self.is_network_split
-        stop_nodes(self.nodes)
-        wait_bitcoinds()
-        self.nodes = self.setup_nodes()
-        self.reconnect_all()
-        self.is_network_split = False
-        sync_blocks(self.nodes)
-
-    def reconnect_all(self):
-        connect_nodes_bi(self.nodes, 0, 1)
-        connect_nodes_bi(self.nodes, 1, 2)
-        connect_nodes_bi(self.nodes, 2, 3)
-
-    def find_utxo(self, node, amount):
-        for u in node.listunspent(1):
-            if u['amount'] == amount:
-                return '%s:%d' % (u['txid'], u['vout'])
-        raise AssertionError('no utxo of %s' % amount)
+class YellowbackIndexTest(YellowbackTestFramework):
+    """# Rule: TAG-1 TAG-2 TAG-3 PRICE-1 PRICE-2 ACT-1 ACT-2 ACT-3 SNAP UNDO"""
 
     def run_test(self):
         nodes = self.nodes
-        print("Mining a mature coinbase on node 0")
-        nodes[0].generate(101)
-        self.sync_all()
-        assert_greater_than(nodes[0].getbalance(), Decimal('1'))
 
-        print("Building the 2-of-3 roster on nodes 0-2 and funding the genesis anchor")
-        roster = make_regtest_roster(nodes[0:3], 2)
-        self.genesis = fund_genesis_anchor(nodes[0], roster, Decimal('1.0'))
-        self.sync_all()
-        start_height = self.genesis['height']
-        # A Yellowback option without -yellowback is refused.
-        stop_node(nodes[3], 3)
-        assert_start_raises_init_error(3, self.options.tmpdir,
-                                       yellowback_node_args(yellowback=False) + genesis_args(self.genesis),
-                                       "Yellowback options require -yellowback")
-        # -yellowback without the regtest genesis arguments is refused.
-        assert_start_raises_init_error(3, self.options.tmpdir,
-                                       yellowback_node_args(yellowback=False) + ['-experimentalfeatures', '-yellowback'],
-                                       "requires -yellowbackstartheight")
-        # -yellowback with -prune is refused (D7).
-        assert_start_raises_init_error(3, self.options.tmpdir,
-                                       yellowback_node_args(genesis=self.genesis) + ['-prune=550'],
-                                       "-yellowback is incompatible with -prune")
-        # -yellowbackfee below DEFAULT_FEE is refused (C16).
-        assert_start_raises_init_error(3, self.options.tmpdir,
-                                       yellowback_node_args(genesis=self.genesis) + ['-yellowbackfee=999'],
-                                       "-yellowbackfee must be at least")
-        nodes[3] = start_node(3, self.options.tmpdir, self.node_args(3))
-
-        print("Restarting every node with -yellowback and the genesis arguments")
-        for i in range(3):
-            self.restart(i)
-        self.reconnect_all()
-        self.sync_all()
-        assert_yed_synced(nodes)
-        for n in nodes:
-            info = n.yed_getinfo()
-            assert_equal(info['enabled'], True)
-            assert_equal(info['rpcversion'], 1)
+        print('initial synchronous index state')
+        for node in self.enforcing_nodes():
+            info = wait_yed_healthy(node)
+            assert_equal(info['rpcversion'], 2)
             assert_equal(info['network'], 'regtest')
-            assert_equal(info['startHeight'], start_height)
-            assert_equal(info['height'], n.getblockcount())
-            assert_equal(info['rosterIndex'], 0)
-            assert_equal(info['anchor']['valid'], True)
-            assert_equal(info['anchor']['txid'], self.genesis['txid'])
-            assert_equal(info['anchor']['address'], roster['address'])
-            assert_equal(info['anchor']['valueZat'], 100000000)
-            assert_equal(n.yed_getprice()['priceMicroUsd'], None)
-            stats = n.yed_getstats()
-            assert_equal(stats['supplyCents'], 0)
-            assert_equal(stats['healthPct'], 30000)
-        assert_same_statehash(nodes)
+            assert_equal(info['height'], node.getblockcount())
+            assert_equal(info['startHeight'], 1)
+        assert_best_hash(nodes)
+        assert_same_statehash(self.enforcing_nodes())
 
-        print("Publishing a price (2 of 3 signatures merged in one signrawtransaction call)")
-        txid1 = publish_price(nodes[0], [nodes[0], nodes[1]], 50000)
-        sync_mempools(nodes)
-        assert_equal(nodes[2].yed_gettxinfo(txid1)['dryRun'], True)
-        assert_equal(nodes[2].yed_gettxinfo(txid1)['verdict'], 'price-recorded')
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        h1 = nodes[0].getblockcount()
-        for n in nodes:
-            p = n.yed_getprice()
-            assert_equal(p['priceMicroUsd'], 50000)
-            assert_equal(p['sourceHeight'], h1)
-            assert_equal(p['age'], 0)
-            assert_equal(n.yed_getinfo()['anchor']['txid'], txid1)
-            assert_equal(n.yed_getinfo()['anchor']['valueZat'], 100000000 - YELLOWBACK_FEE)
-            log = n.yed_gettxinfo(txid1)
-            assert_equal(log['verdict'], 'price-recorded')
-            assert_equal(log['priceRecorded'], True)
-            assert_equal(log['anchorSpend'], True)
-            assert_equal(log['dryRun'], False)
-        assert_same_statehash(nodes)
+        print('quote tags from the three pool nodes')
+        for pool in POOLS:
+            result = set_quote(nodes[pool], '2.00')
+            assert_equal(result['priceMicroUsd'], 2_000_000)
+            assert_equal(result['nextTag']['kind'], 'quote')
+            assert_equal(result['nextTag']['signal'], True)
 
-        print("A node without the roster script cannot complete the signature (checklist item 14)")
-        built = build_price_tx(nodes[0], 50500)
-        partial = nodes[3].signrawtransaction(built['hex'])   # node 3 holds no roster key and never ran addmultisigaddress
-        assert_equal(partial['complete'], False)
-        assert_equal(nodes[0].signrawtransaction(built['hex'])['complete'], False)  # one of two
-        both = nodes[1].signrawtransaction(nodes[0].signrawtransaction(built['hex'])['hex'])
-        assert_equal(both['complete'], True)
-        # Not broadcast: the round continues below with a fresh transaction.
+        self.mine_round_robin(POOLS, P_SLOW_WINDOW)
+        tip = nodes[0].getblockcount()
+        tag = nodes[2].yed_gettag(str(tip))
+        assert_equal(tag['found'], True)
+        assert_equal(tag['kind'], 'quote')
+        assert_equal(tag['priceMicroUsd'], 2_000_000)
+        price = nodes[0].yed_getprice()
+        assert_equal(price['fill']['fast']['quoteTags'], P_FAST_WINDOW)
+        assert_equal(price['fill']['mid']['quoteTags'], P_MID_WINDOW)
+        assert_equal(price['fill']['slow']['quoteTags'], P_SLOW_WINDOW)
+        assert_equal(price['pFast'], 2_000_000)
+        assert_equal(price['pMid'], 2_000_000)
+        assert_equal(price['pSlow'], 2_000_000)
+        assert_same_statehash(self.enforcing_nodes())
 
-        print("Refill: a confirmed UTXO of the exact amount is absorbed whole into the anchor (C6)")
-        nodes[0].sendtoaddress(nodes[0].getnewaddress(), Decimal('0.5'))
-        nodes[0].generate(1)
-        self.sync_all()
-        refill = self.find_utxo(nodes[0], Decimal('0.5'))
-        built = build_price_tx(nodes[0], 51000, refill=refill)
-        decoded = nodes[0].decoderawtransaction(built['hex'])
-        assert_equal(len(decoded['vin']), 2)
-        assert_equal(len(decoded['vout']), 2)
-        assert_equal(built['newAnchorValueZat'], 100000000 - YELLOWBACK_FEE + 50000000 - YELLOWBACK_FEE)
-        publish_price(nodes[0], [nodes[0], nodes[1]], 51000, refill=refill)  # node 0 also signs its refill
-        sync_mempools(nodes)
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        assert_equal(nodes[3].yed_getprice()['priceMicroUsd'], 51000)
-        assert_equal(nodes[3].yed_getinfo()['anchor']['valueZat'], 100000000 - YELLOWBACK_FEE + 50000000 - YELLOWBACK_FEE)
+        print('activation after the full signalling window and delay')
+        self.mine_round_robin(POOLS, ACTIVATION_BLOCKS - P_SLOW_WINDOW)
+        for node in self.enforcing_nodes():
+            activation = node.yed_getactivation()
+            assert_equal(activation['status'], 'active')
+            assert_equal(activation['signalCount'], 64)
+            assert_equal(node.yed_getstats()['mintingAllowed'], True)
+        self.checkpoint('after activation')
 
-        print("Chaining: a price spending an anchor that is still in the mempool, no prevtxs (C11)")
-        txid3 = publish_price(nodes[1], [nodes[1], nodes[2]], 52000)
-        sync_mempools(nodes)
-        txid4 = publish_price(nodes[1], [nodes[1], nodes[2]], 53000)
-        sync_mempools(nodes)
-        nodes[1].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        h4 = nodes[1].getblockcount()
-        for n in nodes:
-            assert_equal(n.yed_getprice()['priceMicroUsd'], 53000)  # last in block order wins (B7)
-            assert_equal(n.yed_getinfo()['anchor']['txid'], txid4)
-            assert_equal(n.yed_gettxinfo(txid3)['verdict'], 'price-recorded')
-        assert_same_statehash(nodes)
-
-        print("Aging: the price is in effect for %d blocks and not for %d" % (PRICE_MAX_AGE, PRICE_MAX_AGE + 1))
-        nodes[0].generate(PRICE_MAX_AGE)
-        self.sync_all()
-        assert_equal(nodes[0].yed_getprice()['priceMicroUsd'], 53000)
-        assert_equal(nodes[0].yed_getprice()['age'], PRICE_MAX_AGE)
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_equal(nodes[0].yed_getprice()['priceMicroUsd'], None)
-        assert_equal(nodes[0].yed_getprice(h4)['priceMicroUsd'], 53000)
-        hist = nodes[0].yed_gethistory(h4, h4 + PRICE_MAX_AGE + 1)
-        assert_equal(len(hist), PRICE_MAX_AGE + 2)
-        assert_equal(hist[0]['priceMicroUsd'], 53000)
-        assert_equal(hist[-2]['priceMicroUsd'], 53000)
-        assert_equal(hist[-1]['priceMicroUsd'], None)
-        assert_equal(nodes[0].yed_getstats()['priceMicroUsd'], None)
-
-        print("Rotation: anchor spend to a new 2-of-3 script with no OP_RETURN, then a PRICE reveals it (C9)")
-        roster2 = make_regtest_roster(nodes[0:3], 2)
-        assert roster2['script'] != roster['script']
-        rot = publish_price(nodes[0], [nodes[0], nodes[2]], 0, rotate_script=roster2['script'])
-        sync_mempools(nodes)
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        for n in nodes:
-            info = n.yed_getinfo()
-            assert_equal(info['anchor']['txid'], rot)
-            assert_equal(info['anchor']['address'], roster2['address'])
-            assert_equal(info['rosterIndex'], 0)  # not revealed until the new anchor is spent
-            assert_equal(n.yed_gettxinfo(rot)['verdict'], 'price-rotation')
-            assert_equal(n.yed_getprice()['priceMicroUsd'], None)
-        # Build the reveal transaction by hand: the same shape, signed with the new roster.
-        anchor = nodes[0].yed_getinfo()['anchor']
-        raw = nodes[0].createrawtransaction([{'txid': anchor['txid'], 'vout': anchor['vout']}],
-                                            {roster2['address']: Decimal(anchor['valueZat'] - YELLOWBACK_FEE) / Decimal(100000000)})
-        # createrawtransaction cannot add the OP_RETURN (B1); this reveal is a second rotation to the same script,
-        # which records no price but reveals the roster (PRICE-2). Then the RPC can build prices again.
-        signed = nodes[0].signrawtransaction(raw)
-        signed = nodes[2].signrawtransaction(signed['hex'])
-        assert_equal(signed['complete'], True)
-        reveal = nodes[0].sendrawtransaction(signed['hex'])
-        sync_mempools(nodes)
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        for n in nodes:
-            assert_equal(n.yed_getinfo()['rosterIndex'], 1)
-            assert_equal(n.yed_getinfo()['anchor']['address'], roster2['address'])
-            assert_equal(n.yed_getinfo()['anchor']['txid'], reveal)
-        publish_price(nodes[0], [nodes[1], nodes[2]], 54000)
-        sync_mempools(nodes)
-        nodes[0].generate(1)
-        self.sync_all()
-        assert_yed_synced(nodes)
-        for n in nodes:
-            assert_equal(n.yed_getprice()['priceMicroUsd'], 54000)
-            assert_equal(n.yed_getinfo()['rosterIndex'], 1)
-        assert_same_statehash(nodes)
-
-        print("Reorg across a price change: the losing branch is undone and the winning one applied")
-        self.split_network()  # nodes 0,1 | 2,3
-        nodes = self.nodes
-        a = publish_price(nodes[0], [nodes[0], nodes[1]], 55000)
-        nodes[0].generate(1)
-        sync_blocks(nodes[:2])
-        assert_yed_synced(nodes[:2])
-        assert_equal(nodes[0].yed_getprice()['priceMicroUsd'], 55000)
-        # The other side has only node 2's key, so it publishes nothing and mines a longer empty branch.
-        nodes[2].generate(2)
-        sync_blocks(nodes[2:])
-        assert_equal(nodes[2].yed_getprice()['priceMicroUsd'], 54000)
-        self.blocks_only = True
-        self.join_network()
-        nodes = self.nodes
-        assert_yed_synced(nodes)
-        for n in nodes:
-            assert_equal(n.getblockcount(), nodes[2].getblockcount())
-            assert_equal(n.yed_getprice()['priceMicroUsd'], 54000)  # the 55000 block was undone on nodes 0,1
-        assert_same_statehash(nodes)
-        # The undone price transaction returns to the mempool of nodes 0/1 (mempools do not resync across a
-        # reconnect, so no sync_mempools here); node 0 mines it and it confirms on the new branch.
-        nodes[0].generate(1)
-        self.sync_all()
-        self.blocks_only = False
-        assert_yed_synced(nodes)
-        for n in nodes:
-            assert_equal(n.yed_getprice()['priceMicroUsd'], 55000)
-            assert_equal(n.yed_gettxinfo(a)['verdict'], 'price-recorded')
-        expected = assert_same_statehash(nodes)
-
-        print("Restart: a plain restart, -reindex-yellowback and -reindex all rebuild to the same state hash")
-        self.restart(1)
-        connect_nodes_bi(nodes, 0, 1)
-        assert_yed_synced([nodes[1]])
-        assert_equal(nodes[1].yed_getstatehash()['statehash'], expected)
-        self.restart(2, ['-reindex-yellowback'])
-        connect_nodes_bi(nodes, 1, 2)
-        assert_yed_synced([nodes[2]])
-        assert_equal(nodes[2].yed_getstatehash()['statehash'], expected)
-        self.restart(3, ['-reindex'])
-        connect_nodes_bi(nodes, 2, 3)
-        sync_blocks(nodes)
-        assert_yed_synced([nodes[3]])
-        assert_equal(nodes[3].yed_getstatehash()['statehash'], expected)
-        assert_same_statehash(nodes)
-
-        print("Reorg while offline: node 3 is stopped, the others mine, node 3 rejoins and catches up")
-        stop_node(nodes[3], 3)
-        nodes[0].generate(3)
-        sync_blocks(nodes[:3])
-        nodes[3] = start_node(3, self.options.tmpdir, self.node_args(3))
-        connect_nodes_bi(nodes, 2, 3)
-        sync_blocks(nodes)
-        assert_yed_synced(nodes)
-        assert_same_statehash(nodes)
-        print("Done")
+        print('restart preserves the synchronous index')
+        before = nodes[2].yed_getstatehash()['statehash']
+        self.restart(2)
+        self.sync_all(blocks_only=True)
+        assert_equal(wait_yed_healthy(nodes[2])['height'], nodes[2].getblockcount())
+        assert_equal(nodes[2].yed_getstatehash()['statehash'], before)
+        self.checkpoint('after restart')
 
 
 if __name__ == '__main__':

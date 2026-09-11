@@ -19,6 +19,7 @@
 #include "wallet/wallet.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
+#include "yellowback/policy.h"
 #include "yellowback/state.h"
 #include "zcash/Address.hpp"
 #include "zcash/address/zip32.h"
@@ -130,48 +131,6 @@ void SignVaultSpend(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId, 
     if (out.changeVout >= 0) out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), out.changeVout));
 }
 
-uint32_t SignerBranchId(int nextHeight)
-{
-    return CurrentEpochBranchId(nextHeight, ::Params().GetConsensus());
-}
-
-bool VerifyAllInputs(const CTransaction& tx, const CCoinsViewCache& view, std::string& error)
-{
-    AssertLockHeld(cs_main);
-    const uint32_t branchId = SignerBranchId(chainActive.Height() + 1);
-    PrecomputedTransactionData txdata(tx);
-    for (unsigned int i = 0; i < tx.vin.size(); i++) {
-        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
-        if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n)) {
-            error = strprintf("input %u is unknown or spent", i);
-            return false;
-        }
-        const CTxOut& prev = coins->vout[tx.vin[i].prevout.n];
-        ScriptError serror = SCRIPT_ERR_OK;
-        if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, STANDARD_SCRIPT_VERIFY_FLAGS,
-                          TransactionSignatureChecker(&tx, i, prev.nValue, txdata), branchId, &serror)) {
-            error = strprintf("input %u fails script verification: %s", i, ScriptErrorString(serror));
-            return false;
-        }
-    }
-    return true;
-}
-
-PayeePolicy NodePayeePolicy(const Params& params)
-{
-    PayeePolicy pp = PayeePolicy::Defaults(params);
-    pp.penaltyBlocks = (int)GetArg("-yellowbackpayeepenaltyblocks", pp.penaltyBlocks);
-    pp.accuracyWindow = (int)GetArg("-yellowbackpayeeaccuracywindow", pp.accuracyWindow);
-    pp.tiltBps = (int)GetArg("-yellowbackpayeetiltbps", pp.tiltBps);
-    const std::string preferred = GetArg("-yellowbackpreferredpayee", "");
-    if (!preferred.empty()) {
-        KeyIO keyIO(::Params());
-        CTxDestination dest = keyIO.DecodeDestination(preferred);
-        if (const CKeyID* id = std::get_if<CKeyID>(&dest)) pp.preferred = *id;
-    }
-    return pp;
-}
-
 std::vector<unsigned char> OutPointSelector(const COutPoint& out)
 {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
@@ -230,30 +189,31 @@ struct Context
     State st;
     int chainHeight;
     int indexHeight;
-    int refHeight;
+    int refHeight;                          //!< R for a MINT / TRANSFER: indexTip - REF_LAG (§3.5)
+    int spendRefHeight;                     //!< R for a vault spend: the index tip (the snapshot yed_listclaimable reads; RED-1's window holds at H = tip + 1)
     uint32_t branchId;
 
     explicit Context(YellowbackWallet& yw_)
         : yw(yw_), wallet(*yw_.Wallet()), index(*yw_.Index()), params(yw_.Index()->GetParams()), st(yw_.Index()->View()),
-          chainHeight(0), indexHeight(-1), refHeight(-1), branchId(0)
+          chainHeight(0), indexHeight(-1), refHeight(-1), spendRefHeight(-1), branchId(0)
     {
         AssertLockHeld(cs_main);
         AssertLockHeld(wallet.cs_wallet);
         AssertLockHeld(index.cs_yellowback);
         if (!index.IsHealthy()) throw std::runtime_error("yellowback-unhealthy: " + index.UnhealthyReason() + "; restart with -reindex-yellowback");
-        if (!index.IsSynced()) throw std::runtime_error("index-not-synced: the index is not at the chain tip; retry after the next block");
         chainHeight = chainActive.Height();
         std::optional<TipRecord> tip = st.GetTip();
         if (!tip.has_value()) throw std::runtime_error("index-below-start: the index has not reached the start height");
         indexHeight = tip->height;
         refHeight = indexHeight - g_yellowbackMintLag;
+        spendRefHeight = indexHeight;
         if (refHeight < params.startHeight) throw std::runtime_error(strprintf("index-below-start: the index must reach height %d first", params.startHeight + g_yellowbackMintLag));
-        branchId = SignerBranchId(chainHeight + 1);
+        branchId = SignerBranchId();
         if (wallet.IsLocked()) throw std::runtime_error("wallet-locked: walletpassphrase first");
     }
 
-    /** nExpiryHeight = refHeight + REF_WINDOW (V11, a wallet convenience). */
-    uint32_t Expiry() const { return (uint32_t)(refHeight + REF_WINDOW); }
+    /** nExpiryHeight = R + REF_WINDOW (V11; the MP-1 bound for a vault spend, N5). */
+    uint32_t Expiry(int r) const { return (uint32_t)(r + REF_WINDOW); }
 
     void CheckExpiry(uint32_t expiry) const
     {
@@ -288,10 +248,10 @@ struct Context
         return key;
     }
 
-    /** The payee of §3.7 FEE-W (or the configured preference) for `selector` at refHeight; nullopt under FEE-0. */
-    std::optional<CKeyID> Payee(const std::vector<unsigned char>& selector) const
+    /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0. */
+    std::optional<CKeyID> Payee(int r, const std::vector<unsigned char>& selector) const
     {
-        return DefaultPayee(st.View(), params, refHeight, selector, NodePayeePolicy(params));
+        return DefaultPayee(st.View(), params, r, selector, index.GetPayeePolicy());
     }
 
     /**
@@ -438,12 +398,12 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     shape.claimHeight = (uint32_t)vault.claimHeight;
     shape.ownerPath = ownerPath;
     shape.withPayload = withPayload;
-    shape.refHeight = ctx.refHeight;
+    shape.refHeight = ctx.spendRefHeight;
     shape.networkFee = g_yellowbackFee;
 
     BuiltTx out;
     out.kind = kind;
-    out.refHeight = ctx.refHeight;
+    out.refHeight = ctx.spendRefHeight;
     out.termClass = vault.termClass;
     out.lockHeight = shape.lockHeight;
     out.claimHeight = shape.claimHeight;
@@ -463,7 +423,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
             out.freshKey = changeKey;
             shape.changeScript = GetScriptForDestination(changeKey.GetID());
         }
-        shape.payee = ctx.Payee(OutPointSelector(vaultOut));
+        shape.payee = ctx.Payee(ctx.spendRefHeight, OutPointSelector(vaultOut));
         shape.feeZat = shape.payee.has_value() ? FeeZat(vault.collateralZat, ctx.params.feeMin, ctx.params.feeBps) : 0;
         for (const YedCoin& c : sel) {
             out.yedInputs.insert(c.outpoint);
@@ -474,7 +434,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         out.feeZat = shape.feeZat;
     }
 
-    const uint32_t expiry = ctx.Expiry();
+    const uint32_t expiry = ctx.Expiry(ctx.spendRefHeight);
     if (dest.kind == AddressChoice::SAPLING) {
         // Sapling shape (§4.6): the collateral is one Sapling note; vault and YED inputs go in
         // unsigned and are signed by SignVaultSpend() after FinishSapling().
@@ -564,7 +524,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     shape.refHeight = ctx.refHeight;
     shape.owner = owner;
     shape.collateralZat = collateral;
-    shape.payee = ctx.Payee(std::vector<unsigned char>(owner.begin(), owner.end()));
+    shape.payee = ctx.Payee(ctx.refHeight, std::vector<unsigned char>(owner.begin(), owner.end()));
     shape.feeZat = shape.payee.has_value() ? FeeZat(collateral, p.feeMin, p.feeBps) : 0;
     int feeVout = -1;
     std::vector<CTxOut> vout = MintOutputs(shape, feeVout);
@@ -583,7 +543,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     out.feeVout = feeVout;
     out.ownerPubKey = owner;
     out.warning = ctx.KeypoolWarning();
-    const uint32_t expiry = ctx.Expiry();
+    const uint32_t expiry = ctx.Expiry(ctx.refHeight);
 
     if (source.kind == AddressChoice::SAPLING) {
         // Sapling shape (§4.6): notes of `from` fund the outputs in the same transaction; change is
@@ -638,7 +598,7 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
     int64_t change = 0;
     std::vector<YedCoin> sel = SelectYed(ctx, needed, change);
 
-    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry());
+    CMutableTransaction mtx = ctx.NewTx(ctx.Expiry(ctx.refHeight));
     BuiltTx out;
     out.kind = BuiltKind::TRANSFER;
     out.refHeight = ctx.refHeight;
@@ -721,11 +681,11 @@ BuiltTx BuildClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::st
         throw std::runtime_error(strprintf("claim-not-yet: the claim path opens at height %d (tip %d)", vault.claimHeight, ctx.indexHeight));
     }
     // RED-4 at Snapshots[R]: the vault must be underwater there (an undefined pClaim is "not underwater", M1).
-    std::optional<Snapshot> S = SnapshotAt(ctx.st, p, ctx.refHeight);
+    std::optional<Snapshot> S = SnapshotAt(ctx.st, p, ctx.spendRefHeight);
     std::optional<MicroUsd> pClaim = S.has_value() ? S->PClaim() : std::nullopt;
     if (!IsUnderwater(vault.collateralZat, pClaim, vault.mintedCents, p.claimThresholdBps)) {
         throw std::runtime_error(strprintf("claim-not-underwater: the vault is not underwater at the reference height %d (pClaim %s)",
-                                           ctx.refHeight, pClaim.has_value() ? std::to_string(pClaim.value()) : std::string("undefined")));
+                                           ctx.spendRefHeight, pClaim.has_value() ? std::to_string(pClaim.value()) : std::string("undefined")));
     }
     return BuildVaultSpend(ctx, BuiltKind::CLAIM, vaultOut, vault, to);
 }

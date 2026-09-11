@@ -36,6 +36,7 @@
 #include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
+#include "yellowback/policy.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/txbuilder.h"
@@ -110,25 +111,14 @@ uint256 Commit(YellowbackWallet& yw, const BuiltTx& built, CReserveKey* reservek
 
 /**
  * K7: refuse with `mempool-check-failed:<verdict>` unless the index's MP-1 predicate admits the
- * transaction. The verdict comes from the same evaluation MempoolCheck runs (a one-transaction
- * pseudo-block at tip + 1 over an overlay). cs_main and cs_yellowback held.
+ * transaction — MempoolCheckReason, the very predicate AcceptToMemoryPool applies (the expiry
+ * bound and RED-1..4 over the one-transaction pseudo-block at tip + 1). cs_main held.
  */
 void MempoolGate(YellowbackIndex& index, const CTransaction& tx)
 {
-    if (index.MempoolCheck(tx)) return;
-    std::string verdict = "vault-spend-malformed";
-    std::optional<TipRecord> tip = index.GetTip();
-    if (tip.has_value()) {
-        CMutableTransaction coinbase;
-        coinbase.vin.push_back(CTxIn());
-        CBlock block;
-        block.vtx.push_back(CTransaction(coinbase));
-        block.vtx.push_back(tx);
-        OverlayStateView overlay(index.View());
-        BlockEvaluation ev = EvaluateBlock(overlay, index.GetParams(), block, tip->height + 1, uint256(), 0);
-        if (!ev.reason.empty()) verdict = ev.reason.substr(0, ev.reason.find(':'));
-    }
-    throw JSONRPCError(RPC_VERIFY_REJECTED, "mempool-check-failed:" + verdict + ": an enforcing miner would reject this vault spend (MP-1)");
+    std::optional<std::string> why = index.MempoolCheckReason(tx);
+    if (!why.has_value()) return;
+    throw JSONRPCError(RPC_VERIFY_REJECTED, "mempool-check-failed:" + why.value() + ": an enforcing miner would refuse this vault spend (MP-1)");
 }
 
 CScript ParseYedAddress(const std::string& s, const yellowback::Params& params)
@@ -234,7 +224,7 @@ BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool
         EnsureHealthy(index);
         try {
             built = build();
-            if (!built.NeedsProving()) SignVaultSpend(built, *pwalletMain, SignerBranchId(chainActive.Height() + 1), ownerPath);
+            if (!built.NeedsProving()) SignVaultSpend(built, *pwalletMain, SignerBranchId(), ownerPath);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
@@ -256,7 +246,7 @@ BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     try {
-        SignVaultSpend(built, *pwalletMain, SignerBranchId(chainActive.Height() + 1), ownerPath);
+        SignVaultSpend(built, *pwalletMain, SignerBranchId(), ownerPath);
     } catch (const std::runtime_error& e) {
         ThrowBuildError(e);
     }

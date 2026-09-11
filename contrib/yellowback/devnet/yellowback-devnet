@@ -1,477 +1,182 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 The Ycash developers
-# Distributed under the MIT software license, see the accompanying
-# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+"""Five-node Yellowback v2 regtest for YecWallet.
 
+Node 0 is the funded wallet, node 1 is stock, and nodes 2-4 are signalling
+pools with fixed payout addresses. Quotes use yed_setquote directly: no
+federation, coordinators, anchors, rosters, or endpoint configuration.
+
+Commands: up, check, status, mine N [node], price USD, wallet, cli, down.
 """
-yellowback-devnet: a private Yellowback network on one machine (plan §6.0 item 4, the slot
-reserved for contrib/yellowback/devnet/).
-
-Five regtest ycashd processes (0 and 1 users, 2-4 a 2-of-3 federation), a funded user wallet,
-the genesis anchor, and one coordinator per federation node publishing a mock price and
-answering /cosign. Nothing leaves 127.0.0.1. It stops at "ready to mint": no mints, no price
-moves, so nothing trips the volatility freeze. The GUI attaches with
-    yecwallet --conf <dir>/node0/ycash.conf --no-embedded
-and its Yellowback Settings page takes the three coordinator URLs `up` prints, after which
-minting and the redemption wizard work end to end against this federation.
-
-Commands:
-  up      [--dir D] [--portseed N] [--price USD] [--force]   build and start everything
-  status  [--dir D]                                           what is running, chain, price, freeze
-  mine    N [--dir D] [--pause S]                             mine N blocks on node 0 (prices keep flowing)
-  price   USD [--dir D]                                       change the mock price the federation publishes
-  wallet  [--dir D] [--app PATH] [--print]                    launch (or print) the GUI command
-  cli     [--dir D] [--node I] -- <ycash-cli args>            run ycash-cli against a node
-  down    [--dir D] [--wipe]                                  stop coordinators and nodes
-
-Run it with the workspace's Python (.venv), which has the test framework's dependencies:
-  ../../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up
-"""
-
 import argparse
 import json
 import os
-import signal
+import shutil
 import subprocess
 import sys
 import time
-import urllib.request
 from decimal import Decimal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 WORKSPACE = os.path.dirname(REPO)
-RPC_TESTS = os.path.join(REPO, "qa", "rpc-tests")
-FED = os.path.join(REPO, "contrib", "yellowback", "yellowback_fed.py")
-sys.path.insert(0, RPC_TESTS)
+sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
+from test_framework.util import (PortSeed, bitcoind_processes, connect_nodes_bi,
+                                 get_rpc_proxy, initialize_chain_clean, rpc_port,
+                                 rpc_url, start_node, sync_blocks)
+from test_framework.yellowback_util import (ACTIVATION_BLOCKS, POOL_WIFS, address_of,
+                                            pool_args, set_quote, wait_yed_healthy,
+                                            yellowback_node_args)
 
-try:
-    from test_framework.util import (  # noqa: E402
-        PORT_RANGE, PortSeed, bitcoind_processes, connect_nodes_bi, get_rpc_proxy,
-        initialize_chain_clean, rpc_port, rpc_url, start_node, sync_blocks,
-    )
-    from test_framework.yellowback_util import (  # noqa: E402
-        fund_genesis_anchor, make_regtest_roster, wait_yed_synced, yellowback_node_args,
-    )
-except ImportError as e:
-    sys.exit("cannot import the functional-test framework (%s).\n"
-             "Run this with the workspace venv: %s/.venv/bin/python %s ..." % (e, WORKSPACE, sys.argv[0]))
-
-NUM_NODES = 5
-FED_NODES = (2, 3, 4)
+NODES, USER, POOLS = 5, 0, (2, 3, 4)
 DEFAULT_DIR = os.path.expanduser("~/yb-devnet")
-DEFAULT_PORTSEED = 7
-DEFAULT_PRICE = "50"
-MICRO = 1_000_000
 
-
-# ---------------------------------------------------------------------------
-# State
-
-def state_path(d):
-    return os.path.join(d, "devnet.json")
-
-
-def load_state(d):
+def path(directory): return os.path.join(directory, "devnet.json")
+def node_dir(directory, node): return os.path.join(directory, "node%d" % node)
+def rpc(state, node): return get_rpc_proxy(rpc_url(node), node, timeout=30)
+def alive(state, node):
+    try: rpc(state, node).getblockcount(); return True
+    except Exception: return False
+def load(directory):
     try:
-        with open(state_path(d)) as f:
-            st = json.load(f)
-    except OSError:
-        sys.exit("no devnet at %s (run `up` first, or pass --dir)" % d)
-    PortSeed.n = st["portseed"]   # every port lookup in the framework derives from this
-    return st
+        with open(path(directory)) as file: state = json.load(file)
+    except OSError: sys.exit("no devnet at %s (run `up` first)" % directory)
+    PortSeed.n = state["portseed"]
+    return state
+def save(directory, state):
+    with open(path(directory), "w") as file: json.dump(state, file, indent=2)
 
-
-def save_state(d, st):
-    with open(state_path(d), "w") as f:
-        json.dump(st, f, indent=2)
-
-
-def coord_port(i):
-    return rpc_port(i) + PORT_RANGE
-
-
-def node_dir(d, i):
-    return os.path.join(d, "node%d" % i)
-
-
-def proxy(st, i):
-    return get_rpc_proxy(rpc_url(i), i, timeout=30)
-
-
-def node_alive(st, i):
-    try:
-        proxy(st, i).getblockcount()
-        return True
-    except Exception:
-        return False
-
-
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def coord_status(url):
-    try:
-        with urllib.request.urlopen(url + "/status", timeout=3) as r:
-            return json.loads(r.read().decode())
-    except Exception:
-        return None
-
-
-def quiet_start_node(d, i, args):
-    """start_node, detached: the node's stdout/stderr go to <dir>/nodeI/ycashd.log and it runs in
-    its own session. The framework's start_node lets ycashd inherit our stdout (so
-    `yellowback-devnet up | tail` would never return while the node runs) and our process group
-    (so a Ctrl-C in the terminal, or a killed parent, would take the devnet down with it)."""
+def start_quiet(directory, node, arguments):
     import functools
-    import test_framework.util as fw
-    log = open(os.path.join(node_dir(d, i), "ycashd.log"), "a")
-    sys.stdout.flush()
-    sys.stderr.flush()
-    saved = os.dup(1)
-    real_popen = fw.subprocess.Popen
-    fw.subprocess.Popen = functools.partial(real_popen, start_new_session=True, stdin=subprocess.DEVNULL)
+    import test_framework.util as util
+    log = open(os.path.join(node_dir(directory, node), "ycashd.log"), "a")
+    output, popen = os.dup(1), util.subprocess.Popen
+    util.subprocess.Popen = functools.partial(popen, start_new_session=True, stdin=subprocess.DEVNULL)
     try:
         os.dup2(log.fileno(), 1)
-        return start_node(i, d, args, stderr=log)
+        return start_node(node, directory, arguments, stderr=log)
     finally:
-        fw.subprocess.Popen = real_popen
-        os.dup2(saved, 1)
-        os.close(saved)
-        log.close()
+        util.subprocess.Popen = popen
+        os.dup2(output, 1); os.close(output); log.close()
 
+def wallet_command(directory, app=None):
+    if not app:
+        app = os.path.join(WORKSPACE, "yecwallet-dd", "build", "macos-arm64", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet")
+    return [app, "--conf", os.path.join(node_dir(directory, USER), "ycash.conf"), "--no-embedded"]
 
-def find_wallet_app():
-    candidates = [
-        os.path.join(WORKSPACE, "yecwallet-dd", "build", "macos-arm64", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet"),
-        os.path.join(WORKSPACE, "yecwallet-dd", "build", "macos-universal", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet"),
-        os.path.join(WORKSPACE, "yecwallet-dd", "build", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet"),
-        os.path.join(WORKSPACE, "yecwallet-dd", "build", "bin", "yecwallet"),
-        "/Applications/yecwallet.app/Contents/MacOS/yecwallet",
-    ]
-    for c in candidates:
-        if os.path.isfile(c) and os.access(c, os.X_OK):
-            return c
-    return None
-
-
-def wallet_command(d, app=None):
-    app = app or find_wallet_app() or "yecwallet"
-    return [app, "--conf", os.path.join(node_dir(d, 0), "ycash.conf"), "--no-embedded"]
-
-
-def print_handoff(d, st):
-    print()
-    print("Devnet is up in %s" % d)
-    print()
-    print("Open the wallet against it:")
-    print("  " + " ".join(wallet_command(d)))
-    print()
-    print("Once, in the wallet: Yellowback tab -> Settings -> paste these operator endpoints (one per line):")
-    for u in st["endpoints"]:
-        print("  " + u)
-    print()
-    print("Mine blocks (time only moves when you mine):   %s mine 5" % sys.argv[0])
-    print("Talk to the user node:                         %s/src/ycash-cli -datadir=%s ..." % (REPO, node_dir(d, 0)))
-    print("Stop everything:                               %s down" % sys.argv[0])
-
-
-# ---------------------------------------------------------------------------
-# up
-
-def cmd_up(a):
-    d = os.path.abspath(a.dir)
-    if os.path.exists(state_path(d)):
-        st = load_state(d)
-        if any(node_alive(st, i) for i in range(NUM_NODES)):
-            sys.exit("a devnet is already running in %s; `down` it first (or `down --wipe`)" % d)
-        if not a.force:
-            sys.exit("%s holds a stopped devnet; pass --force to wipe and rebuild, or use --dir" % d)
-        subprocess.run(["rm", "-rf", d], check=True)
-    elif os.path.exists(d) and os.listdir(d) and not a.force:
-        sys.exit("%s exists and is not empty; pass --force to wipe it, or use --dir" % d)
-    elif os.path.exists(d):
-        subprocess.run(["rm", "-rf", d], check=True)
-
-    bitcoind = a.bitcoind or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd")
-    if not os.access(bitcoind, os.X_OK):
-        sys.exit("ycashd not found at %s (build the node, or pass --bitcoind)" % bitcoind)
-    os.environ["BITCOIND"] = bitcoind
-    PortSeed.n = a.portseed
-    price_micro = int(round(Decimal(a.price) * MICRO))
-
-    print("[1/5] %d regtest nodes in %s (portseed %d)" % (NUM_NODES, d, a.portseed))
-    os.makedirs(d)
-    initialize_chain_clean(d, NUM_NODES)
-    nodes = [quiet_start_node(d, i, yellowback_node_args(yellowback=False)) for i in range(NUM_NODES)]
-    for i in range(NUM_NODES - 1):
-        connect_nodes_bi(nodes, i, i + 1)
-
-    print("[2/5] funding: 150 blocks to node 0 (50 mature coinbases), coins to nodes 1-4")
-    nodes[0].generate(150)
+def wait(nodes):
     sync_blocks(nodes)
-    nodes[0].sendtoaddress(nodes[1].getnewaddress(), Decimal("5"))
-    for i in FED_NODES:
-        nodes[0].sendtoaddress(nodes[i].getnewaddress(), Decimal("2"))
-    nodes[0].generate(1)
-    sync_blocks(nodes)
+    for index in (USER,) + POOLS: wait_yed_healthy(nodes[index])
 
-    print("[3/5] 2-of-3 federation on nodes 2-4, genesis anchor, restart with -yellowback")
-    roster = make_regtest_roster([nodes[i] for i in FED_NODES], 2)
-    genesis = fund_genesis_anchor(nodes[0], roster, Decimal("1.0"))
-    sync_blocks(nodes)
-    for i in range(NUM_NODES):
-        nodes[i].stop()
-    for i in range(NUM_NODES):
-        bitcoind_processes[i].wait()
-        del bitcoind_processes[i]
-    nodes = [quiet_start_node(d, i, yellowback_node_args(genesis=genesis)) for i in range(NUM_NODES)]
-    for i in range(NUM_NODES - 1):
-        connect_nodes_bi(nodes, i, i + 1)
-    sync_blocks(nodes)
-    for n in nodes:
-        wait_yed_synced(n)
-    assert nodes[0].yed_getroster()["address"] == roster["address"]
+def check(state, verbose=True):
+    node = rpc(state, USER)
+    activation, stats = node.yed_getactivation(), node.yed_getstats()
+    expected = set(state["pool_addresses"])
+    eligible = {row["payoutAddress"] for row in node.yed_listminers() if row["eligible"]}
+    errors = []
+    if activation["status"] != "active": errors.append("activation is %s" % activation["status"])
+    if not stats["mintingAllowed"]: errors.append("minting is not allowed")
+    if eligible != expected: errors.append("not all pools are eligible")
+    if node.getbalance() <= 0: errors.append("node0 has no mature balance")
+    if verbose: print("activation: %s; minting: %s; eligible pools: %d/%d; node0 balance: %s YEC" % (activation["status"], "yes" if stats["mintingAllowed"] else "no", len(eligible & expected), len(expected), node.getbalance()))
+    if errors: raise RuntimeError("devnet check failed: " + "; ".join(errors))
 
-    print("[4/5] federation coordinators (mock price $%s)" % a.price)
-    st = {
-        "dir": d, "portseed": a.portseed, "bitcoind": bitcoind, "num_nodes": NUM_NODES,
-        "fed_nodes": list(FED_NODES), "genesis": genesis, "roster": roster,
-        "price_usd": a.price, "mock_files": {}, "coords": {}, "endpoints": [],
-        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    for i in FED_NODES:
-        mock = os.path.join(d, "mock-price-%d.txt" % i)
-        with open(mock, "w") as f:
-            f.write(a.price)
-        st["mock_files"][str(i)] = mock
-    for i in FED_NODES:
-        peers = ",".join("http://127.0.0.1:%d" % coord_port(j) for j in FED_NODES if j != i)
-        log = open(os.path.join(d, "coordinator-%d.log" % i), "a")
-        args = [sys.executable, "-u", FED, "serve", "--rpc-url", rpc_url(i), "--id", str(i - 2),
-                "--listen", "127.0.0.1:%d" % coord_port(i), "--peers", peers,
-                "--mock-price", st["mock_files"][str(i)], "--insecure-localhost", "--round-blocks", "8"]
-        p = subprocess.Popen(args, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
-        st["coords"][str(i)] = {"pid": p.pid, "port": coord_port(i), "log": log.name}
-        st["endpoints"].append("http://127.0.0.1:%d" % coord_port(i))
-    save_state(d, st)
-    for i in FED_NODES:
-        deadline = time.time() + 30
-        while coord_status("http://127.0.0.1:%d" % coord_port(i)) is None:
-            if time.time() > deadline:
-                sys.exit("coordinator %d did not come up; see %s" % (i, st["coords"][str(i)]["log"]))
-            time.sleep(0.5)
+def up(args):
+    directory = os.path.abspath(args.dir)
+    if os.path.exists(path(directory)):
+        state = load(directory)
+        if any(alive(state, node) for node in range(NODES)): sys.exit("a devnet is already running in %s; `down` it first" % directory)
+        if not args.force: sys.exit("%s holds a stopped devnet; pass --force to rebuild" % directory)
+    elif os.path.exists(directory) and os.listdir(directory) and not args.force: sys.exit("%s exists and is not empty; pass --force" % directory)
+    if os.path.exists(directory): shutil.rmtree(directory)
+    binary = args.bitcoind or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd")
+    if not os.access(binary, os.X_OK): sys.exit("ycashd not found at %s" % binary)
+    os.environ["BITCOIND"], PortSeed.n = binary, args.portseed
+    addresses = [address_of(wif) for wif in POOL_WIFS]
+    node_args = [yellowback_node_args(), yellowback_node_args(yellowback=False)] + [pool_args(address) for address in addresses]
+    os.makedirs(directory); nodes = []
+    try:
+        print("[1/4] starting five regtest nodes in %s" % directory)
+        initialize_chain_clean(directory, NODES)
+        nodes = [start_quiet(directory, index, node_args[index]) for index in range(NODES)]
+        for left in range(NODES):
+            for right in range(left + 1, NODES): connect_nodes_bi(nodes, left, right)
+        for index, node in enumerate(POOLS): nodes[node].importprivkey(POOL_WIFS[index], "yellowback-payout", False)
+        print("[2/4] funding node0 with 101 untagged blocks")
+        nodes[USER].generate(101); wait(nodes)
+        if nodes[USER].getbalance() <= 0: raise RuntimeError("node0 has no mature balance")
+        print("[3/4] setting $%s quotes on pools 2-4" % args.price)
+        for node in POOLS: set_quote(nodes[node], args.price)
+        print("[4/4] mining 131 signalling blocks round-robin across pools")
+        for block in range(ACTIVATION_BLOCKS + 2):
+            nodes[POOLS[block % len(POOLS)]].generate(1); sync_blocks(nodes)
+        wait(nodes)
+    except Exception:
+        for node in nodes:
+            try: node.stop()
+            except Exception: pass
+        for index in list(bitcoind_processes):
+            try: bitcoind_processes[index].wait(timeout=10)
+            except Exception: pass
+            del bitcoind_processes[index]
+        raise
+    state = {"portseed": args.portseed, "bitcoind": binary, "num_nodes": NODES, "pools": list(POOLS), "pool_addresses": addresses, "price_usd": str(args.price), "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+    save(directory, state); check(state, False)
+    print("ready at height %d: node0 has %s YEC" % (nodes[USER].getblockcount(), nodes[USER].getbalance()))
+    print("wallet: " + " ".join(wallet_command(directory)))
 
-    print("[5/5] first price on chain")
-    deadline = time.time() + 60
-    while True:
-        p = nodes[0].yed_getprice()
-        if p.get("priceMicroUsd") is not None:
-            break
-        if time.time() > deadline:
-            sys.exit("no price landed within 60 s; see the coordinator logs in %s" % d)
-        if nodes[0].getrawmempool():
-            nodes[0].generate(1)
-        time.sleep(1)
-    for _ in range(3):
-        nodes[0].generate(1)
-        time.sleep(0.3)
-    sync_blocks(nodes)
-    for n in nodes:
-        wait_yed_synced(n)
-    assert nodes[0].yed_getprice()["priceMicroUsd"] == price_micro, "unexpected first price"
-    stats = nodes[0].yed_getstats()
-    assert not stats["mintFrozen"], "minting frozen on a fresh devnet: %r" % stats
-    print("      height %d, price $%s, minting open, node 0 holds %s YEC" % (
-        nodes[0].getblockcount(), a.price, nodes[0].getbalance()))
-    print_handoff(d, st)
-    return 0
+def command_check(args):
+    try: check(load(os.path.abspath(args.dir)))
+    except Exception as error: print(error, file=sys.stderr); return 1
+    print("devnet check passed")
+def status(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    for index, role in enumerate(("user", "stock", "pool", "pool", "pool")): print("node%d %-5s rpc %d %s" % (index, role, rpc_port(index), "up" if alive(state, index) else "DOWN"))
+    node = rpc(state, USER); activation, stats = node.yed_getactivation(), node.yed_getstats()
+    print("height %d; activation %s; minting %s" % (node.getblockcount(), activation["status"], "allowed" if stats["mintingAllowed"] else "halted"))
+    for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s" % (row["payoutAddress"], row["registered"], row["eligible"]))
+    print("wallet: " + " ".join(wallet_command(directory)))
+def mine(args):
+    state = load(os.path.abspath(args.dir))
+    if not 0 <= args.node < state["num_nodes"]: sys.exit("node must be between 0 and 4")
+    node = rpc(state, args.node); start = node.getblockcount(); node.generate(args.blocks)
+    sync_blocks([rpc(state, index) for index in range(NODES) if alive(state, index)])
+    print("mined %d blocks on node%d: height %d -> %d" % (args.blocks, args.node, start, node.getblockcount()))
+def price(args):
+    state, value = load(os.path.abspath(args.dir)), Decimal(args.usd)
+    if value <= 0: sys.exit("price must be positive")
+    for node in state["pools"]: set_quote(rpc(state, node), value)
+    state["price_usd"] = str(value); save(os.path.abspath(args.dir), state)
+    print("set pool quotes to $%s; mine a pool block to publish each quote" % value)
+def wallet(args):
+    directory, app = os.path.abspath(args.dir), args.app
+    command = wallet_command(directory, app)
+    if args.print: print(" ".join(command)); return
+    if not os.access(command[0], os.X_OK): sys.exit("wallet not found; pass --app or use --print")
+    subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True); print("launched " + " ".join(command))
+def cli(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    return subprocess.call([os.path.join(os.path.dirname(state["bitcoind"]), "ycash-cli"), "-datadir=" + node_dir(directory, args.node)] + args.args)
+def down(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    for node in range(NODES):
+        if alive(state, node):
+            try: rpc(state, node).stop(); print("stopping node%d" % node)
+            except Exception as error: print("node%d: %s" % (node, error))
+    if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
 
+def main():
+    parser = argparse.ArgumentParser(description=__doc__); sub = parser.add_subparsers(dest="command", required=True)
+    def add(name, fn):
+        command = sub.add_parser(name); command.add_argument("--dir", default=DEFAULT_DIR); command.set_defaults(fn=fn); return command
+    command = add("up", up); command.add_argument("--portseed", type=int, default=7); command.add_argument("--price", default="50"); command.add_argument("--bitcoind"); command.add_argument("--force", action="store_true")
+    add("check", command_check); add("status", status)
+    command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
+    command = add("price", price); command.add_argument("usd")
+    command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--print", action="store_true")
+    command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("args", nargs=argparse.REMAINDER)
+    command = add("down", down); command.add_argument("--wipe", action="store_true")
+    args = parser.parse_args()
+    if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
+    return args.fn(args) or 0
 
-# ---------------------------------------------------------------------------
-# status / mine / price / wallet / cli / down
-
-def cmd_status(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    print("devnet %s (created %s)" % (d, st["created"]))
-    for i in range(st["num_nodes"]):
-        role = "user" if i < 2 else "federation"
-        print("  node%d  %-10s rpc %d  %s" % (i, role, rpc_port(i), "up" if node_alive(st, i) else "DOWN"))
-    for i, c in sorted(st["coords"].items()):
-        s = coord_status("http://127.0.0.1:%d" % c["port"])
-        alive = pid_alive(c["pid"])
-        extra = ""
-        if s:
-            extra = "rounds %s, cosigns %s, refusals %s, last price %s" % (
-                s.get("rounds"), s.get("cosigns"), s.get("refusals"), s.get("last_price"))
-        print("  coordinator for node%s  http://127.0.0.1:%d  %s  %s" % (i, c["port"], "up" if alive and s else "DOWN", extra))
-    if not node_alive(st, 0):
-        return 1
-    n0 = proxy(st, 0)
-    info = n0.yed_getinfo()
-    price = n0.yed_getprice()
-    stats = n0.yed_getstats()
-    bal = n0.yed_getbalance()
-    pos = n0.yed_listpositions()
-    print("  chain height %d, index %s/%s" % (n0.getblockcount(), "synced" if info["synced"] else "SYNCING", "healthy" if info["healthy"] else "UNHEALTHY"))
-    pm = price.get("priceMicroUsd")
-    print("  price: %s (age %s blocks; stale after 48)   mock price file: $%s" % (
-        "none" if pm is None else "$%.4f" % (pm / MICRO), price.get("age"), st["price_usd"]))
-    if stats["mintFrozen"]:
-        print("  minting: FROZEN until height %d (volatility breach at %d)" % (stats["mintFrozenUntil"], stats["lastBreachHeight"]))
-    else:
-        print("  minting: open (health %d %%)" % stats["healthPct"])
-    print("  node0: %s YEC, $%.2f YED confirmed (%.2f unconfirmed), %d position(s)%s" % (
-        n0.getbalance(), bal["confirmedCents"] / 100, bal["unconfirmedCents"] / 100, len(pos),
-        ", %d redeemable" % sum(1 for p in pos if p.get("canRedeem")) if pos else ""))
-    print("  wallet: " + " ".join(wallet_command(d)))
-    return 0
-
-
-def cmd_mine(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    n0 = proxy(st, 0)
-    start = n0.getblockcount()
-    for _ in range(a.blocks):
-        n0.generate(1)
-        time.sleep(a.pause)   # lets the coordinators fit their price rounds between blocks
-    nodes = [proxy(st, i) for i in range(st["num_nodes"]) if node_alive(st, i)]
-    sync_blocks(nodes)
-    for n in nodes:
-        wait_yed_synced(n)
-    p = n0.yed_getprice()
-    stats = n0.yed_getstats()
-    print("mined %d blocks: height %d -> %d; price %s (age %s); minting %s" % (
-        a.blocks, start, n0.getblockcount(),
-        "none" if p.get("priceMicroUsd") is None else "$%.4f" % (p["priceMicroUsd"] / MICRO), p.get("age"),
-        "FROZEN until %d" % stats["mintFrozenUntil"] if stats["mintFrozen"] else "open"))
-    return 0
-
-
-def cmd_price(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    new = Decimal(a.usd)
-    if new <= 0:
-        sys.exit("price must be positive")
-    old = Decimal(st["price_usd"])
-    for mock in st["mock_files"].values():
-        with open(mock, "w") as f:
-            f.write(str(new))
-    st["price_usd"] = str(new)
-    save_state(d, st)
-    move = (new - old) / old * 100 if old else Decimal(0)
-    print("mock price $%s -> $%s (%+.1f %%)" % (old, new, move))
-    print("The federation publishes it at the next round: within 8 mined blocks, or at once on a move of 1 % or more.")
-    print("Each round moves the on-chain price at most 10 %; a 20 % move within 48 blocks (or 30 % within 96)")
-    print("trips the volatility rule and freezes minting for 96 blocks. Mine to let rounds happen: `mine 8`.")
-    return 0
-
-
-def cmd_wallet(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    app = a.app or find_wallet_app()
-    cmd = wallet_command(d, app)
-    if a.print or not app:
-        if not app:
-            print("no built wallet found; build yecwallet-dd first (or pass --app). The command would be:")
-        print("  " + " ".join(cmd))
-        print("Operator endpoints for the wallet's Yellowback Settings page:")
-        for u in st["endpoints"]:
-            print("  " + u)
-        return 0 if app else 1
-    if not node_alive(st, 0):
-        sys.exit("node0 is not running; `up` first")
-    log = open(os.path.join(d, "wallet.log"), "a")
-    subprocess.Popen(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
-    print("launched " + " ".join(cmd))
-    print("Operator endpoints for the wallet's Yellowback Settings page (paste once):")
-    for u in st["endpoints"]:
-        print("  " + u)
-    return 0
-
-
-def cmd_cli(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    cli = os.path.join(os.path.dirname(st["bitcoind"]), "ycash-cli")
-    args = [cli, "-datadir=" + node_dir(d, a.node)] + a.args
-    return subprocess.call(args)
-
-
-def cmd_down(a):
-    d = os.path.abspath(a.dir)
-    st = load_state(d)
-    for i, c in st["coords"].items():
-        if pid_alive(c["pid"]):
-            os.kill(c["pid"], signal.SIGTERM)
-            print("stopped coordinator for node%s (pid %d)" % (i, c["pid"]))
-    for i in range(st["num_nodes"]):
-        if node_alive(st, i):
-            try:
-                proxy(st, i).stop()
-                print("stopping node%d" % i)
-            except Exception as e:
-                print("node%d: %s" % (i, e))
-    deadline = time.time() + 30
-    while time.time() < deadline and any(node_alive(st, i) for i in range(st["num_nodes"])):
-        time.sleep(0.5)
-    if a.wipe:
-        subprocess.run(["rm", "-rf", d], check=True)
-        print("wiped %s" % d)
-    else:
-        print("nodes stopped; %s kept (`up --force` rebuilds it, `down --wipe` removes it)" % d)
-    return 0
-
-
-# ---------------------------------------------------------------------------
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="command", required=True)
-
-    def common(p):
-        p.add_argument("--dir", default=DEFAULT_DIR, help="devnet directory (default %s)" % DEFAULT_DIR)
-
-    p = sub.add_parser("up", help="build and start the devnet");            common(p)
-    p.add_argument("--portseed", type=int, default=DEFAULT_PORTSEED, help="port seed for the node and coordinator ports (default %d)" % DEFAULT_PORTSEED)
-    p.add_argument("--price", default=DEFAULT_PRICE, help="mock YEC/USD price the federation publishes (default %s)" % DEFAULT_PRICE)
-    p.add_argument("--bitcoind", help="ycashd to run (default $BITCOIND or <repo>/src/ycashd)")
-    p.add_argument("--force", action="store_true", help="wipe an existing (stopped) devnet in --dir")
-    p.set_defaults(fn=cmd_up)
-    p = sub.add_parser("status", help="what is running");                   common(p); p.set_defaults(fn=cmd_status)
-    p = sub.add_parser("mine", help="mine N blocks on node 0");             common(p)
-    p.add_argument("blocks", type=int)
-    p.add_argument("--pause", type=float, default=0.5, help="seconds between blocks (default 0.5)")
-    p.set_defaults(fn=cmd_mine)
-    p = sub.add_parser("price", help="change the mock price");              common(p)
-    p.add_argument("usd")
-    p.set_defaults(fn=cmd_price)
-    p = sub.add_parser("wallet", help="launch the GUI against node 0");     common(p)
-    p.add_argument("--app", help="path to the yecwallet executable")
-    p.add_argument("--print", action="store_true", help="print the command instead of launching")
-    p.set_defaults(fn=cmd_wallet)
-    p = sub.add_parser("cli", help="ycash-cli against a node");             common(p)
-    p.add_argument("--node", type=int, default=0)
-    p.add_argument("args", nargs=argparse.REMAINDER)
-    p.set_defaults(fn=cmd_cli)
-    p = sub.add_parser("down", help="stop everything");                     common(p)
-    p.add_argument("--wipe", action="store_true", help="also delete the devnet directory")
-    p.set_defaults(fn=cmd_down)
-
-    a = ap.parse_args(argv)
-    if a.command == "cli" and a.args[:1] == ["--"]:
-        a.args = a.args[1:]
-    return a.fn(a)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == "__main__": sys.exit(main())
