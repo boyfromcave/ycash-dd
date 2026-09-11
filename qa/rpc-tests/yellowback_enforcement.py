@@ -82,11 +82,12 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     # node 0 needs many mature coinbases: every vault below is 250 YEC of collateral and the
     # 101 initial blocks leave exactly one mature coinbase (mapping.md section 13.5).
     initial_blocks = 101
-    # The framework's pool chain is 2<->3<->4, so isolating node 3 -- which cases 6 and 11 do --
-    # would partition node 2 from node 4 and the enforcing half could not agree on a tip.  One
-    # extra edge makes the three pools a triangle; node 1 is still the only route to the stock
-    # miner and node 0 still reaches the enforcing half through node 2 (section 6.0 item 4).
-    EDGES = YellowbackTestFramework.EDGES + [(2, 4)]
+    # Several cases take one enforcing node out of the network (an isolated pool mining a
+    # competing branch; a pool restarted with -yellowbackenforce=0 that follows node 1).  On the
+    # framework's star-plus-2<->3<->4 that disconnects the rest of the enforcing half from each
+    # other, so this script makes {0, 2, 3, 4} a complete graph.  Node 1 is still the only route
+    # to the stock miner and node 5 still hangs off node 1 alone (section 6.0 item 4).
+    EDGES = YellowbackTestFramework.EDGES + [(2, 4), (0, 3), (0, 4)]
 
     def add_options(self, parser):
         super().add_options(parser)
@@ -186,7 +187,12 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
                                      ref_height=ref, expiry=expiry)
 
-    def bad_spend(self, vault, kind, expiry_slack=30):
+    def bad_spend(self, vault, kind, expiry=0):
+        # nExpiryHeight = 0 (M13) on every adversarial spend: MP-1 refuses it on every overlay
+        # node either way, the stock node accepts it, and nothing ever hits Ycash's own
+        # tx-expired DoS 10 when node 1 re-relays it after a reorg -- a v4.5.0 behaviour that
+        # would otherwise be mistaken for a Yellowback ban.  clear_stock_mempool() is what stops
+        # such a spend riding along in a later stock block.
         """One rule-breaking spend of ``vault``.  ``kind``:
         ``owner-noburn``  owner path, no burn, no payload            (RED-1 vault-spend-malformed)
         ``claim-noburn``  claim path, no burn, no payload            (RED-1, R2)
@@ -197,7 +203,6 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """
         user = self.nodes[USER]
         live = self.live_vault(vault)
-        expiry = self.nodes[STOCK].getblockcount() + 1 + expiry_slack
         ref = user.getblockcount() - REF_LAG
         collateral = int(live['collateralZat'])
         if kind == 'owner-noburn':
@@ -502,7 +507,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         live = dict(void_built)
         live['collateralZat'] = int(void['collateralZat'])
         sweep = build_vault_spend_raw(user, live, 'claim', [],
-                                      expiry=self.nodes[STOCK].getblockcount() + 1 + TX_SOON)
+                                      expiry=self.nodes[STOCK].getblockcount() + 20)
         assert_equal(user.yed_validaterawtransaction(sweep)['wouldBeRejected'], False)
         # TPL-2 declines a claim-path spend of a VOID vault even though BLK-1 does not police it
         txid = self.nodes[POOLS[0]].sendrawtransaction(sweep)
@@ -886,6 +891,21 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.clear_stock_mempool()
         self.cp('template fault run done', ENFORCING)
 
+    def pools_outmine_excluding(self, target_hash, exclude, limit=40):
+        """The pools that are not in ``exclude`` out-mine the stock branch; the checkpoint group
+        drops the excluded node, which is on a different chain."""
+        pools = [i for i in POOLS if i not in exclude]
+        group = [i for i in ENFORCING if i not in exclude]
+        k = 0
+        while self.nodes[STOCK].getbestblockhash() != self.nodes[pools[0]].getbestblockhash():
+            assert k < limit, 'the pools did not out-mine the stock branch in %d blocks' % limit
+            self.nodes[pools[k % len(pools)]].generate(1)
+            self.cp('out-mine+%d' % (k + 1), group)
+            k += 1
+            time.sleep(0.3)
+        self.clear_stock_mempool()
+        return k
+
     def k1_totality(self):
         """K1: ``EvaluateBlock`` is total.  A vault spend with a ``refHeight`` below
         ``START_HEIGHT``, one above ``H - 1``, a payload of maximal length and a scriptSig of
@@ -905,7 +925,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                 user, live, 'owner', [v['token']],
                 payload=ym.encode_redeem(ref, 1, assignments or []),
                 fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
-                ref_height=tip - REF_LAG, expiry=tip + 1 + 20)
+                ref_height=tip - REF_LAG, expiry=0)
 
         for build in (lambda: shape('refHeight < START_HEIGHT', max(0, start - 1)),
                       lambda: shape('refHeight > H - 1', user.getblockcount() + 50),
@@ -928,8 +948,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         # same EvaluateBlock over a pseudo-block (K7)
         print('  K1 random scriptSig pushes')
         live = self.live_vault(v)
-        tip = user.getblockcount()
-        garbage = build_vault_spend_raw(user, live, 'owner', [], expiry=tip + 1 + 20,
+        garbage = build_vault_spend_raw(user, live, 'owner', [], expiry=0,
                                         selector=ym.push(bytes(random.getrandbits(8) for _ in range(20))))
         for i in ENFORCING:
             assert_equal((i, self.nodes[i].yed_validaterawtransaction(garbage)['blockValid']), (i, False))
@@ -946,7 +965,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         stock = self.nodes[STOCK]
         pool = POOLS[0]                       # node 2
         v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=30)
+        bad = self.bad_spend(v, 'owner-noburn')
         blockhash, _ = self.stock_block_with(bad)
         self.assert_rejected_everywhere(blockhash)
         self.rejected_hashes.append(blockhash)
@@ -1007,7 +1026,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         print('  variant 1: the network is 8 blocks ahead => suppressed')
         pool = POOLS[0]
         v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=40)
+        bad = self.bad_spend(v, 'owner-noburn')
         base = self.nodes[pool].getbestblockhash()
         rejected_before = self.nodes[pool].yed_getinfo()['rejectedBlocks']
         self.isolate(pool)
@@ -1032,38 +1051,39 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.catchup_recover(pool, blockhash)
 
     def catchup_recover(self, pool, blockhash):
-        """Bring ``pool`` back to the enforcing majority's chain: the split halves rejoin and the
-        enforcing pools out-mine the stock branch."""
+        """Bring ``pool`` back to the enforcing majority's chain and then the whole network to
+        it.  Order matters: the pools that never left must out-work node 1's branch *while the
+        split still holds*, otherwise the rest of the enforcing half would catch up across the
+        rule-breaking block too (BLK-2 clause 3 again) and the vault this script reuses would be
+        closed."""
         self._disconnect_pair(pool, STOCK)
         time.sleep(0.5)
-        for a, b in self.EDGES:
+        for a, b in self.EDGES:                       # back to its enforcing neighbours only
             if pool in (a, b) and self.nodes[a] is not None and self.nodes[b] is not None:
-                other = b if a == pool else a
-                if other not in (STOCK, OBSERVER):
+                if (b if a == pool else a) not in (STOCK, OBSERVER):
                     connect_nodes_bi(self.nodes, a, b)
         time.sleep(1)
-        if self.is_network_split:
-            self.join_network(blocks_only=True) if False else None
-        # the pools that never left out-mine the stock branch; the split is rejoined afterwards
         others = [i for i in POOLS if i != pool]
+        target = self.nodes[STOCK].getblockcount() + 2
         k = 0
-        while self.nodes[pool].getbestblockhash() != self.nodes[others[0]].getbestblockhash():
-            assert k < 60, 'node %d did not rejoin the enforcing chain' % pool
+        while (self.nodes[others[0]].getblockcount() < target
+               or self.nodes[pool].getbestblockhash() != self.nodes[others[0]].getbestblockhash()):
+            assert k < 80, 'node %d did not rejoin the enforcing chain' % pool
             self.nodes[others[k % len(others)]].generate(1)
             time.sleep(0.4)
             k += 1
+        self.cp('enforcing branch ahead again', ENFORCING)
         if self.is_network_split:
-            for x, y in self._cross_edges():
-                connect_nodes_bi(self.nodes, x, y)
-            self.is_network_split = False
-        time.sleep(1)
-        self.cp('catch-up recovered', ENFORCING)
+            self.join_network(blocks_only=True)
+        self.clear_stock_mempool()
+        self.cp('catch-up recovered')
+        assert_equal(self.nodes[USER].yed_getvault(self.vault(4)['txid'])['status'], 'ACTIVE')
 
     def catchup_variant_within_the_bound(self):
         print('  variant 2: the network is 3 blocks ahead => rejected, then the FAILED_CHILD path')
         pool = POOLS[0]
         v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=40)
+        bad = self.bad_spend(v, 'owner-noburn')
         rejected_before = self.nodes[pool].yed_getinfo()['rejectedBlocks']
         self.isolate(pool)
         blockhash, _ = self.stock_block_with(bad)
@@ -1104,7 +1124,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         print('  variant 3: restarted after more than a day offline => IBD (clause 2)')
         pool = POOLS[0]
         v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=60)
+        bad = self.bad_spend(v, 'owner-noburn')
         node = self.nodes[pool]
         self.isolate(pool)
         blockhash, _ = self.stock_block_with(bad)
@@ -1139,7 +1159,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
 # Rule: MINER-1
         stock = self.nodes[STOCK]
         v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=60)
+        bad = self.bad_spend(v, 'owner-noburn')
         blockhash, _ = self.stock_block_with(bad)
         self.assert_rejected_everywhere(blockhash)
         self.rejected_hashes.append(blockhash)
@@ -1240,7 +1260,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                 v = self.extended_vault(rng)
                 if v is None:
                     continue
-                bad = self.bad_spend(v, 'owner-noburn', expiry_slack=30)
+                bad = self.bad_spend(v, 'owner-noburn')
                 try:
                     blockhash, _ = self.stock_block_with(bad)
                 except JSONRPCException:
