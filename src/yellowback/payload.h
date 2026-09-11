@@ -14,20 +14,33 @@
 #include <vector>
 
 /**
- * Yellowback payload codec (plan §3.2).
+ * Yellowback payload codec, version 2 (plan §3.3, V23).
  *
  *   magic   2 bytes   0x59 0x42 ("YB")
- *   version 1 byte    0x01
- *   type    1 byte    0x01 MINT | 0x02 TRANSFER | 0x03 REDEEM | 0x10 PRICE
+ *   version 1 byte    0x02
+ *   type    1 byte    0x01 MINT | 0x02 TRANSFER | 0x03 REDEEM
  *   body    per type; total <= 80 bytes; trailing bytes => malformed
  *
- * All multi-byte integers are fixed-width little-endian (no CompactSize, no
- * VARINT, plan B11). The decoder is a bounds-checked reader over a byte
- * vector; it never uses CDataStream and never throws (plan §3.2).
+ *   MINT      termClass u8, cents u32, lockHeight u32, refHeight u32, ownerPubKey 33, feeVout u8   (51)
+ *   TRANSFER  count u8, count x (vout u8, cents u32)                                               (5 + 5n, n <= 15)
+ *   REDEEM    refHeight u32, feeVout u8, count u8, count x (vout u8, cents u32)                   (10 + 5n, n <= 14)
+ *
+ * Types 0x10-0x1F (the prototype's; 0x10 PRICE retired) and 0x20-0xFF are
+ * reserved: unknown type or version => non-Yellowback (the forward-
+ * compatibility rule). All multi-byte integers are fixed-width little-endian
+ * (no CompactSize, no VARINT). The decoder is a bounds-checked reader over a
+ * byte vector; it never uses CDataStream and never throws. feeVout = 0xFF
+ * means "no enforcement-fee output"; the codec does not range-check feeVout
+ * (MINT-8 / RED-3 do, K11).
  *
  * DigiByte packs the equivalent information into nVersion bits and an
  * OP_RETURN (ref/digibyte/src/digidollar/txbuilder.cpp:407-418, 807-818);
  * Ycash pins nVersion == 4, so the type lives in the payload (mapping.md §5).
+ *
+ * v1, retained: the prototype's version-1 layout (tier/evalHeight MINT, PRICE
+ * 0x10) is still encoded and decoded so state.cpp/txbuilder.cpp and their
+ * tests keep building until Phase 2 migrates them (§6 preamble); Phase 2
+ * deletes the `version == 1` branches, after which V23 holds literally.
  */
 namespace yellowback {
 
@@ -35,7 +48,7 @@ enum class PayloadType : uint8_t {
     MINT     = 0x01,
     TRANSFER = 0x02,
     REDEEM   = 0x03,
-    PRICE    = 0x10,
+    PRICE    = 0x10,   //!< v1, retained; reserved in v2
 };
 
 /** One (vout, cents) assignment of a TRANSFER or REDEEM body. */
@@ -49,30 +62,40 @@ struct Assignment
     friend bool operator==(const Assignment& a, const Assignment& b) { return a.vout == b.vout && a.cents == b.cents; }
 };
 
-/** TRANSFER/REDEEM: 5 + 5*count <= 80 => count <= 15. */
+/** TRANSFER: 5 + 5*count <= 80 => count <= 15. */
 static const size_t MAX_ASSIGNMENTS = 15;
+/** REDEEM: 10 + 5*count <= 80 => count <= 14. */
+static const size_t MAX_REDEEM_ASSIGNMENTS = 14;
 
 struct Payload
 {
+    uint8_t version;          //!< PAYLOAD_VERSION (2); PAYLOAD_VERSION_V1 for v1, retained
     PayloadType type;
 
     // MINT
-    uint8_t tier;
+    uint8_t termClass;        //!< 0 = A, 1 = B, 2 = C (V19)
     uint32_t cents;
     uint32_t lockHeight;
-    uint32_t evalHeight;
+    uint32_t refHeight;       //!< MINT and REDEEM (V11)
     CPubKey ownerPubKey;
+    uint8_t feeVout;          //!< MINT and REDEEM; FEE_VOUT_NONE = no fee output
 
     // TRANSFER / REDEEM
     std::vector<Assignment> assignments;
 
-    // PRICE
+    // v1, retained
+    uint8_t tier;
+    uint32_t evalHeight;
     uint64_t priceMicroUsd;
 
-    Payload() : type(PayloadType::MINT), tier(0), cents(0), lockHeight(0), evalHeight(0), priceMicroUsd(0) {}
+    Payload() : version(PAYLOAD_VERSION), type(PayloadType::MINT), termClass(0), cents(0), lockHeight(0), refHeight(0),
+                feeVout(FEE_VOUT_NONE), tier(0), evalHeight(0), priceMicroUsd(0) {}
 
-    static Payload Mint(uint8_t tier, uint32_t cents, uint32_t lockHeight, uint32_t evalHeight, const CPubKey& owner);
+    static Payload Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout);
     static Payload Transfer(const std::vector<Assignment>& assignments);
+    static Payload Redeem(uint32_t refHeight, uint8_t feeVout, const std::vector<Assignment>& assignments);
+    /** v1, retained factories (version 1 payloads); deleted in Phase 2. */
+    static Payload Mint(uint8_t tier, uint32_t cents, uint32_t lockHeight, uint32_t evalHeight, const CPubKey& owner);
     static Payload Redeem(const std::vector<Assignment>& assignments);
     static Payload Price(uint64_t priceMicroUsd);
 
@@ -86,10 +109,11 @@ struct Payload
 std::vector<unsigned char> EncodePayload(const Payload& payload);
 
 /**
- * Parse a payload. Returns false for every malformed case of §3.2: bad magic,
- * version or type, short or long body, count > 15, duplicate vout, cents == 0,
- * non-compressed owner key. Range checks that need the transaction (vout
- * exists, vout is not the OP_RETURN) are done by FindPayload.
+ * Parse a payload. Returns false for every malformed case of §3.3: bad magic,
+ * version or type, short or long body, count > 15 (TRANSFER) / 14 (REDEEM),
+ * duplicate vout, cents == 0, non-compressed owner key. Range checks that
+ * need the transaction (vout exists, vout is not the OP_RETURN) are done by
+ * FindPayload. Version 1 is still decoded (v1, retained; see the file comment).
  */
 bool DecodePayload(const std::vector<unsigned char>& data, Payload& out);
 

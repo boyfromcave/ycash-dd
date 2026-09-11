@@ -2,6 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
+// The version-2 payload codec (plan §3.3, V23): round trips, fixed-width
+// little-endian layout, every malformed case, feeVout semantics and the
+// transaction-level shape rules FindPayload applies.
+
 #include "yellowback/payload.h"
 
 #include "key.h"
@@ -36,191 +40,330 @@ CMutableTransaction TxWithOutputs(size_t n, const CScript& opret, size_t opretIn
     return mtx;
 }
 
+/** A fixed syntactically valid compressed key, so hex vectors are reproducible. */
+const std::string KEYHEX = "02cb81cc0269783ebd9e6484b5495343036874a407856f230a8ee0384986759e70";
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(yellowback_payload_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(roundtrip_table)
+// Rule: MINT-1
+// Rule: XFER-1
+// Rule: RED-1
+BOOST_AUTO_TEST_CASE(mint1_roundtrip_table)
 {
     CPubKey owner = TestKey();
-    std::vector<std::pair<Payload, size_t>> cases = {
-        { Payload::Mint(0, 10000, 1000, 950, owner), 50 },
-        { Payload::Mint(4, 1000000, 0xFFFFFFFF, 0, owner), 50 },
+    std::vector<Assignment> fourteen, fifteen;
+    for (uint8_t i = 0; i < 15; i++) {
+        if (i < 14) fourteen.push_back(Assignment(i, 100 + i));
+        fifteen.push_back(Assignment(i, 100 + i));
+    }
+    const std::vector<std::pair<Payload, size_t>> cases = {
+        { Payload::Mint(0, 10000, 1000, 950, owner, 3), 51 },
+        { Payload::Mint(2, 1000000, 0xFFFFFFFF, 0, owner, FEE_VOUT_NONE), 51 },
+        { Payload::Mint(0xFF, 0, 0, 0xFFFFFFFF, owner, 0), 51 },      // the codec fixes the shape, MINT-2 the ranges
         { Payload::Transfer({}), 5 },
         { Payload::Transfer({ Assignment(1, 100) }), 10 },
         { Payload::Transfer({ Assignment(0, 100), Assignment(1, 200), Assignment(3, 0xFFFFFFFF) }), 20 },
-        { Payload::Redeem({}), 5 },
-        { Payload::Redeem({ Assignment(2, 12345) }), 10 },
-        { Payload::Price(1), 12 },
-        { Payload::Price(0xFFFFFFFFFFFFFFFFULL), 12 },
+        { Payload::Transfer(fifteen), 80 },                            // the maximum, 80 bytes exactly
+        { Payload::Redeem(950, 2, {}), 10 },                           // count = 0 allowed (§3.5)
+        { Payload::Redeem(950, FEE_VOUT_NONE, { Assignment(2, 12345) }), 15 },
+        { Payload::Redeem(0xFFFFFFFF, 0, fourteen), 80 },              // the maximum, 80 bytes exactly
     };
-    // 15 assignments: the maximum, 80 bytes exactly.
-    std::vector<Assignment> fifteen;
-    for (uint8_t i = 0; i < 15; i++) fifteen.push_back(Assignment(i, 100 + i));
-    cases.push_back({ Payload::Transfer(fifteen), 80 });
-
     for (const auto& c : cases) {
         std::vector<unsigned char> enc = EncodePayload(c.first);
         BOOST_CHECK_EQUAL(enc.size(), c.second);
         BOOST_REQUIRE(!enc.empty());
         BOOST_CHECK_EQUAL(enc[0], 0x59);
         BOOST_CHECK_EQUAL(enc[1], 0x42);
-        BOOST_CHECK_EQUAL(enc[2], 0x01);
+        BOOST_CHECK_EQUAL(enc[2], PAYLOAD_VERSION);
+        BOOST_CHECK_EQUAL(enc[3], (unsigned char)c.first.type);
         Payload dec;
         BOOST_REQUIRE(DecodePayload(enc, dec));
         BOOST_CHECK(dec == c.first);
+        BOOST_CHECK_EQUAL(dec.version, PAYLOAD_VERSION);
         BOOST_CHECK_EQUAL(dec.AssignedCents(), c.first.AssignedCents());
+        BOOST_CHECK(EncodePayload(dec) == enc);
     }
+    // Sums fit int64: 15 x 2^32.
+    std::vector<Assignment> big;
+    for (uint8_t i = 0; i < 15; i++) big.push_back(Assignment(i, 0xFFFFFFFF));
+    BOOST_CHECK_EQUAL(Payload::Transfer(big).AssignedCents(), 15LL * 0xFFFFFFFFLL);
 }
 
-BOOST_AUTO_TEST_CASE(fixed_width_little_endian)
+// Rule: MINT-1
+// Rule: RED-1
+BOOST_AUTO_TEST_CASE(mint1_fixed_width_little_endian_layout)
 {
-    CPubKey owner = TestKey();
-    std::vector<unsigned char> enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, owner));
-    BOOST_REQUIRE_EQUAL(enc.size(), 50u);
-    BOOST_CHECK_EQUAL(HexStr(enc.begin(), enc.begin() + 17), "594201010204030201" "0d0c0b0a" "44332211");
-    BOOST_CHECK(std::equal(owner.begin(), owner.end(), enc.begin() + 17));
-
-    enc = EncodePayload(Payload::Price(0x0102030405060708ULL));
-    BOOST_CHECK_EQUAL(HexStr(enc), "594201100807060504030201");
-
-    enc = EncodePayload(Payload::Transfer({ Assignment(3, 0x00000100) }));
-    BOOST_CHECK_EQUAL(HexStr(enc), "5942010201" "03" "00010000");
+    CPubKey owner(Hex(KEYHEX));
+    std::vector<unsigned char> enc = EncodePayload(Payload::Mint(2, 0x01020304, 0x0A0B0C0D, 0x11223344, owner, 0x03));
+    BOOST_REQUIRE_EQUAL(enc.size(), 51u);
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420201" "02" "04030201" "0d0c0b0a" "44332211" + KEYHEX + "03");
+    enc = EncodePayload(Payload::Transfer({ Assignment(3, 0x0100) }));
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420202" "01" "03" "00010000");
+    enc = EncodePayload(Payload::Redeem(0x11223344, 0xFF, { Assignment(2, 0x0100) }));
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420203" "44332211" "ff" "01" "02" "00010000");
+    enc = EncodePayload(Payload::Redeem(7, 1, {}));
+    BOOST_CHECK_EQUAL(HexStr(enc), "59420203" "07000000" "01" "00");
 }
 
-BOOST_AUTO_TEST_CASE(malformed_cases)
+// Rule: MINT-1
+// Rule: XFER-1
+// Rule: RED-1
+BOOST_AUTO_TEST_CASE(mint1_malformed_table)
 {
-    CPubKey owner = TestKey();
-    std::string keyhex = HexStr(owner.begin(), owner.end());
-    Payload p;
-
-    // Too short, too long.
-    BOOST_CHECK(!DecodePayload(Hex("594201"), p));
-    BOOST_CHECK(!DecodePayload(std::vector<unsigned char>(81, 0), p));
-    // Bad magic / version / type.
-    BOOST_CHECK(!DecodePayload(Hex("5945011000000000000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("594202100100000000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("594201040100000000000000"), p));   // unknown type 0x04 (forward-compat)
-    BOOST_CHECK(!DecodePayload(Hex("5942011100000000000000000"), p));  // unknown type 0x11
-    // PRICE with a short body / trailing byte.
-    BOOST_CHECK(!DecodePayload(Hex("59420110010000000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("59420110010000000000000000"), p));
-    // MINT: short, long, uncompressed key prefix, invalid key prefix.
-    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000") , p));
-    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + keyhex + "00"), p));
-    {
-        std::string bad = keyhex; bad[0] = '0'; bad[1] = '4';
-        BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + bad), p));
-        bad[1] = '5';
-        BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + bad), p));
+    const std::string mintBody = "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff";   // 47 bytes
+    struct Case { const char* name; std::string hex; bool ok; };
+    const std::vector<Case> cases = {
+        { "mint_ok",             "59420201" + mintBody, true },
+        { "bad_magic_0",         "58420201" + mintBody, false },
+        { "bad_magic_1",         "59430201" + mintBody, false },
+        { "version_0",           "59420001" + mintBody, false },
+        { "version_3",           "59420301" + mintBody, false },
+        { "version_ff",          "5942ff01" + mintBody, false },
+        { "unknown_type_04",     "59420204" "01000000", false },
+        { "retired_type_10",     "59420210" "50c3000000000000", false },   // the prototype's PRICE, reserved in v2
+        { "reserved_type_1f",    "5942021f" "00", false },
+        { "reserved_type_20",    "59420220" "00", false },
+        { "reserved_type_ff",    "594202ff" "00", false },
+        { "type_00",             "59420200" "00", false },
+        { "empty",               "", false },
+        { "one_byte",            "59", false },
+        { "header_only",         "594202", false },
+        { "header_no_body",      "59420201", false },
+        { "mint_short_by_one",   "59420201" + mintBody.substr(0, mintBody.size() - 2), false },
+        { "mint_no_feevout",     "59420201" "00" "10270000" "e8030000" "b6030000" + KEYHEX, false },   // the v1 length
+        { "mint_trailing",       "59420201" + mintBody + "00", false },
+        { "mint_key_prefix_04",  "59420201" "00" "10270000" "e8030000" "b6030000" "04" + KEYHEX.substr(2) + "ff", false },
+        { "mint_key_prefix_01",  "59420201" "00" "10270000" "e8030000" "b6030000" "01" + KEYHEX.substr(2) + "ff", false },
+        { "mint_key_prefix_03",  "59420201" "00" "10270000" "e8030000" "b6030000" "03" + KEYHEX.substr(2) + "ff", true },
+        { "transfer_empty",      "59420202" "00", true },
+        { "transfer_short",      "59420202" "01" "01640000", false },
+        { "transfer_long",       "59420202" "01" "0164000000" "00", false },
+        { "transfer_count_short","59420202" "02" "0164000000", false },
+        { "transfer_zero_cents", "59420202" "01" "0100000000", false },
+        { "transfer_dup_vout",   "59420202" "02" "0164000000" "0164000000", false },
+        { "transfer_two",        "59420202" "02" "0164000000" "0264000000", true },
+        { "transfer_trailing",   "59420202" "00" "00", false },
+        { "redeem_empty",        "59420203" "b6030000" "ff" "00", true },
+        { "redeem_one",          "59420203" "b6030000" "03" "01" "0139300000", true },
+        { "redeem_head_short",   "59420203" "b6030000" "ff", false },
+        { "redeem_short",        "59420203" "b6030000" "ff" "01" "01393000", false },
+        { "redeem_trailing",     "59420203" "b6030000" "ff" "00" "00", false },
+        { "redeem_zero_cents",   "59420203" "b6030000" "ff" "01" "0100000000", false },
+        { "redeem_dup_vout",     "59420203" "b6030000" "ff" "02" "0164000000" "0164000000", false },
+    };
+    for (const Case& c : cases) {
+        Payload p;
+        BOOST_CHECK_MESSAGE(DecodePayload(Hex(c.hex), p) == c.ok, c.name);
     }
-    BOOST_CHECK(DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + keyhex), p));
-    BOOST_CHECK_EQUAL(p.cents, 10000u);
-    BOOST_CHECK_EQUAL(p.lockHeight, 1000u);
-    BOOST_CHECK_EQUAL(p.evalHeight, 950u);
-    // TRANSFER: count/body mismatch, count > 15, cents == 0, duplicate vout.
-    BOOST_CHECK(!DecodePayload(Hex("5942010202" "0164000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5942010201" "0164000000" "00"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5942010200" "00"), p));
+    // TRANSFER count 16 = 85 bytes: over MAX_PAYLOAD and over the count bound; 15 is the maximum.
     {
-        std::vector<unsigned char> sixteen = Hex("5942010210");
-        for (int i = 0; i < 16; i++) { sixteen.push_back(i); sixteen.push_back(1); sixteen.push_back(0); sixteen.push_back(0); sixteen.push_back(0); }
-        BOOST_CHECK_EQUAL(sixteen.size(), 85u);
+        std::vector<unsigned char> sixteen = Hex("5942020210");
+        for (uint8_t i = 0; i < 16; i++) { sixteen.push_back(i); sixteen.push_back(1); sixteen.push_back(0); sixteen.push_back(0); sixteen.push_back(0); }
+        Payload p;
         BOOST_CHECK(!DecodePayload(sixteen, p));
+        std::vector<unsigned char> fifteen = Hex("594202020f");
+        for (uint8_t i = 0; i < 15; i++) { fifteen.push_back(i); fifteen.push_back(1); fifteen.push_back(0); fifteen.push_back(0); fifteen.push_back(0); }
+        BOOST_CHECK_EQUAL(fifteen.size(), 80u);
+        BOOST_CHECK(DecodePayload(fifteen, p));
+        BOOST_CHECK_EQUAL(p.assignments.size(), 15u);
     }
-    BOOST_CHECK(!DecodePayload(Hex("5942010201" "0100000000"), p));
-    BOOST_CHECK(!DecodePayload(Hex("5942010202" "0164000000" "0164000000"), p));
-    BOOST_CHECK(DecodePayload(Hex("5942010202" "0164000000" "0264000000"), p));
-    BOOST_CHECK_EQUAL(p.AssignedCents(), 200);
-    // REDEEM with count 0 is valid and self-describing.
-    BOOST_CHECK(DecodePayload(Hex("5942010300"), p));
-    BOOST_CHECK(p.type == PayloadType::REDEEM);
-    BOOST_CHECK(p.assignments.empty());
-
-    // Encoder refuses the same malformed inputs.
+    // REDEEM count 15 = 85 bytes: rejected; 14 = 80 bytes is the maximum (the refHeight/feeVout head costs one slot).
+    {
+        std::vector<unsigned char> fifteen = Hex("59420203" "b6030000" "ff" "0f");
+        for (uint8_t i = 0; i < 15; i++) { fifteen.push_back(i); fifteen.push_back(1); fifteen.push_back(0); fifteen.push_back(0); fifteen.push_back(0); }
+        Payload p;
+        BOOST_CHECK(!DecodePayload(fifteen, p));
+        std::vector<unsigned char> fourteen = Hex("59420203" "b6030000" "ff" "0e");
+        for (uint8_t i = 0; i < 14; i++) { fourteen.push_back(i); fourteen.push_back(1); fourteen.push_back(0); fourteen.push_back(0); fourteen.push_back(0); }
+        BOOST_CHECK_EQUAL(fourteen.size(), 80u);
+        BOOST_CHECK(DecodePayload(fourteen, p));
+        BOOST_CHECK_EQUAL(p.assignments.size(), 14u);
+        // The encoder refuses 15 for REDEEM but accepts it for TRANSFER.
+        std::vector<Assignment> as;
+        for (uint8_t i = 0; i < 15; i++) as.push_back(Assignment(i, 1));
+        BOOST_CHECK(EncodePayload(Payload::Redeem(1, 0xFF, as)).empty());
+        BOOST_CHECK_EQUAL(EncodePayload(Payload::Transfer(as)).size(), 80u);
+    }
+    // 81 bytes never decodes, whatever the header.
+    {
+        std::vector<unsigned char> long81 = Hex("59420202");
+        long81.resize(81, 0);
+        Payload p;
+        BOOST_CHECK(!DecodePayload(long81, p));
+    }
+    // The encoder refuses what the decoder would refuse.
     BOOST_CHECK(EncodePayload(Payload::Transfer({ Assignment(1, 0) })).empty());
     BOOST_CHECK(EncodePayload(Payload::Transfer({ Assignment(1, 1), Assignment(1, 2) })).empty());
-    std::vector<Assignment> sixteen;
-    for (uint8_t i = 0; i < 16; i++) sixteen.push_back(Assignment(i, 1));
-    BOOST_CHECK(EncodePayload(Payload::Transfer(sixteen)).empty());
-    BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, CPubKey())).empty());
+    CPubKey unc;
+    { CKey k; k.MakeNewKey(false); unc = k.GetPubKey(); }
+    BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, unc, 0xFF)).empty());
+    BOOST_CHECK(EncodePayload(Payload::Mint(0, 1, 1, 1, CPubKey(), 0xFF)).empty());
 }
 
-BOOST_AUTO_TEST_CASE(opreturn_shape)
+// Rule: MINT-8
+// Rule: RED-3
+// feeVout: 0xFF = no fee output; any other value is carried as is. The codec
+// does not range-check it (K11): MINT-8/RED-3 compare it with vout.size()
+// and the reserved indices, so FindPayload keeps a payload whose feeVout is
+// out of range.
+BOOST_AUTO_TEST_CASE(mint8_feevout_semantics)
 {
-    std::vector<unsigned char> data = EncodePayload(Payload::Price(5));
-    // Canonical shape: OP_RETURN <push>.
-    BOOST_CHECK(ExtractOpReturnData(PayloadScript(data)) == data);
-    // PUSHDATA1 encoding of the same data is also a single push.
+    CPubKey owner = TestKey();
+    for (uint8_t fv : { (uint8_t)0, (uint8_t)3, (uint8_t)0xFE, FEE_VOUT_NONE }) {
+        Payload p;
+        BOOST_REQUIRE(DecodePayload(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner, fv)), p));
+        BOOST_CHECK_EQUAL(p.feeVout, fv);
+        BOOST_REQUIRE(DecodePayload(EncodePayload(Payload::Redeem(950, fv, {})), p));
+        BOOST_CHECK_EQUAL(p.feeVout, fv);
+    }
+    BOOST_CHECK_EQUAL(FEE_VOUT_NONE, 0xFF);
+    BOOST_CHECK_EQUAL(Payload().feeVout, FEE_VOUT_NONE);
+    // A MINT with feeVout = 9 in a 3-output transaction still parses (the rule, not the codec, rejects it).
+    CMutableTransaction mtx = TxWithOutputs(3, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner, 9))), 2);
+    auto fp = FindPayload(CTransaction(mtx));
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL(fp->payload.feeVout, 9);
+    BOOST_CHECK_EQUAL(fp->opReturnIndex, 2u);
+}
+
+// Rule: TX-0
+BOOST_AUTO_TEST_CASE(tx0_opreturn_shape)
+{
+    std::vector<unsigned char> data = EncodePayload(Payload::Transfer({ Assignment(1, 100) }));
+    // Exactly OP_RETURN <push>.
+    BOOST_CHECK(ExtractOpReturnData(PayloadScript(data)).value() == data);
+    // Not OP_RETURN.
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << data).has_value());
+    BOOST_CHECK(!ExtractOpReturnData(CScript()).has_value());
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN).has_value());
+    // Two pushes.
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << data << data).has_value());
+    // OP_N is not a data push.
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << OP_1).has_value());
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << OP_0).has_value());
+    // Trailing opcode.
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << data << OP_DROP).has_value());
+    // Length bounds on the push: 3 bytes and 81 bytes are out; 4 and 80 are in (decoding is separate).
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(3, 1)).has_value());
+    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(81, 1)).has_value());
+    BOOST_CHECK(ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(4, 1)).has_value());
+    BOOST_CHECK(ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(80, 1)).has_value());
+    // A non-minimal push (OP_PUSHDATA1 for 10 bytes) is still one push of the bytes.
     {
         CScript s;
         s << OP_RETURN;
         s.push_back(OP_PUSHDATA1);
         s.push_back((unsigned char)data.size());
         s.insert(s.end(), data.begin(), data.end());
-        BOOST_CHECK(ExtractOpReturnData(s) == data);
+        BOOST_CHECK(ExtractOpReturnData(s).value() == data);
     }
-    // Not OP_RETURN first.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << data << OP_RETURN).has_value());
-    // Bare OP_RETURN.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN).has_value());
-    // Two pushes.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << data << data).has_value());
-    // OP_N is not a data push.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << OP_5).has_value());
-    // Trailing opcode.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << data << OP_DROP).has_value());
-    // Below the minimum size / above the maximum.
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(3, 0x59)).has_value());
-    BOOST_CHECK(!ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(81, 0x59)).has_value());
-    BOOST_CHECK(ExtractOpReturnData(CScript() << OP_RETURN << std::vector<unsigned char>(80, 0x59)).has_value());
+    // Truncated PUSHDATA.
+    {
+        CScript s;
+        s << OP_RETURN;
+        s.push_back(OP_PUSHDATA1);
+        s.push_back(50);
+        s.push_back(1);
+        BOOST_CHECK(!ExtractOpReturnData(s).has_value());
+    }
 }
 
-BOOST_AUTO_TEST_CASE(find_payload_in_transaction)
+// Rule: TX-0
+// Rule: XFER-1
+BOOST_AUTO_TEST_CASE(tx0_find_payload_in_transaction)
 {
-    CScript opret = PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100), Assignment(1, 200) })));
-
-    // vout: [token, token, OP_RETURN]
-    CMutableTransaction mtx = TxWithOutputs(3, opret, 2);
-    auto fp = FindPayload(CTransaction(mtx));
-    BOOST_REQUIRE(fp.has_value());
-    BOOST_CHECK_EQUAL(fp->opReturnIndex, 2u);
-    BOOST_CHECK(fp->payload.type == PayloadType::TRANSFER);
-    BOOST_CHECK_EQUAL(fp->payload.AssignedCents(), 300);
-
-    // No OP_RETURN at all.
-    CMutableTransaction plain = TxWithOutputs(2, CScript() << OP_TRUE, 0);
-    BOOST_CHECK(!FindOpReturn(CTransaction(plain)).has_value());
-    BOOST_CHECK(!FindPayload(CTransaction(plain)).has_value());
-
-    // Two OP_RETURN outputs: non-Yellowback regardless of contents (A4).
-    CMutableTransaction two = TxWithOutputs(3, opret, 2);
-    two.vout[1].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(4, 1);
-    BOOST_CHECK(!FindOpReturn(CTransaction(two)).has_value());
-    BOOST_CHECK(!FindPayload(CTransaction(two)).has_value());
-
-    // Assigned vout out of range.
-    CMutableTransaction shortTx = TxWithOutputs(2, opret, 1);
-    // vout[1] is the OP_RETURN itself here: assignment (1, 200) points at it => non-Yellowback.
-    BOOST_CHECK(!FindPayload(CTransaction(shortTx)).has_value());
-    CScript opret3 = PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100), Assignment(5, 200) })));
-    CMutableTransaction oor = TxWithOutputs(3, opret3, 2);
-    BOOST_CHECK(!FindPayload(CTransaction(oor)).has_value());
-
-    // Malformed payload in a well-shaped OP_RETURN: non-Yellowback, but FindOpReturn still sees the output.
-    CMutableTransaction bad = TxWithOutputs(3, CScript() << OP_RETURN << std::vector<unsigned char>(10, 0xAA), 2);
-    BOOST_CHECK(FindOpReturn(CTransaction(bad)).has_value());
-    BOOST_CHECK(!FindPayload(CTransaction(bad)).has_value());
-
-    // MINT payload: no assignments to range-check; found wherever the OP_RETURN sits.
     CPubKey owner = TestKey();
-    CScript mint = PayloadScript(EncodePayload(Payload::Mint(1, 20000, 5000, 4960, owner)));
-    CMutableTransaction m = TxWithOutputs(4, mint, 2);
-    fp = FindPayload(CTransaction(m));
-    BOOST_REQUIRE(fp.has_value());
-    BOOST_CHECK(fp->payload.type == PayloadType::MINT);
-    BOOST_CHECK(fp->payload.ownerPubKey == owner);
-    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(fp->payload.type)), "mint");
+    const CScript mint = PayloadScript(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner, 3)));
+    const CScript xfer = PayloadScript(EncodePayload(Payload::Transfer({ Assignment(0, 100), Assignment(2, 200) })));
+
+    // Found, with its index.
+    {
+        CMutableTransaction mtx = TxWithOutputs(4, mint, 2);
+        auto fp = FindPayload(CTransaction(mtx));
+        BOOST_REQUIRE(fp.has_value());
+        BOOST_CHECK_EQUAL(fp->opReturnIndex, 2u);
+        BOOST_CHECK(fp->payload.type == PayloadType::MINT);
+        BOOST_CHECK_EQUAL(fp->payload.refHeight, 950u);
+    }
+    // No OP_RETURN.
+    {
+        CMutableTransaction mtx = TxWithOutputs(2, CScript() << OP_TRUE, 0);
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+        BOOST_CHECK(!FindOpReturn(CTransaction(mtx)).has_value());
+    }
+    // Two OP_RETURNs: non-Yellowback even if one is a good payload.
+    {
+        CMutableTransaction mtx = TxWithOutputs(4, mint, 2);
+        mtx.vout[3].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(4, 0);
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+        BOOST_CHECK(!FindOpReturn(CTransaction(mtx)).has_value());
+    }
+    // A bare OP_RETURN (no push) counts as the OP_RETURN output but carries no payload.
+    {
+        CMutableTransaction mtx = TxWithOutputs(2, CScript() << OP_RETURN, 1);
+        BOOST_CHECK_EQUAL(FindOpReturn(CTransaction(mtx)).value(), 1u);
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+    }
+    // Assigned vout beyond the outputs.
+    {
+        CMutableTransaction mtx = TxWithOutputs(2, xfer, 1);   // assigns vout 2, which does not exist
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+    }
+    // Assigned vout is the OP_RETURN itself.
+    {
+        CMutableTransaction mtx = TxWithOutputs(3, xfer, 2);   // assigns vout 2 = the OP_RETURN
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+        CMutableTransaction ok = TxWithOutputs(4, xfer, 3);
+        BOOST_CHECK(FindPayload(CTransaction(ok)).has_value());
+    }
+    // A REDEEM with count = 0 has no assignments to check.
+    {
+        CMutableTransaction mtx = TxWithOutputs(2, PayloadScript(EncodePayload(Payload::Redeem(1, 0xFF, {}))), 1);
+        auto fp = FindPayload(CTransaction(mtx));
+        BOOST_REQUIRE(fp.has_value());
+        BOOST_CHECK(fp->payload.type == PayloadType::REDEEM);
+        BOOST_CHECK(fp->payload.assignments.empty());
+    }
+    // A version-1 payload of another family is ignored at the transaction level too (V23; see the retained case below).
+    {
+        CMutableTransaction mtx = TxWithOutputs(2, PayloadScript(Hex("59420304" "00000000")), 1);
+        BOOST_CHECK(!FindPayload(CTransaction(mtx)).has_value());
+    }
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::MINT)), "mint");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::TRANSFER)), "transfer");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::REDEEM)), "redeem");
+}
+
+// ---------------------------------------------------------------------------
+// v1, retained (deleted with the version-1 branches in Phase 2). V23 says a
+// v2 node ignores version 1; until state.cpp migrates, version 1 still decodes
+// so the prototype's state tests keep running. This case pins that transitional
+// behaviour so its removal is a deliberate, visible change.
+
+BOOST_AUTO_TEST_CASE(v1_retained_codec)
+{
+    CPubKey owner(Hex(KEYHEX));
+    Payload p;
+    BOOST_CHECK(DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX), p));
+    BOOST_CHECK_EQUAL(p.version, PAYLOAD_VERSION_V1);
+    BOOST_CHECK_EQUAL(p.tier, 0);
+    BOOST_CHECK_EQUAL(p.evalHeight, 950u);
+    BOOST_CHECK(p == Payload::Mint(0, 10000, 1000, 950, owner));
+    BOOST_CHECK(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner)) == Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX));
+    BOOST_CHECK(DecodePayload(Hex("59420110" "50c3000000000000"), p));
+    BOOST_CHECK(p.type == PayloadType::PRICE);
+    BOOST_CHECK_EQUAL(p.priceMicroUsd, 50000u);
+    BOOST_CHECK(EncodePayload(Payload::Price(50000)) == Hex("59420110" "50c3000000000000"));
+    BOOST_CHECK(DecodePayload(Hex("59420103" "01" "0139300000"), p));
+    BOOST_CHECK(p == Payload::Redeem({ Assignment(1, 12345) }));
+    // The v1 MINT length is not a v2 MINT and vice versa.
+    BOOST_CHECK(!DecodePayload(Hex("59420201" "00" "10270000" "e8030000" "b6030000" + KEYHEX), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff"), p));
+    // v1 REDEEM has no head; a v2 REDEEM body under version 1 is a 15-assignment shape at best.
+    BOOST_CHECK(!DecodePayload(Hex("59420103" "b6030000" "ff" "00"), p));
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::PRICE)), "price");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
