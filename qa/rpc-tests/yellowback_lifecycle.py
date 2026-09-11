@@ -72,6 +72,11 @@ def coin_of(node, cents):
 
 class YellowbackLifecycleTest(YellowbackTestFramework):
 
+    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID and a TRANSFER whose
+    # verdict would burn, so no overlay node would mine the under-assigned raw transfer this
+    # script needs (docs/mapping.md section 13.5).
+    template_policy = 'consensus'
+
     def owner_wif(self, node, vault):
         return node.dumpprivkey(pubkey_to_address(hex_str_to_bytes(vault['ownerPubKey'])))
 
