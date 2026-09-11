@@ -96,6 +96,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         parser.add_option('--only', dest='only', default=None,
                           help='comma-separated case method names (development)')
 
+    def node_args(self, i, extra=None):
+        # -debug=yellowback makes the hook's own decisions (suppressed / rejected / noted)
+        # readable in debug.log, which several assertions below grep
+        return super().node_args(i, ['-debug=yellowback'] + list(extra or []))
+
     # ------------------------------------------------------------------ helpers
 
     def cp(self, label, group=None):
@@ -1051,30 +1056,47 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.catchup_recover(pool, blockhash)
 
     def catchup_recover(self, pool, blockhash):
-        """Bring ``pool`` back to the enforcing majority's chain and then the whole network to
-        it.  Order matters: the pools that never left must out-work node 1's branch *while the
-        split still holds*, otherwise the rest of the enforcing half would catch up across the
-        rule-breaking block too (BLK-2 clause 3 again) and the vault this script reuses would be
-        closed."""
+        """Put ``pool`` back on the enforcing branch and then bring the whole network to it.
+
+        The order matters and is itself a finding (see ``docs/mapping.md`` 13.8): a node that
+        has caught up across a suppressed rule-breaking block will relay that branch to its
+        peers, and a peer learning it through an intermediary can connect the block *before*
+        ``pindexBestHeader`` has advanced past it -- so BLK-2 clause 3 does not fire there and
+        the peer rejects (the ACT-7 valve then converges it, which is the bound the design
+        gives).  This helper therefore drops the branch on ``pool`` first
+        (``invalidateblock``), reconnects it to the enforcing half only then, and lets the
+        pools out-work node 1 before the split is rejoined."""
         self._disconnect_pair(pool, STOCK)
         time.sleep(0.5)
-        for a, b in self.EDGES:                       # back to its enforcing neighbours only
-            if pool in (a, b) and self.nodes[a] is not None and self.nodes[b] is not None:
-                if (b if a == pool else a) not in (STOCK, OBSERVER):
-                    connect_nodes_bi(self.nodes, a, b)
+        try:
+            self.nodes[pool].invalidateblock(blockhash)      # drop node 1's branch before relaying it
+        except JSONRPCException:
+            pass                                             # already off that branch
+        for a, b in self.EDGES:
+            if pool in (a, b) and (b if a == pool else a) not in (STOCK, OBSERVER):
+                connect_nodes_bi(self.nodes, a, b)
         time.sleep(1)
+        self.cp('pool %d back on the enforcing branch' % pool, ENFORCING)
         others = [i for i in POOLS if i != pool]
         target = self.nodes[STOCK].getblockcount() + 2
         k = 0
-        while (self.nodes[others[0]].getblockcount() < target
-               or self.nodes[pool].getbestblockhash() != self.nodes[others[0]].getbestblockhash()):
-            assert k < 80, 'node %d did not rejoin the enforcing chain' % pool
+        while self.nodes[others[0]].getblockcount() < target:
+            assert k < 80, 'the enforcing branch never out-worked node 1'
             self.nodes[others[k % len(others)]].generate(1)
-            time.sleep(0.4)
+            self.cp('out-work+%d' % (k + 1), ENFORCING)
             k += 1
-        self.cp('enforcing branch ahead again', ENFORCING)
         if self.is_network_split:
-            self.join_network(blocks_only=True)
+            for x, y in self._cross_edges():
+                connect_nodes_bi(self.nodes, x, y)
+            self.is_network_split = False
+            time.sleep(1)
+        # P3 again: node 1 reorganises at the next block the network announces
+        k = 0
+        while len({n.getbestblockhash() for n in self.nodes if n is not None}) > 1:
+            assert k < 30, 'the network did not converge after the catch-up case'
+            self.nodes[others[k % len(others)]].generate(1)
+            time.sleep(1.0)
+            k += 1
         self.clear_stock_mempool()
         self.cp('catch-up recovered')
         assert_equal(self.nodes[USER].yed_getvault(self.vault(4)['txid'])['status'], 'ACTIVE')
@@ -1114,6 +1136,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             self.nodes[STOCK].generate(1)
             time.sleep(0.8)
         assert_banscore_zero([node])
+        # drop node 1's branch *before* the restart reconnects this node to the enforcing half:
+        # otherwise it relays the branch there and those nodes catch up across it too
+        self._disconnect_pair(pool, STOCK)
+        time.sleep(0.5)
+        node.invalidateblock(blockhash)
         print('    converged; re-arming node %d by restart' % pool)
         self.restart(pool)
         assert_equal(self.nodes[pool].yed_getinfo()['valveTripped'], False)
@@ -1134,10 +1161,13 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         self.restart(pool)                          # the IBD latch is reset by the restart
         node = self.nodes[pool]
         self.rejoin(pool, STOCK)
-        deadline = time.time() + 90
+        deadline = time.time() + 120
         while node.getbestblockhash() != self.nodes[STOCK].getbestblockhash():
             assert time.time() < deadline, 'node %d did not catch up in IBD' % pool
-            time.sleep(0.3)
+            # a restarted node learns of a better chain from the next announcement; node 1 keeps
+            # mining, which is what an outage looks like from the node's side
+            self.nodes[STOCK].generate(1)
+            time.sleep(1.0)
         info = node.yed_getinfo()
         assert_equal(info['rejectedBlocks'], 0)             # the restart cleared the record
         assert_equal(info['suppressedBlocks'], 0)           # clause 2 writes nothing
