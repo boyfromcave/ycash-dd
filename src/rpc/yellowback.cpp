@@ -1228,6 +1228,13 @@ static const CRPCCommand commands[] =
 
 void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)
 {
+    // Plan section 8.3: "For a node without -yellowback: nothing; every code path is v4.5.0's."
+    // A registered-but-refusing command is still a command: it shows in `help`, in the `== Yellowback ==`
+    // category header and in any tooling that enumerates the RPC surface, so a stock-configured
+    // fork binary would not look like v4.5.0 to an operator.  InitExperimentalMode() has already
+    // run when RegisterAllCoreRPCCommands is called (init.cpp), so the flag is readable here.
+    // Found by qa/rpc-tests/yellowback_stock_node.py.
+    if (!fExperimentalYellowback) return;
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);
 }

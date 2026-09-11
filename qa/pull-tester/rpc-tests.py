@@ -47,7 +47,8 @@ BASE_SCRIPTS= [
     'yellowback_claim.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
-    'yellowback_rpc_contract.py',
+    'yellowback_enforcement.py',
+    'yellowback_stock_node.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
@@ -148,6 +149,7 @@ ZMQ_SCRIPTS = [
 EXTENDED_SCRIPTS = [
     'yellowback_reorg_stress.py',
     'yellowback_sapling.py',
+    'yellowback_stockparity.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',
