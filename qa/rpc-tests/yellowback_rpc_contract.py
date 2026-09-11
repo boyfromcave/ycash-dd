@@ -32,6 +32,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     build_mint_tx,
     build_vault_spend_raw,
+    mine_block_raw,
     mint_vault_raw,
     wait_for_rejection,
     wait_yed_healthy,
@@ -169,7 +170,11 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         hex_, _ = build_mint_tx(user, 10_000, 48, ref, int(est['requiredZat']))
         void_txid = user.sendrawtransaction(hex_)
         self.sync_all()
-        self.mine(POOLS[0])
+        # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so no pool
+        # template will ever carry it: the block is assembled in Python (section 6.0 item 4).
+        result, _ = mine_block_raw(nodes[POOLS[0]], [hex_])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         void_vault = user.yed_getvault(void_txid)
         assert_equal(void_vault['status'], 'VOID')
         assert 'sweepBefore' in void_vault
