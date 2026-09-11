@@ -30,19 +30,15 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     bytes_to_hex_str,
-    hex_str_to_bytes,
     sync_blocks,
     sync_mempools,
 )
 from test_framework.yellowback_util import (
     ABANDON_BLOCKS,
-    COIN,
     ENFORCEMENT_FLOOR,
     ENFORCEMENT_RESUME,
-    GRACE,
     POOLS,
     REF_LAG,
-    REF_WINDOW,
     STOCK,
     TOKEN_VALUE,
     YELLOWBACK_FEE,
@@ -54,7 +50,6 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     fee_zat,
     mine_block_raw,
-    pubkey_to_address,
     set_quote,
 )
 from test_framework import yellowback_model as ym
@@ -214,8 +209,14 @@ class YellowbackClaimTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, v3_claim_height - user.getblockcount())
 
 # Rule: XFER-1 RED-2
-        print('change_floor from yed_claim: 100.50 YED against a 100 YED debt would leave 50 cents')
-        assert_rpc_error('change-floor', claimant.yed_claim, mint_v3['txid'])
+        print('the floor bites a plain send of the 100.50 YED coin; the claim path burns instead (H2/H4)')
+        # Phase 8 H4: yed_claim no longer refuses with change-floor here -- the selector burns a
+        # sub-dollar remainder rather than refuse (doc/yellowback-rpc.md, yed_redeem/yed_claim).
+        # A plain transfer has no such escape, so the floor is still observable on yed_send.
+        assert_equal(claimant.yed_getbalance()['confirmedCents'], 10050)
+        est = claimant.yed_estimatesend(10000)
+        assert_equal((est['workable'], est['error']), (False, 'change-floor'))
+        assert_rpc_error('change-floor', claimant.yed_send, user.yed_getnewaddress(), 10000)
         user.yed_send(claimant.yed_getnewaddress(), 100)
         self.sync_all()
         self.mine(POOLS[1])
@@ -371,11 +372,12 @@ class YellowbackClaimTest(YellowbackTestFramework):
         for i in OVERLAY:
             assert_equal(nodes[i].yed_getinfo()['abandoned'], True, i)
         swept_t = user.yed_sweep(mints['T']['txid'], SWEEP_ACK)
+        assert_equal(swept_t['unbackedCents'], 10000)
         sync_mempools([user, nodes[2]])
         self.mine(POOLS[0])
         for i in OVERLAY:
             c = nodes[i].yed_getvault(mints['T']['txid'])
-            assert_equal((c['status'], c['unbacked']), ('CLOSED', True))
+            assert_equal((c['status'], c['unbacked'], c['closingTxid']), ('CLOSED', True, swept_t['txid']))
         assert_equal(nodes[2].yed_getstats()['unbackedCents'], unbacked_before + 20000)
         assert_equal(nodes[2].yed_getstats()['activeVaults'], 0)
 
