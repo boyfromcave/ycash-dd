@@ -1307,6 +1307,15 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
 # Rule: ACT-7
         n_blocks = int(getattr(self.options, 'extended_blocks', 200))
         print('=== case8_extended_random_activity (%d blocks)' % n_blocks)
+        # Case 9 leaves every enforcing node with the valve tripped and enforcement off for the
+        # session, which is exactly what an operator restarts to clear (ACT-7: "re-arming is an
+        # operator restart").  Do that first, or nothing below would ever be rejected.
+        for i in ENFORCING:
+            if self.nodes[i].yed_getinfo()['valveTripped']:
+                self.restart(i)
+            assert_equal((i, self.nodes[i].yed_getinfo()['enforcing']), (i, True))
+        self.sync_all(blocks_only=True)
+        self.reset_peer_scores()
         rng = random.Random(20260911)
         user, stock = self.nodes[USER], self.nodes[STOCK]
         for i in POOLS:
