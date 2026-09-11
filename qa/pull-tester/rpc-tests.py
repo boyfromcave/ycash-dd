@@ -46,6 +46,7 @@ BASE_SCRIPTS= [
     'yellowback_wallet_restore.py',
     'yellowback_claim.py',
     'yellowback_pricefeed.py',
+    'yellowback_hardening.py',
     'yellowback_rpc_contract.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
