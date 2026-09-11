@@ -27,9 +27,9 @@
  * behavioural reference for the ratios and the oracle bundle; the v2 tag,
  * medians and volatility are the Ycash adaptation (mapping.md §13).
  *
- * Symbols marked "v1, retained" are the federation prototype's; they stay
- * beside their replacements until state.cpp/txbuilder.cpp/index.cpp have
- * migrated (plan §6 preamble, M7) and are deleted in Phases 2-3.
+ * The federation prototype's symbols (tier tables, health/volatility
+ * thresholds, the genesis anchor and roster) were deleted in Phase 2; the
+ * roster script helpers in script.h are the last v1 remnant (Phase 3).
  */
 namespace yellowback {
 
@@ -42,8 +42,6 @@ typedef int64_t MicroUsd;
 static const unsigned char PAYLOAD_MAGIC_0 = 0x59;
 static const unsigned char PAYLOAD_MAGIC_1 = 0x42;
 static const unsigned char PAYLOAD_VERSION = 0x02;
-/** v1, retained: the prototype's payload version; a v2 node ignores it (V23). */
-static const unsigned char PAYLOAD_VERSION_V1 = 0x01;
 /** Largest payload: Ycash nMaxDatacarrierBytes (83) minus OP_RETURN and the push opcode. */
 static const size_t MAX_PAYLOAD = 80;
 static const size_t MIN_PAYLOAD = 4;
@@ -58,8 +56,6 @@ static const int BLOCKS_PER_HOUR = 48;
 static const int BLOCKS_PER_DAY = 1152;
 static const int BLOCKS_PER_YEAR = 420480;
 
-/** v1, retained: an attestation older than this is not a price (prototype §3.6). */
-static const int PRICE_MAX_AGE = 48;
 /** Price bounds in micro-USD per YEC: $0.0001 .. $100 (DigiByte's bounds, primitives/oracle.h:23-24). */
 static const MicroUsd PRICE_MIN = 100;
 static const MicroUsd PRICE_MAX = 100000000;
@@ -73,12 +69,6 @@ static const int REF_WINDOW = 40;
 /** Wallet-side only: refHeight = indexTip - REF_LAG (-yellowbackmintlag, V11; the 36 bound is §3.5). */
 static const int DEFAULT_REF_LAG = 2;
 static const int MAX_REF_LAG = 36;
-/** v1, retained names of the three above. */
-static const int MINT_WINDOW = REF_WINDOW;
-static const int DEFAULT_MINT_EVAL_LAG = DEFAULT_REF_LAG;
-static const int MAX_MINT_EVAL_LAG = MAX_REF_LAG;
-/** v1, retained: co-signer slack on the prototype's RED-8. */
-static const int RED_SKEW = 2;
 
 /** YEC carried by every Yellowback output: 10,000 zat, >= 100x the dust floor. */
 static const CAmount TOKEN_VALUE = 10000;
@@ -92,12 +82,8 @@ static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
 /** feeVout value meaning "no enforcement-fee output" (§3.3). */
 static const uint8_t FEE_VOUT_NONE = 0xFF;
 
-/** v1, retained: health cap, volatility thresholds, roster bound and tier count. */
-static const int HEALTH_CAP = 30000;
-static const int VOL_1H_BPS = 2000;
-static const int VOL_24H_BPS = 3000;
+/** Roster bound of the prototype's k-of-n script helpers (script.h; deleted with them in Phase 3). */
 static const unsigned int ROSTER_MAX_N = 13;
-static const int NUM_TIERS = 5;
 
 /**
  * Per-network parameters (§3.1, field list §4.2a). Built once per network.
@@ -170,17 +156,6 @@ struct Params
     int accuracyWindow;                  //!< 576
     int payeeTiltBps;                    //!< 10,000
 
-    // ---- v1, retained until state.cpp / txbuilder.cpp / index.cpp migrate (Phases 2-3) ----
-    COutPoint genesisAnchor;             //!< the federation's first anchor UTXO
-    CScript genesisRosterScript;         //!< k-of-n CHECKMULTISIG redeem script of that anchor
-    Cents supplyCap;                     //!< prototype MINT-6; 0 = no cap
-    int tierBlocks[NUM_TIERS];           //!< lock period per tier
-    int tierRatioPct[NUM_TIERS];         //!< collateral ratio per tier, percent
-    int rosterGrace;
-    int volCooldown;
-    int volWindowShort;
-    int volWindowLong;
-
     Params();
 
     /** v2: configured iff the start height is known (§4.2). */
@@ -188,8 +163,13 @@ struct Params
     /** Class index (0..2) for a lock length in blocks; -1 if in no class (V19). */
     int ClassForLockBlocks(int64_t lockBlocks) const;
     bool IsValidClass(int termClass) const { return termClass >= 0 && termClass < NUM_CLASSES; }
-    /** v1, retained. */
-    bool IsValidTier(int tier) const { return tier >= 0 && tier < NUM_TIERS; }
+    /** WINDOW_MIN_FILL of the three price windows (PRICE-1, L9). */
+    int MinFill(int window) const
+    {
+        if (window == pFastWindow) return pFastMinFill;
+        if (window == pMidWindow) return pMidMinFill;
+        return pSlowMinFill;
+    }
 };
 
 /** Mainnet and testnet parameters; startHeight is set per release (§3.1, K10). */
@@ -204,8 +184,14 @@ const Params& TestParams();
  */
 Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil);
 
-/** v1, retained: the prototype's regtest overload (genesis anchor + roster); deleted in Phase 3. */
-Params RegtestParams(int startHeight, const COutPoint& genesisAnchor, const CScript& genesisRosterScript, Cents supplyCap = 0);
+/**
+ * Parameter-set selection by height (§3.1 *Parameter versioning*, K10): the
+ * set with the greatest startHeight <= height, or the first set when none
+ * qualifies (every rule below a set's start reads the virtual snapshot
+ * anyway). `sets` must be non-empty. Pure; the index passes its release's
+ * sets and EvaluateBlock receives the one selected for H.
+ */
+const Params& SelectParams(const std::vector<Params>& sets, int height);
 
 /** Parameters for a network id as returned by CChainParams::NetworkIDString(); regtest returns unconfigured defaults. */
 const Params& ParamsForNetwork(const std::string& networkId);

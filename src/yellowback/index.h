@@ -112,10 +112,11 @@ extern CAmount g_yellowbackFee;
 extern int g_yellowbackMintLag;
 
 /**
- * Build the parameters for the running network from configuration
- * (regtest genesis arguments, -yellowbacksupplycap). Returns an error string
- * on a misconfiguration (C2: the three regtest arguments must appear
- * together and only on regtest).
+ * Build the parameters for the running network from configuration (the four
+ * regtest-only flags of §3.1: -yellowbackstartheight, -yellowbacksigmaref,
+ * -yellowbacksupplycapbps, -yellowbackenforceuntil). Returns an error string
+ * on a misconfiguration (start height missing, or a regtest flag on another
+ * network).
  */
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out);
 

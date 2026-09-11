@@ -12,9 +12,7 @@ namespace yellowback {
 
 namespace {
 
-const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + CPubKey::COMPRESSED_PUBLIC_KEY_SIZE + 1; // 47 (v2)
-const size_t MINT_BODY_SIZE_V1 = 1 + 4 + 4 + 4 + CPubKey::COMPRESSED_PUBLIC_KEY_SIZE;   // 46 (v1, retained)
-const size_t PRICE_BODY_SIZE = 8;                                                        // v1, retained
+const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + CPubKey::COMPRESSED_PUBLIC_KEY_SIZE + 1; // 47
 const size_t REDEEM_HEAD_SIZE = 4 + 1 + 1;                                               // refHeight, feeVout, count
 
 /** Bounds-checked little-endian reader. Never throws. */
@@ -93,6 +91,7 @@ Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, ui
     p.lockHeight = lockHeight;
     p.refHeight = refHeight;
     p.ownerPubKey = owner;
+    p.ownerKeyBytes.assign(owner.begin(), owner.end());
     p.feeVout = feeVout;
     return p;
 }
@@ -107,45 +106,11 @@ Payload Payload::Redeem(uint32_t refHeight, uint8_t feeVout, const std::vector<A
     return p;
 }
 
-// v1, retained
-Payload Payload::Mint(uint8_t tier, uint32_t cents, uint32_t lockHeight, uint32_t evalHeight, const CPubKey& owner)
-{
-    Payload p;
-    p.version = PAYLOAD_VERSION_V1;
-    p.type = PayloadType::MINT;
-    p.tier = tier;
-    p.cents = cents;
-    p.lockHeight = lockHeight;
-    p.evalHeight = evalHeight;
-    p.ownerPubKey = owner;
-    return p;
-}
-
 Payload Payload::Transfer(const std::vector<Assignment>& assignments)
 {
     Payload p;
     p.type = PayloadType::TRANSFER;
     p.assignments = assignments;
-    return p;
-}
-
-// v1, retained
-Payload Payload::Redeem(const std::vector<Assignment>& assignments)
-{
-    Payload p;
-    p.version = PAYLOAD_VERSION_V1;
-    p.type = PayloadType::REDEEM;
-    p.assignments = assignments;
-    return p;
-}
-
-// v1, retained
-Payload Payload::Price(uint64_t priceMicroUsd)
-{
-    Payload p;
-    p.version = PAYLOAD_VERSION_V1;
-    p.type = PayloadType::PRICE;
-    p.priceMicroUsd = priceMicroUsd;
     return p;
 }
 
@@ -161,19 +126,12 @@ bool operator==(const Payload& a, const Payload& b)
     if (a.version != b.version || a.type != b.type) return false;
     switch (a.type) {
     case PayloadType::MINT:
-        if (a.version == PAYLOAD_VERSION_V1) {
-            return a.tier == b.tier && a.cents == b.cents && a.lockHeight == b.lockHeight &&
-                   a.evalHeight == b.evalHeight && a.ownerPubKey == b.ownerPubKey;
-        }
         return a.termClass == b.termClass && a.cents == b.cents && a.lockHeight == b.lockHeight &&
-               a.refHeight == b.refHeight && a.ownerPubKey == b.ownerPubKey && a.feeVout == b.feeVout;
+               a.refHeight == b.refHeight && a.ownerKeyBytes == b.ownerKeyBytes && a.feeVout == b.feeVout;
     case PayloadType::TRANSFER:
         return a.assignments == b.assignments;
     case PayloadType::REDEEM:
-        if (a.version == PAYLOAD_VERSION_V1) return a.assignments == b.assignments;
         return a.refHeight == b.refHeight && a.feeVout == b.feeVout && a.assignments == b.assignments;
-    case PayloadType::PRICE:
-        return a.priceMicroUsd == b.priceMicroUsd;
     }
     return false;
 }
@@ -199,37 +157,6 @@ void PutAssignments(std::vector<unsigned char>& out, const std::vector<Assignmen
     }
 }
 
-/** v1, retained: the prototype's body layouts. Deleted in Phase 2. */
-bool DecodeBodyV1(Reader& r, uint8_t type, size_t size, Payload& p)
-{
-    switch (type) {
-    case (uint8_t)PayloadType::MINT: {
-        if (size != 4 + MINT_BODY_SIZE_V1) return false;
-        p.type = PayloadType::MINT;
-        std::vector<unsigned char> key;
-        if (!r.U8(p.tier) || !r.U32(p.cents) || !r.U32(p.lockHeight) || !r.U32(p.evalHeight) ||
-            !r.Bytes(CPubKey::COMPRESSED_PUBLIC_KEY_SIZE, key)) return false;
-        p.ownerPubKey.Set(key.begin(), key.end());
-        return p.ownerPubKey.IsValid() && p.ownerPubKey.IsCompressed();
-    }
-    case (uint8_t)PayloadType::TRANSFER:
-    case (uint8_t)PayloadType::REDEEM: {
-        p.type = (type == (uint8_t)PayloadType::TRANSFER) ? PayloadType::TRANSFER : PayloadType::REDEEM;
-        uint8_t count;
-        if (!r.U8(count)) return false;
-        if (count > MAX_ASSIGNMENTS) return false;
-        if (size != 5 + 5 * (size_t)count) return false;
-        return ReadAssignments(r, count, p.assignments) && ValidAssignments(p.assignments);
-    }
-    case (uint8_t)PayloadType::PRICE:
-        if (size != 4 + PRICE_BODY_SIZE) return false;
-        p.type = PayloadType::PRICE;
-        return r.U64(p.priceMicroUsd);
-    default:
-        return false;
-    }
-}
-
 /** Version 2 bodies (§3.3). */
 bool DecodeBodyV2(Reader& r, uint8_t type, size_t size, Payload& p)
 {
@@ -237,13 +164,12 @@ bool DecodeBodyV2(Reader& r, uint8_t type, size_t size, Payload& p)
     case (uint8_t)PayloadType::MINT: {
         if (size != 4 + MINT_BODY_SIZE) return false;
         p.type = PayloadType::MINT;
-        std::vector<unsigned char> key;
         if (!r.U8(p.termClass) || !r.U32(p.cents) || !r.U32(p.lockHeight) || !r.U32(p.refHeight) ||
-            !r.Bytes(CPubKey::COMPRESSED_PUBLIC_KEY_SIZE, key) || !r.U8(p.feeVout)) return false;
-        p.ownerPubKey.Set(key.begin(), key.end());
-        // A syntactically compressed key (0x02/0x03 prefix, 33 bytes). Curve
-        // validity is MINT-3's job; the codec only fixes the shape.
-        return p.ownerPubKey.IsValid() && p.ownerPubKey.IsCompressed();
+            !r.Bytes(CPubKey::COMPRESSED_PUBLIC_KEY_SIZE, p.ownerKeyBytes) || !r.U8(p.feeVout)) return false;
+        // Any 33 bytes: the codec fixes the shape, MINT-3 judges the key
+        // (bad-mint-owner-key) and a VOID vault records the bytes verbatim.
+        p.ownerPubKey.Set(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end());
+        return true;
     }
     case (uint8_t)PayloadType::TRANSFER: {
         p.type = PayloadType::TRANSFER;
@@ -275,37 +201,15 @@ std::vector<unsigned char> EncodePayload(const Payload& payload)
     out.push_back(PAYLOAD_MAGIC_1);
     out.push_back(payload.version);
     out.push_back((unsigned char)payload.type);
-    if (payload.version == PAYLOAD_VERSION_V1) {
-        // v1, retained
+    if (payload.version == PAYLOAD_VERSION) {
         switch (payload.type) {
         case PayloadType::MINT:
-            if (!payload.ownerPubKey.IsValid() || !payload.ownerPubKey.IsCompressed()) return {};
-            out.push_back(payload.tier);
-            PutU32(out, payload.cents);
-            PutU32(out, payload.lockHeight);
-            PutU32(out, payload.evalHeight);
-            out.insert(out.end(), payload.ownerPubKey.begin(), payload.ownerPubKey.end());
-            break;
-        case PayloadType::TRANSFER:
-        case PayloadType::REDEEM:
-            if (!ValidAssignments(payload.assignments)) return {};
-            PutAssignments(out, payload.assignments);
-            break;
-        case PayloadType::PRICE:
-            PutU64(out, payload.priceMicroUsd);
-            break;
-        default:
-            return {};
-        }
-    } else if (payload.version == PAYLOAD_VERSION) {
-        switch (payload.type) {
-        case PayloadType::MINT:
-            if (!payload.ownerPubKey.IsValid() || !payload.ownerPubKey.IsCompressed()) return {};
+            if (payload.ownerKeyBytes.size() != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) return {};
             out.push_back(payload.termClass);
             PutU32(out, payload.cents);
             PutU32(out, payload.lockHeight);
             PutU32(out, payload.refHeight);
-            out.insert(out.end(), payload.ownerPubKey.begin(), payload.ownerPubKey.end());
+            out.insert(out.end(), payload.ownerKeyBytes.begin(), payload.ownerKeyBytes.end());
             out.push_back(payload.feeVout);
             break;
         case PayloadType::TRANSFER:
@@ -339,17 +243,8 @@ bool DecodePayload(const std::vector<unsigned char>& data, Payload& out)
 
     Payload p;
     p.version = version;
-    bool ok;
-    if (version == PAYLOAD_VERSION) {
-        ok = DecodeBodyV2(r, type, data.size(), p);
-    } else if (version == PAYLOAD_VERSION_V1) {
-        // v1, retained until Phase 2 migrates state.cpp; then this branch goes
-        // and a version-1 payload is non-Yellowback (V23).
-        ok = DecodeBodyV1(r, type, data.size(), p);
-    } else {
-        return false; // unknown version: non-Yellowback (V23)
-    }
-    if (!ok) return false;
+    if (version != PAYLOAD_VERSION) return false; // version 1 and every later version: non-Yellowback (V23)
+    if (!DecodeBodyV2(r, type, data.size(), p)) return false;
     if (!r.AtEnd()) return false;
     out = p;
     return true;
@@ -410,7 +305,6 @@ const char* PayloadTypeName(PayloadType type)
     case PayloadType::MINT: return "mint";
     case PayloadType::TRANSFER: return "transfer";
     case PayloadType::REDEEM: return "redeem";
-    case PayloadType::PRICE: return "price";
     }
     return "unknown";
 }

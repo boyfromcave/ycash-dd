@@ -16,7 +16,7 @@ namespace yellowback {
 
 YellowbackIndex* g_yellowback = nullptr;
 CAmount g_yellowbackFee = DEFAULT_YELLOWBACK_FEE;
-int g_yellowbackMintLag = DEFAULT_MINT_EVAL_LAG;
+int g_yellowbackMintLag = DEFAULT_REF_LAG;
 
 YellowbackIndex::YellowbackIndex(const Params& params, const fs::path& dir, size_t cacheSize, bool fWipe)
     : params(params), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false)
@@ -64,7 +64,7 @@ bool YellowbackIndex::IsSynced() const
 uint256 YellowbackIndex::GetStateHash() const
 {
     AssertLockHeld(cs_yellowback);
-    return StateHash(*db);
+    return StateHash(*db, params.network);
 }
 
 void YellowbackIndex::Wipe(const std::string& why)
@@ -77,7 +77,9 @@ bool YellowbackIndex::ApplyOne(const CBlock& block, int height, const uint256& h
 {
     if (testBeforeApply) testBeforeApply();
     UndoRecord undo;
-    std::optional<std::string> err = ApplyBlock(*db, params, block, height, hash, undo);
+    // The block subsidy is EvaluateBlock's argument (N22): state.cpp links against nothing in main.cpp.
+    const CAmount subsidy = GetBlockSubsidy(height, ::Params().GetConsensus());
+    std::optional<std::string> err = ApplyBlock(*db, params, block, height, hash, subsidy, undo);
     if (err.has_value()) {
         db->Discard();
         error = err.value();
@@ -122,7 +124,7 @@ bool YellowbackIndex::SyncToChain()
     LOCK(cs_main);
     LOCK(cs_yellowback);
     if (!params.IsConfigured()) {
-        SetUnhealthy("yellowback parameters are not configured for this network (no genesis anchor)");
+        SetUnhealthy("yellowback parameters are not configured for this network (no start height)");
         return false;
     }
 
@@ -283,45 +285,27 @@ void YellowbackIndex::TestChainTip(const CBlockIndex* pindex, const CBlock* pblo
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)
 {
-    const bool haveStart = mapArgs.count("-yellowbackstartheight");
-    const bool haveAnchor = mapArgs.count("-yellowbackgenesisanchor");
-    const bool haveRoster = mapArgs.count("-yellowbackgenesisroster");
-    const bool haveCap = mapArgs.count("-yellowbacksupplycap");
+    // The four regtest-only flags of §3.1 (M13): -yellowbackstartheight (required) and the three
+    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil. Every value
+    // is hashed into the state hash so mismatched test nodes fail loudly.
+    static const char* const REGTEST_FLAGS[] = { "-yellowbackstartheight", "-yellowbacksigmaref", "-yellowbacksupplycapbps", "-yellowbackenforceuntil" };
     if (networkId != "regtest") {
-        if (haveStart || haveAnchor || haveRoster || haveCap) {
-            return std::string("-yellowbackstartheight, -yellowbackgenesisanchor, -yellowbackgenesisroster and -yellowbacksupplycap are regtest-only");
+        for (const char* f : REGTEST_FLAGS) {
+            if (mapArgs.count(f)) return std::string(f) + " is regtest-only";
         }
         out = ParamsForNetwork(networkId);
         return std::nullopt;
     }
-    if (!(haveStart && haveAnchor && haveRoster)) {
-        return std::string("regtest -yellowback requires -yellowbackstartheight, -yellowbackgenesisanchor and -yellowbackgenesisroster together");
-    }
+    if (!mapArgs.count("-yellowbackstartheight")) return std::string("regtest -yellowback requires -yellowbackstartheight");
     int64_t startHeight = GetArg("-yellowbackstartheight", 0);
-    if (startHeight <= 0) return std::string("-yellowbackstartheight must be a positive height");
-    std::string anchor = GetArg("-yellowbackgenesisanchor", "");
-    size_t colon = anchor.find(':');
-    if (colon == std::string::npos || !IsHex(anchor.substr(0, colon)) || anchor.substr(0, colon).size() != 64) {
-        return std::string("-yellowbackgenesisanchor must be <txid>:<n>");
-    }
-    uint32_t n = 0;
-    try {
-        n = (uint32_t)std::stoul(anchor.substr(colon + 1));
-    } catch (...) {
-        return std::string("-yellowbackgenesisanchor must be <txid>:<n>");
-    }
-    COutPoint outpoint(uint256S(anchor.substr(0, colon)), n);
-    std::string rosterHex = GetArg("-yellowbackgenesisroster", "");
-    if (!IsHex(rosterHex)) return std::string("-yellowbackgenesisroster must be the hex roster script");
-    std::vector<unsigned char> rosterBytes = ParseHex(rosterHex);
-    CScript rosterScript(rosterBytes.begin(), rosterBytes.end());
-    Roster roster;
-    if (!ParseRosterScript(rosterScript, roster)) {
-        return std::string("-yellowbackgenesisroster is not a k-of-n CHECKMULTISIG script with 1 <= k <= n <= 13 compressed keys");
-    }
-    int64_t cap = GetArg("-yellowbacksupplycap", 0);
-    if (cap < 0) return std::string("-yellowbacksupplycap must be >= 0");
-    out = RegtestParams((int)startHeight, outpoint, rosterScript, cap);
+    if (startHeight <= 0 || startHeight > 0x7FFFFFFF) return std::string("-yellowbackstartheight must be a positive height");
+    int64_t sigmaRef = GetArg("-yellowbacksigmaref", 0);
+    if (sigmaRef < 0 || sigmaRef > 0x7FFFFFFF) return std::string("-yellowbacksigmaref must be >= 0");
+    int64_t capBps = GetArg("-yellowbacksupplycapbps", 0);
+    if (capBps < 0 || capBps > 10000) return std::string("-yellowbacksupplycapbps must be between 0 and 10000");
+    int64_t until = GetArg("-yellowbackenforceuntil", 0);
+    if (until < 0 || until > 0x7FFFFFFF) return std::string("-yellowbackenforceuntil must be >= 0");
+    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until);
     return std::nullopt;
 }
 

@@ -20,7 +20,7 @@ BOOST_AUTO_TEST_CASE(prefixes_and_roundtrip)
 {
     const Params& main = MainParams();
     const Params& test = TestParams();
-    Params regtest = RegtestParams(0, COutPoint(), CScript());
+    Params regtest = RegtestParams(1, 0, 0, 0);
 
     std::vector<CKeyID> ids;
     ids.push_back(CKeyID(uint160()));

@@ -85,24 +85,22 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v)
     o.pushKV("vout", (int64_t)out.n);
     o.pushKV("status", VaultStatusName(v.Status()));
     o.pushKV("ownerPubKey", HexStr(v.ownerPubKey.begin(), v.ownerPubKey.end()));
-    o.pushKV("ownerKeyId", v.ownerPubKey.IsValid() ? v.ownerPubKey.GetID().GetHex() : "");
-    o.pushKV("tier", (int)v.tier);
+    const CPubKey owner = v.OwnerKey();
+    o.pushKV("ownerKeyId", owner.IsValid() ? owner.GetID().GetHex() : "");
+    o.pushKV("termClass", v.termClass < NUM_CLASSES ? std::string(1, (char)('A' + v.termClass)) : std::to_string((int)v.termClass));
     o.pushKV("lockHeight", (int64_t)v.lockHeight);
+    o.pushKV("claimHeight", (int64_t)v.claimHeight);
     o.pushKV("collateralZat", v.collateralZat);
     o.pushKV("collateral", ValueFromAmount(v.collateralZat));
     o.pushKV("mintedCents", v.mintedCents);
     o.pushKV("mintHeight", v.mintHeight);
-    o.pushKV("rosterIndex", v.rosterIndex);
-    if (v.Status() == VaultStatus::VOID) o.pushKV("voidReason", v.voidReason);
-    if (v.Status() == VaultStatus::CLOSED) {
-        o.pushKV("wasActive", v.wasActive);
-        o.pushKV("closeHeight", v.closeHeight);
-        o.pushKV("closingTxid", v.closingTxid.GetHex());
-        o.pushKV("burnedCents", v.burnedCents);
-        o.pushKV("errBpsAtClose", v.errBpsAtClose);
-        o.pushKV("requiredBurnAtClose", v.requiredBurnAtClose);
-        o.pushKV("unbacked", v.wasActive && v.burnedCents < v.requiredBurnAtClose);
-    }
+    o.pushKV("refHeight", v.refHeight);
+    o.pushKV("feePaidZat", v.feePaidZat);
+    o.pushKV("voidReason", v.voidReason);
+    o.pushKV("closeHeight", v.closeHeight);
+    o.pushKV("closingTxid", v.IsOpen() ? NullUniValue : UniValue(v.closingTxid.GetHex()));
+    o.pushKV("burnedCents", v.burnedCents);
+    o.pushKV("unbacked", v.unbacked);
     return o;
 }
 
@@ -111,11 +109,14 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l)
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
     o.pushKV("height", l.height);
-    o.pushKV("type", l.type == 0 ? "none" : PayloadTypeName((PayloadType)l.type));
+    o.pushKV("type", TxLogTypeName(l.Type()));
+    o.pushKV("path", l.path);
     o.pushKV("verdict", l.verdict);
     o.pushKV("yedIn", l.yedIn);
     o.pushKV("yedOut", l.yedOut);
     o.pushKV("burned", l.burned);
+    o.pushKV("feeZat", l.feeZat);
+    o.pushKV("payee", l.hasPayee ? UniValue(l.payee.GetHex()) : NullUniValue);
     UniValue assigned(UniValue::VARR);
     for (const AssignedOutput& a : l.assigned) {
         UniValue e = OutPointToJSON(a.outpoint);
@@ -135,24 +136,51 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l)
     UniValue closed(UniValue::VARR);
     for (const COutPoint& c : l.closedVaults) closed.push_back(OutPointToJSON(c));
     o.pushKV("closedVaults", closed);
-    o.pushKV("anchorSpend", l.anchorSpend);
-    o.pushKV("priceRecorded", l.priceRecorded);
     return o;
 }
 
+UniValue PriceOrNull(std::optional<int64_t> v)
+{
+    return v.has_value() ? UniValue(v.value()) : NullUniValue;
+}
+
+UniValue ActivationToJSON(const Activation& a)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("status", ActivationStatusName(a.Status()));
+    o.pushKV("lockInHeight", a.lockInHeight);
+    o.pushKV("activateHeight", a.activateHeight);
+    return o;
+}
+
+UniValue HaltMaskToJSON(uint32_t mask)
+{
+    UniValue arr(UniValue::VARR);
+    for (const std::string& n : HaltMaskNames(mask)) arr.push_back(n);
+    return arr;
+}
+
+/** A yed_gethistory row (§3.6 Snapshots; undefined prices render null). */
 UniValue SnapshotToJSON(int height, const Snapshot& s)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("height", height);
-    o.pushKV("blockhash", s.blockHash.GetHex());
+    o.pushKV("blockHash", s.blockHash.GetHex());
+    o.pushKV("tagged", s.tagged);
+    o.pushKV("quote", s.quote);
+    o.pushKV("signalCount", (int64_t)s.signalCount);
+    o.pushKV("activation", ActivationToJSON(s.activation));
+    o.pushKV("pFast", PriceOrNull(s.PFast()));
+    o.pushKV("pMid", PriceOrNull(s.PMid()));
+    o.pushKV("pSlow", PriceOrNull(s.PSlow()));
+    o.pushKV("pMint", PriceOrNull(s.PMint()));
+    o.pushKV("pClaim", PriceOrNull(s.PClaim()));
+    o.pushKV("sigmaMultBps", s.sigmaMultBps);
+    o.pushKV("issuedZat", s.issuedZat);
     o.pushKV("supplyCents", s.supplyCents);
     o.pushKV("collateralZat", s.collateralZat);
-    if (s.priceDefined) o.pushKV("priceMicroUsd", s.price);
-    else o.pushKV("priceMicroUsd", NullUniValue);
-    o.pushKV("healthPct", s.healthPct);
-    o.pushKV("dcaBps", s.dcaBps);
-    o.pushKV("errBps", s.errBps);
-    o.pushKV("mintFrozen", s.mintFrozen);
+    o.pushKV("globalRatioBps", PriceOrNull(s.GlobalRatioBps()));
+    o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
     return o;
 }
 
@@ -162,14 +190,19 @@ UniValue PayloadToJSON(const Payload& p)
     o.pushKV("type", PayloadTypeName(p.type));
     switch (p.type) {
     case PayloadType::MINT:
-        o.pushKV("tier", (int)p.tier);
+        o.pushKV("termClass", (int)p.termClass);
         o.pushKV("cents", (int64_t)p.cents);
         o.pushKV("lockHeight", (int64_t)p.lockHeight);
-        o.pushKV("evalHeight", (int64_t)p.evalHeight);
-        o.pushKV("ownerPubKey", HexStr(p.ownerPubKey.begin(), p.ownerPubKey.end()));
+        o.pushKV("refHeight", (int64_t)p.refHeight);
+        o.pushKV("ownerPubKey", HexStr(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end()));
+        o.pushKV("feeVout", (int)p.feeVout);
         break;
     case PayloadType::TRANSFER:
     case PayloadType::REDEEM: {
+        if (p.type == PayloadType::REDEEM) {
+            o.pushKV("refHeight", (int64_t)p.refHeight);
+            o.pushKV("feeVout", (int)p.feeVout);
+        }
         UniValue as(UniValue::VARR);
         for (const Assignment& a : p.assignments) {
             UniValue e(UniValue::VOBJ);
@@ -181,24 +214,22 @@ UniValue PayloadToJSON(const Payload& p)
         o.pushKV("assignedCents", p.AssignedCents());
         break;
     }
-    case PayloadType::PRICE:
-        o.pushKV("priceMicroUsd", (int64_t)p.priceMicroUsd);
-        break;
     }
     return o;
 }
 
-/** Dry-run §3.7 for a transaction at the next height without touching the index. */
+/** Dry-run §3.8 for a transaction at the next height without touching the index. */
 UniValue DryRun(YellowbackIndex& index, const CTransaction& tx)
 {
     AssertLockHeld(index.cs_yellowback);
     OverlayStateView overlay(index.MutableView());
     State st(overlay);
     const int height = IndexHeight(index) + 1;
-    bool relevant = false;
-    TxLogRecord log = ProcessTx(st, index.GetParams(), tx, height, relevant);
-    UniValue o = TxLogToJSON(tx.GetHash(), log);
-    o.pushKV("relevant", relevant);
+    TxOutcome r = ProcessTx(st, index.GetParams(), tx, height);
+    UniValue o = TxLogToJSON(tx.GetHash(), r.log);
+    o.pushKV("relevant", r.relevant);
+    o.pushKV("vaultSpend", r.vaultSpend);
+    o.pushKV("blockInvalid", r.redFailed);
     o.pushKV("dryRun", true);
     return o;
 }
@@ -223,9 +254,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
             "  \"synced\": true|false,        (boolean) index tip == chain tip\n"
             "  \"healthy\": true|false,\n"
             "  \"unhealthyReason\": \"...\",\n"
-            "  \"anchor\": {...},\n"
-            "  \"rosterIndex\": n,\n"
-            "  \"params\": {...}\n"
+            "  \"activation\": {...},\n"
+            "  \"params\": {...}         (object) the four hashed regtest values and the rest of the set\n"
             "}\n"
             "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
@@ -241,42 +271,36 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("rpcversion", YELLOWBACK_RPC_VERSION);
     o.pushKV("network", p.network);
     o.pushKV("startHeight", p.startHeight);
-    o.pushKV("genesisAnchor", OutPointToJSON(p.genesisAnchor));
     o.pushKV("height", tip.has_value() ? tip->height : -1);
     o.pushKV("blockhash", tip.has_value() ? tip->blockHash.GetHex() : "");
     o.pushKV("chainHeight", chainActive.Height());
     o.pushKV("synced", index.IsSynced());
     o.pushKV("healthy", index.IsHealthy());
     o.pushKV("unhealthyReason", index.UnhealthyReason());
-    AnchorRecord a = st.GetAnchor();
-    UniValue anchor(UniValue::VOBJ);
-    anchor.pushKV("valid", a.valid);
-    anchor.pushKV("txid", a.outpoint.hash.GetHex());
-    anchor.pushKV("vout", (int64_t)a.outpoint.n);
-    anchor.pushKV("valueZat", a.nValue);
-    anchor.pushKV("address", ScriptAddress(a.scriptPubKey));
-    o.pushKV("anchor", anchor);
-    o.pushKV("rosterIndex", (int64_t)st.Rosters().size() - 1);
+    o.pushKV("activation", ActivationToJSON(st.GetActivation()));
     UniValue pp(UniValue::VOBJ);
+    // The four hashed values first (M13, N18), then the rest of the set.
+    pp.pushKV("startHeight", p.startHeight);
+    pp.pushKV("sigmaRefBps", p.sigmaRefBps);
+    pp.pushKV("supplyCapBps", p.supplyCapBps);
+    pp.pushKV("enforceUntilHeight", p.enforceUntilHeight);
     pp.pushKV("minMintCents", p.minMint);
     pp.pushKV("maxMintCents", p.maxMint);
     pp.pushKV("minOutputCents", p.minOutput);
     pp.pushKV("maxOutputCents", p.maxOutput);
-    pp.pushKV("supplyCapCents", p.supplyCap);
-    UniValue tiers(UniValue::VARR);
-    for (int i = 0; i < NUM_TIERS; i++) {
+    UniValue classes(UniValue::VARR);
+    for (int i = 0; i < NUM_CLASSES; i++) {
         UniValue t(UniValue::VOBJ);
-        t.pushKV("tier", i);
-        t.pushKV("blocks", p.tierBlocks[i]);
-        t.pushKV("ratioPct", p.tierRatioPct[i]);
-        tiers.push_back(t);
+        t.pushKV("termClass", i);
+        t.pushKV("minLockBlocks", p.classMin[i]);
+        t.pushKV("maxLockBlocks", p.classMax[i]);
+        t.pushKV("baseRatioBps", p.baseRatioBps[i]);
+        classes.push_back(t);
     }
-    pp.pushKV("tiers", tiers);
-    pp.pushKV("rosterGrace", p.rosterGrace);
-    pp.pushKV("volCooldown", p.volCooldown);
-    pp.pushKV("priceMaxAge", PRICE_MAX_AGE);
-    pp.pushKV("mintWindow", MINT_WINDOW);
-    pp.pushKV("mintEvalLag", g_yellowbackMintLag);
+    pp.pushKV("classes", classes);
+    pp.pushKV("grace", p.grace);
+    pp.pushKV("refWindow", p.refWindow);
+    pp.pushKV("refLag", g_yellowbackMintLag);
     pp.pushKV("tokenValueZat", TOKEN_VALUE);
     pp.pushKV("feeZat", g_yellowbackFee);
     o.pushKV("params", pp);
@@ -312,7 +336,7 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 0)
         throw std::runtime_error(
             "yed_getstats\n"
-            "\nSupply, collateral, vault counts, price, health, DCA, ERR and mint-freeze state at the index tip.\n");
+            "\nSupply, collateral, vault counts, prices, sigma, global ratio and halts at the index tip.\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
@@ -328,112 +352,21 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     o.pushKV("collateral", ValueFromAmount(t.collateralZat));
     o.pushKV("activeVaults", (int64_t)t.activeVaults);
     o.pushKV("voidVaults", (int64_t)t.voidVaults);
-    o.pushKV("supplyCapCents", index.GetParams().supplyCap);
-    if (snap.has_value()) {
-        if (snap->priceDefined) o.pushKV("priceMicroUsd", snap->price);
-        else o.pushKV("priceMicroUsd", NullUniValue);
-        std::optional<uint32_t> src = st.PriceSourceHeight((uint32_t)h);
-        o.pushKV("priceHeight", src.has_value() ? (int64_t)src.value() : -1);
-        o.pushKV("priceAge", src.has_value() ? (int64_t)(h - (int)src.value()) : -1);
-        o.pushKV("healthPct", snap->healthPct);
-        o.pushKV("dcaBps", snap->dcaBps);
-        o.pushKV("errBps", snap->errBps);
-        o.pushKV("mintFrozen", snap->mintFrozen);
-        Volatility vol = st.GetVolatility();
-        o.pushKV("lastBreachHeight", vol.lastBreachHeight);
-        o.pushKV("mintFrozenUntil", vol.lastBreachHeight >= 0 ? vol.lastBreachHeight + index.GetParams().volCooldown : -1);
-    } else {
-        o.pushKV("priceMicroUsd", NullUniValue);
-        o.pushKV("priceHeight", -1);
-        o.pushKV("priceAge", -1);
-        o.pushKV("healthPct", HEALTH_CAP);
-        o.pushKV("dcaBps", 10000);
-        o.pushKV("errBps", 10000);
-        o.pushKV("mintFrozen", false);
-        o.pushKV("lastBreachHeight", -1);
-        o.pushKV("mintFrozenUntil", -1);
-    }
-    return o;
-}
-
-UniValue yed_getprotectionstatus(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() != 0)
-        throw std::runtime_error(
-            "yed_getprotectionstatus\n"
-            "\nThe three protection systems at the index tip (plan D12): DCA (collateral multiplier by health band),\n"
-            "ERR (burn ratio by health band) and the volatility mint freeze, with the prices the freeze compares.\n");
-
-    YellowbackIndex& index = EnsureIndex();
-    LOCK(index.cs_yellowback);
-    EnsureHealthy(index);
-    State st(index.View());
-    const yellowback::Params& p = index.GetParams();
-    const int h = IndexHeight(index);
-    std::optional<Snapshot> snap = h >= 0 ? st.GetSnapshot((uint32_t)h) : std::nullopt;
-    Volatility vol = st.GetVolatility();
-    const int health = snap.has_value() ? snap->healthPct : HEALTH_CAP;
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("height", h);
-    o.pushKV("healthPct", health);
-    UniValue dca(UniValue::VOBJ);
-    dca.pushKV("bps", DcaBps(health));
-    dca.pushKV("band", health >= 150 ? "healthy" : health >= 120 ? "warning" : health >= 110 ? "critical" : "emergency");
-    o.pushKV("dca", dca);
-    UniValue err(UniValue::VOBJ);
-    err.pushKV("bps", ErrBps(health));
-    err.pushKV("active", health < 100);
-    err.pushKV("burnMultiplierBps", (int64_t)(10000LL * 10000 / ErrBps(health)));
-    o.pushKV("err", err);
-    UniValue v(UniValue::VOBJ);
-    v.pushKV("mintFrozen", snap.has_value() ? snap->mintFrozen : false);
-    v.pushKV("lastBreachHeight", vol.lastBreachHeight);
-    v.pushKV("frozenUntil", vol.lastBreachHeight >= 0 ? vol.lastBreachHeight + p.volCooldown : -1);
-    v.pushKV("cooldownBlocks", p.volCooldown);
-    auto pushPrice = [&](const char* name, int at) {
-        if (at < 0) { v.pushKV(name, NullUniValue); return; }
-        std::optional<MicroUsd> pr = st.PriceInEffect((uint32_t)at);
-        if (pr.has_value()) v.pushKV(name, pr.value()); else v.pushKV(name, NullUniValue);
-    };
-    pushPrice("priceNow", h);
-    pushPrice("priceShortWindow", h - p.volWindowShort);
-    pushPrice("priceLongWindow", h - p.volWindowLong);
-    v.pushKV("shortWindowBlocks", p.volWindowShort);
-    v.pushKV("longWindowBlocks", p.volWindowLong);
-    v.pushKV("shortThresholdBps", VOL_1H_BPS);
-    v.pushKV("longThresholdBps", VOL_24H_BPS);
-    o.pushKV("volatility", v);
-    o.pushKV("mintingAllowed", snap.has_value() && snap->priceDefined && health >= 100 && !snap->mintFrozen);
-    return o;
-}
-
-UniValue yed_getprice(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() > 1)
-        throw std::runtime_error(
-            "yed_getprice ( height )\n"
-            "\nThe price in effect at the given height (default: index tip): the most recent attestation\n"
-            "at or below it that is at most " + std::to_string(PRICE_MAX_AGE) + " blocks old.\n"
-            "\nResult:\n{ \"height\": n, \"priceMicroUsd\": n|null, \"sourceHeight\": n, \"age\": n }\n");
-
-    YellowbackIndex& index = EnsureIndex();
-    LOCK(index.cs_yellowback);
-    EnsureHealthy(index);
-    State st(index.View());
-    int h = IndexHeight(index);
-    if (params.size() > 0 && !params[0].isNull()) h = params[0].get_int();
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("height", h);
-    std::optional<uint32_t> src = h >= 0 ? st.PriceSourceHeight((uint32_t)h) : std::nullopt;
-    if (src.has_value()) {
-        o.pushKV("priceMicroUsd", st.GetPriceAt(src.value()).value());
-        o.pushKV("sourceHeight", (int64_t)src.value());
-        o.pushKV("age", (int64_t)(h - (int)src.value()));
-    } else {
-        o.pushKV("priceMicroUsd", NullUniValue);
-        o.pushKV("sourceHeight", -1);
-        o.pushKV("age", -1);
-    }
+    o.pushKV("closedVaults", (int64_t)t.closedVaults);
+    o.pushKV("claimedVaults", (int64_t)t.claimedVaults);
+    o.pushKV("unbackedCents", t.unbackedCents);
+    const Snapshot s = snap.has_value() ? snap.value() : Snapshot::Virtual();
+    o.pushKV("issuedZat", s.issuedZat);
+    o.pushKV("pFast", PriceOrNull(s.PFast()));
+    o.pushKV("pMid", PriceOrNull(s.PMid()));
+    o.pushKV("pSlow", PriceOrNull(s.PSlow()));
+    o.pushKV("pMint", PriceOrNull(s.PMint()));
+    o.pushKV("pClaim", PriceOrNull(s.PClaim()));
+    o.pushKV("sigmaMultBps", s.sigmaMultBps);
+    o.pushKV("globalRatioBps", PriceOrNull(s.GlobalRatioBps()));
+    o.pushKV("supplyCapCents", PriceOrNull(SupplyCapCents(s.issuedZat, s.PMint(), index.GetParams().supplyCapBps)));
+    o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
+    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0);
     return o;
 }
 
@@ -453,14 +386,6 @@ UniValue yed_getvault(const UniValue& params, bool fHelp)
     std::optional<VaultRecord> v = st.GetVault(out);
     if (!v.has_value()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "vault not found");
     UniValue o = VaultToJSON(out, v.value());
-    if (v->Status() == VaultStatus::ACTIVE) {
-        const int h = IndexHeight(index);
-        std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)h);
-        int errBps = snap.has_value() ? snap->errBps : 10000;
-        o.pushKV("requiredBurnCents", RequiredBurn(v->mintedCents, errBps));
-    } else if (v->Status() == VaultStatus::VOID) {
-        o.pushKV("requiredBurnCents", 0);
-    }
     o.pushKV("indexHeight", IndexHeight(index));
     return o;
 }
@@ -469,31 +394,26 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 4)
         throw std::runtime_error(
-            "yed_listvaults ( \"status\" rosterIndex count skip )\n"
-            "\nVaults, optionally filtered by status (ACTIVE|VOID|CLOSED) and roster index; paged (default count 100).\n"
-            "Also returns the number of open (ACTIVE or VOID) vaults per roster index for the rotation runbook.\n");
+            "yed_listvaults ( \"status\" count skip )\n"
+            "\nVaults, optionally filtered by status (ACTIVE|VOID|CLOSED|CLAIMED); paged (default count 100).\n");
 
     YellowbackIndex& index = EnsureIndex();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
-    int rosterIndex = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : -2;
-    int count = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 100;
-    int skip = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : 0;
+    int count = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 100;
+    int skip = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 0;
     if (count < 0 || skip < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "count and skip must be >= 0");
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     UniValue list(UniValue::VARR);
-    std::map<int, int> openPerRoster;
     int seen = 0, total = 0;
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
         if (!DeserializeRecord(raw, v)) return true;
-        if (v.IsOpen()) openPerRoster[v.rosterIndex]++;
         if (!status.empty() && status != VaultStatusName(v.Status())) return true;
-        if (rosterIndex != -2 && v.rosterIndex != rosterIndex) return true;
         total++;
         if (seen++ < skip) return true;
         if ((int)list.size() >= count) return true;
-        COutPoint out(uint256(std::vector<unsigned char>(k.begin() + 1, k.begin() + 33)), 0);
+        COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         list.push_back(VaultToJSON(out, v));
         return true;
     });
@@ -501,9 +421,6 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
     o.pushKV("height", IndexHeight(index));
     o.pushKV("total", total);
     o.pushKV("vaults", list);
-    UniValue per(UniValue::VOBJ);
-    for (const auto& kv : openPerRoster) per.pushKV(std::to_string(kv.first), kv.second);
-    o.pushKV("openVaultsPerRoster", per);
     return o;
 }
 
@@ -594,16 +511,17 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
-            "yed_estimatecollateral cents tier ( priceMicroUsd )\n"
-            "\nThe collateral (zatoshi, rounded up to 1,000) required to mint cents at tier, at the price and\n"
-            "DCA multiplier of the height the wallet would evaluate at (index tip minus the mint lag), or at\n"
-            "the given price with the current DCA.\n");
+            "yed_estimatecollateral cents lockBlocks ( pMintMicroUsd )\n"
+            "\nThe collateral (zatoshi, rounded up to 1,000) required to mint cents with a lock of lockBlocks\n"
+            "(the term class follows from it, V19) at the snapshot the wallet would reference (index tip minus\n"
+            "the ref lag), or at the given P_mint with that snapshot's sigma multiplier.\n");
 
     YellowbackIndex& index = EnsureIndex();
     int64_t cents = params[0].get_int64();
-    int tier = params[1].get_int();
+    int64_t lockBlocks = params[1].get_int64();
     const yellowback::Params& p = index.GetParams();
-    if (!p.IsValidTier(tier)) throw JSONRPCError(RPC_INVALID_PARAMETER, "tier must be 0..4");
+    const int termClass = p.ClassForLockBlocks(lockBlocks);
+    if (termClass < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "lockBlocks is in no term class");
     if (cents < p.minMint || cents > p.maxMint) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("cents must be between %d and %d", p.minMint, p.maxMint));
     }
@@ -611,37 +529,37 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     EnsureHealthy(index);
     State st(index.View());
     const int tipH = IndexHeight(index);
-    const int evalH = tipH - g_yellowbackMintLag;
-    std::optional<Snapshot> snap = evalH >= p.startHeight ? st.GetSnapshot((uint32_t)evalH) : std::nullopt;
-    std::optional<MicroUsd> price;
-    int dcaBps = snap.has_value() ? snap->dcaBps : 10000;
-    if (params.size() > 2 && !params[2].isNull()) price = params[2].get_int64();
-    else if (snap.has_value() && snap->priceDefined) price = snap->price;
+    const int refH = tipH - g_yellowbackMintLag;
+    std::optional<Snapshot> snap = SnapshotAt(st, p, refH);
+    std::optional<MicroUsd> pMint;
+    int sigmaMultBps = snap.has_value() ? snap->sigmaMultBps : p.sigmaMultMaxBps;
+    if (params.size() > 2 && !params[2].isNull()) pMint = params[2].get_int64();
+    else if (snap.has_value()) pMint = snap->PMint();
     UniValue o(UniValue::VOBJ);
     o.pushKV("cents", cents);
-    o.pushKV("tier", tier);
-    o.pushKV("ratioPct", p.tierRatioPct[tier]);
-    o.pushKV("lockBlocks", p.tierBlocks[tier]);
-    o.pushKV("evalHeight", evalH);
-    o.pushKV("dcaBps", dcaBps);
-    if (!price.has_value()) {
-        o.pushKV("priceMicroUsd", NullUniValue);
+    o.pushKV("termClass", termClass);
+    o.pushKV("lockBlocks", lockBlocks);
+    o.pushKV("refHeight", refH);
+    o.pushKV("sigmaMultBps", sigmaMultBps);
+    o.pushKV("minRatioBps", MinRatioBps(p.baseRatioBps[termClass], sigmaMultBps));
+    if (!pMint.has_value()) {
+        o.pushKV("pMint", NullUniValue);
         o.pushKV("requiredZat", NullUniValue);
-        o.pushKV("error", verdict::BAD_ORACLE_PRICE);
+        o.pushKV("error", verdict::MINT_HALTED_NO_PRICE);
         return o;
     }
-    o.pushKV("priceMicroUsd", price.value());
-    auto req = RequiredCollateralRounded(cents, p.tierRatioPct[tier], dcaBps, price.value());
+    o.pushKV("pMint", pMint.value());
+    auto req = RequiredCollateralRounded((Cents)cents, MinRatioBps(p.baseRatioBps[termClass], sigmaMultBps), pMint.value());
     if (!req.has_value()) {
         o.pushKV("requiredZat", NullUniValue);
-        o.pushKV("error", "collateral-out-of-range");
+        o.pushKV("error", verdict::MINT_UNSATISFIABLE);
         return o;
     }
     o.pushKV("requiredZat", req.value());
     o.pushKV("required", ValueFromAmount(req.value()));
-    o.pushKV("lockHeight", (int64_t)evalH + p.tierBlocks[tier] + MINT_WINDOW);
-    o.pushKV("unlockHeight", (int64_t)evalH + p.tierBlocks[tier] + MINT_WINDOW);
-    o.pushKV("expiryHeight", (int64_t)evalH + MINT_WINDOW);
+    o.pushKV("lockHeight", (int64_t)refH + lockBlocks);
+    o.pushKV("claimHeight", (int64_t)refH + lockBlocks + p.grace);
+    o.pushKV("expiryHeight", (int64_t)refH + p.refWindow);
     return o;
 }
 
@@ -650,7 +568,7 @@ UniValue yed_gethistory(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 2)
         throw std::runtime_error(
             "yed_gethistory fromHeight toHeight\n"
-            "\nPer-block snapshots (supply, collateral, price, health, DCA, ERR, mint freeze) for the range; at most 10,000 blocks.\n");
+            "\nPer-block snapshots (§3.6: tag, signal count, activation, prices, sigma, issuance, totals, halts) for the range; at most 10,000 blocks.\n");
 
     YellowbackIndex& index = EnsureIndex();
     int from = params[0].get_int();
@@ -673,8 +591,6 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_getinfo",                 &yed_getinfo,                  true  },
     { "yellowback", "yed_getstatehash",            &yed_getstatehash,             true  },
     { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
-    { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
-    { "yellowback", "yed_getprotectionstatus",     &yed_getprotectionstatus,     true  },
     { "yellowback", "yed_getvault",                &yed_getvault,                 true  },
     { "yellowback", "yed_listvaults",              &yed_listvaults,               true  },
     { "yellowback", "yed_gettxinfo",               &yed_gettxinfo,                true  },

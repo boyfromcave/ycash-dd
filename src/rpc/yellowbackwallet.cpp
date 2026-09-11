@@ -375,7 +375,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     EnsureHealthy(index);
     State st(index.View());
     const int h = IndexHeight(index);
-    std::optional<Snapshot> snap = h >= 0 ? st.GetSnapshot((uint32_t)h) : std::nullopt;
+    (void)h;
     UniValue arr(UniValue::VARR);
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
@@ -390,18 +390,17 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("collateralZat", v.collateralZat);
         o.pushKV("lockHeight", (int64_t)v.lockHeight);
         o.pushKV("unlockHeight", (int64_t)v.lockHeight);
-        o.pushKV("tier", (int)v.tier);
+        o.pushKV("claimHeight", (int64_t)v.claimHeight);
+        o.pushKV("termClass", (int)v.termClass);
         o.pushKV("mintHeight", v.mintHeight);
-        o.pushKV("rosterIndex", v.rosterIndex);
-        o.pushKV("ownerKeyId", v.ownerPubKey.GetID().GetHex());
+        o.pushKV("refHeight", v.refHeight);
+        o.pushKV("ownerKeyId", v.OwnerKey().GetID().GetHex());
         const bool active = v.Status() == VaultStatus::ACTIVE;
-        int64_t requiredBurn = 0;
-        if (active) requiredBurn = RequiredBurn(v.mintedCents, snap.has_value() ? snap->errBps : 10000);
-        o.pushKV("requiredBurnCents", requiredBurn);
-        bool priceOk = !active || (snap.has_value() && snap->priceDefined);
-        o.pushKV("canRedeem", v.IsOpen() && h >= (int)v.lockHeight && priceOk && v.rosterIndex >= 0);
+        // RED-2: the burn is exactly the debt (V20). Phase 6 fills in the fee and the payee.
+        o.pushKV("requiredBurnCents", active ? v.mintedCents : 0);
+        o.pushKV("canRedeem", v.IsOpen() && h >= (int)v.lockHeight);
         if (v.Status() == VaultStatus::VOID) o.pushKV("voidReason", v.voidReason);
-        if (v.Status() == VaultStatus::CLOSED) {
+        if (!v.IsOpen()) {
             o.pushKV("closeHeight", v.closeHeight);
             o.pushKV("closingTxid", v.closingTxid.GetHex());
             o.pushKV("burnedCents", v.burnedCents);
@@ -446,11 +445,11 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         if (received == 0 && spent == 0 && !closedMine) return true;
         std::string type;
         int64_t amount = 0;
-        if (l.type == (uint8_t)PayloadType::MINT && received > 0) { type = "mint"; amount = received; }
+        if (l.type == (uint8_t)TxLogType::MINT && received > 0) { type = "mint"; amount = received; }
         else if (closedMine) { type = "redeem"; amount = -spent; }
         else if (spent > 0 && received < spent && l.type == 0) { type = "burn"; amount = -(spent - received); }
-        else if (spent > 0 && l.type != 0 && l.verdict != verdict::TRANSFER_OK && l.verdict != verdict::REDEEM_OK) { type = "burn"; amount = -(spent - received); }
-        else if (spent > 0 && l.type == (uint8_t)PayloadType::TRANSFER) { type = "send"; amount = received - spent; }
+        else if (spent > 0 && l.type != 0 && l.verdict != verdict::OK) { type = "burn"; amount = -(spent - received); }
+        else if (spent > 0 && l.type == (uint8_t)TxLogType::TRANSFER) { type = "send"; amount = received - spent; }
         else if (spent > received) { type = "send"; amount = -(spent - received); }
         else { type = "receive"; amount = received - spent; }
         UniValue o(UniValue::VOBJ);

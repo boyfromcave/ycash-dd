@@ -28,7 +28,8 @@ bool YellowbackWallet::IsMineScript(const CScript& scriptPubKey) const
 
 bool YellowbackWallet::IsMineVault(const VaultRecord& v) const
 {
-    return v.ownerPubKey.IsValid() && wallet->HaveKey(v.ownerPubKey.GetID());
+    const CPubKey owner = v.OwnerKey();
+    return owner.IsValid() && wallet->HaveKey(owner.GetID());
 }
 
 std::vector<YedCoin> YellowbackWallet::AllCoins() const

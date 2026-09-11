@@ -2,11 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-// The index's exception boundary and start-up rules (plan §4.3, §8.3,
-// checklist items 9 and 10): an exception inside block application sets
-// the unhealthy flag and never propagates into the notifier thread; a start
-// block without the genesis anchor is refused (B9); Stop() silences later
-// deliveries (D2).
+// The index's exception boundary and start-up rules (plan §4.3, §8.3):
+// an exception inside block application sets the unhealthy flag and never
+// propagates into the notifier thread; Stop() silences later deliveries.
+// Phase 3 reshapes this file around CheckConnect/CommitConnect/UndoDisconnect.
 
 #include "yellowback/index.h"
 #include "yellowback/script.h"
@@ -25,20 +24,14 @@ namespace {
 
 yellowback::Params MakeTestParams()
 {
-    std::vector<CPubKey> keys;
-    for (int i = 0; i < 3; i++) {
-        CKey k;
-        k.MakeNewKey(true);
-        keys.push_back(k.GetPubKey());
-    }
-    return RegtestParams(1, COutPoint(uint256S("aa"), 0), RosterScript(2, SortKeys(keys)), 0);
+    return RegtestParams(1, 0, 0, 0);
 }
 
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(yellowback_index_tests, TestingSetup)
 
-BOOST_AUTO_TEST_CASE(exception_boundary_and_genesis_check)
+BOOST_AUTO_TEST_CASE(exception_boundary)
 {
     yellowback::Params params = MakeTestParams();
     YellowbackIndex index(params, pathTemp / "yellowback-test", 1 << 20, true);
@@ -71,15 +64,15 @@ BOOST_AUTO_TEST_CASE(exception_boundary_and_genesis_check)
     BOOST_CHECK_NO_THROW(index.TestChainTip(&idx1, &block, true));
     BOOST_CHECK(!index.IsHealthy());
 
-    // Fresh index: the start block must contain the genesis anchor (B9).
+    // Fresh index: the start block applies (v2 has no genesis anchor; an empty block is a valid start).
     YellowbackIndex index2(params, pathTemp / "yellowback-test2", 1 << 20, true);
     BOOST_CHECK(index2.SyncToChain());
     BOOST_CHECK_NO_THROW(index2.TestChainTip(&idx1, &block, true));
-    BOOST_CHECK(!index2.IsHealthy());
-    BOOST_CHECK(index2.UnhealthyReason().find("genesis anchor") != std::string::npos);
+    BOOST_CHECK(index2.IsHealthy());
     {
         LOCK(index2.cs_yellowback);
-        BOOST_CHECK(!index2.GetTip().has_value()); // nothing was written
+        BOOST_REQUIRE(index2.GetTip().has_value());
+        BOOST_CHECK_EQUAL(index2.GetTip()->height, 1);
     }
 
     // Stop(): later deliveries return at once and change nothing (D2).

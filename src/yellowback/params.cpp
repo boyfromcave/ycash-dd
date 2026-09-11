@@ -10,12 +10,6 @@ namespace yellowback {
 
 namespace {
 
-// v1, retained: lock tiers at 75-second blocks; ratios from ref/digibyte/src/consensus/digidollar.h:72-84.
-const int MAINNET_TIER_BLOCKS[NUM_TIERS]  = { 48, 34560, 103680, 207360, 420480 };
-const int TIER_RATIO_PCT[NUM_TIERS]       = { 1000, 500, 400, 350, 300 };
-// Regtest overrides (plan §3.1): only block counts shrink.
-const int REGTEST_TIER_BLOCKS[NUM_TIERS]  = { 48, 96, 144, 192, 240 };
-
 /** The §3.1 mainnet/testnet column. Every rule-read value is compiled in (K10). */
 void SetCommon(Params& p)
 {
@@ -69,16 +63,6 @@ void SetCommon(Params& p)
     p.payeeTiltBps   = 10000;
 
     p.enforceUntilHeight = 0;       // set per release beside startHeight (L8)
-
-    // v1, retained
-    for (int i = 0; i < NUM_TIERS; i++) {
-        p.tierBlocks[i]   = MAINNET_TIER_BLOCKS[i];
-        p.tierRatioPct[i] = TIER_RATIO_PCT[i];
-    }
-    p.rosterGrace    = BLOCKS_PER_DAY;   // 1,152 blocks (plan B21)
-    p.volCooldown    = 1728;             // 36 h, DigiByte's COOLDOWN_BLOCKS in Ycash blocks
-    p.volWindowShort = BLOCKS_PER_HOUR;
-    p.volWindowLong  = BLOCKS_PER_DAY;
 }
 
 } // namespace
@@ -93,15 +77,10 @@ Params::Params()
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
       minMint(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
-      nPenalty(0), accuracyWindow(0), payeeTiltBps(0),
-      supplyCap(0), rosterGrace(0), volCooldown(0), volWindowShort(0), volWindowLong(0)
+      nPenalty(0), accuracyWindow(0), payeeTiltBps(0)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = 0;
-    }
-    for (int i = 0; i < NUM_TIERS; i++) {
-        tierBlocks[i] = 0;
-        tierRatioPct[i] = 0;
     }
 }
 
@@ -120,8 +99,7 @@ const Params& MainParams()
         m.network = "main";
         SetCommon(m);
         m.addressVersion = { 0x1F, 0xE4 };   // renders "ye…" (D10)
-        m.supplyCap = 100000000;             // $1,000,000 v1 cap
-        // Genesis anchor: filled by the mainnet key ceremony (plan Phase 8).
+        // startHeight and enforceUntilHeight are set per release (§3.1, K10, L8; Phase 10).
         m.startHeight = 0;
         return m;
     }();
@@ -135,8 +113,7 @@ const Params& TestParams()
         t.network = "test";
         SetCommon(t);
         t.addressVersion = { 0x20, 0x07 };   // renders "yt…" (D10)
-        t.supplyCap = 100000000;
-        // Genesis anchor: filled by the testnet key ceremony (plan Phase 7).
+        // startHeight and enforceUntilHeight are set per release (Phase 9).
         t.startHeight = 0;
         return t;
     }();
@@ -178,31 +155,16 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.sigmaRefBps        = sigmaRefBps;
     r.supplyCapBps       = supplyCapBps;
     r.enforceUntilHeight = enforceUntil;
-    // v1, retained
-    for (int i = 0; i < NUM_TIERS; i++) r.tierBlocks[i] = REGTEST_TIER_BLOCKS[i];
-    r.rosterGrace = 48; r.volCooldown = 96; r.volWindowShort = 48; r.volWindowLong = 96;
     return r;
 }
 
-/** v1, retained. */
-Params RegtestParams(int startHeight, const COutPoint& genesisAnchor, const CScript& genesisRosterScript, Cents supplyCap)
+const Params& SelectParams(const std::vector<Params>& sets, int height)
 {
-    Params r;
-    r.network = "regtest";
-    SetCommon(r);
-    r.addressVersion = { 0x20, 0x02 };       // renders "yr…" (D10)
-    for (int i = 0; i < NUM_TIERS; i++) {
-        r.tierBlocks[i] = REGTEST_TIER_BLOCKS[i];
+    const Params* best = nullptr;
+    for (const Params& p : sets) {
+        if (p.startHeight <= height && (!best || p.startHeight >= best->startHeight)) best = &p;
     }
-    r.rosterGrace    = 48;
-    r.volCooldown    = 96;
-    r.volWindowShort = 48;
-    r.volWindowLong  = 96;                   // plan G5
-    r.supplyCap      = supplyCap;
-    r.startHeight    = startHeight;
-    r.genesisAnchor  = genesisAnchor;
-    r.genesisRosterScript = genesisRosterScript;
-    return r;
+    return best ? *best : sets.front();
 }
 
 const Params& ParamsForNetwork(const std::string& networkId)
@@ -210,7 +172,7 @@ const Params& ParamsForNetwork(const std::string& networkId)
     if (networkId == "main") return MainParams();
     if (networkId == "test") return TestParams();
     if (networkId == "regtest") {
-        static Params r = RegtestParams(0, COutPoint(), CScript(), 0);
+        static Params r = RegtestParams(0, 0, 0, 0);
         return r;
     }
     throw std::runtime_error("yellowback: unknown network " + networkId);

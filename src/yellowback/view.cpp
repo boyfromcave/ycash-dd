@@ -8,6 +8,8 @@
 #include "crypto/sha256.h"
 #include "streams.h"
 
+#include <algorithm>
+
 namespace yellowback {
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,8 @@ void OverlayStateView::Commit()
 namespace keys {
 
 const char PREFIX_UNDO = 'U';
+const char PREFIX_REJECTED = 'X';
+const char PREFIX_TXLOG = 'L';
 
 static std::string U32BE(uint32_t v)
 {
@@ -98,18 +102,36 @@ static std::string OutPointKey(char prefix, const COutPoint& out)
     return s;
 }
 
+static std::string HashKey(char prefix, const uint256& hash)
+{
+    return std::string(1, prefix) + std::string((const char*)hash.begin(), 32);
+}
+
 std::string Tip() { return "T"; }
-std::string Anchor() { return "A"; }
-std::string RosterCount() { return "Rc"; }
-std::string Roster(uint32_t index) { return "R" + U32BE(index); }
-std::string Price(uint32_t height) { return "P" + U32BE(height); }
+std::string Tag(uint32_t height) { return "Q" + U32BE(height); }
+std::string Judgement(uint32_t height) { return "J" + U32BE(height); }
+std::string Activation() { return "C"; }
 std::string Vault(const COutPoint& out) { return OutPointKey('V', out); }
 std::string Token(const COutPoint& out) { return OutPointKey('K', out); }
-std::string TxLog(const uint256& txid) { return "L" + std::string((const char*)txid.begin(), 32); }
+std::string TxLog(const uint256& txid) { return HashKey(PREFIX_TXLOG, txid); }
 std::string Snapshot(uint32_t height) { return "S" + U32BE(height); }
 std::string Totals() { return "G"; }
-std::string Volatility() { return "O"; }
-std::string Undo(const uint256& blockHash) { return std::string(1, PREFIX_UNDO) + std::string((const char*)blockHash.begin(), 32); }
+std::string Rejected(const uint256& blockHash) { return HashKey(PREFIX_REJECTED, blockHash); }
+std::string Params() { return "P"; }
+std::string Undo(const uint256& blockHash) { return HashKey(PREFIX_UNDO, blockHash); }
+
+uint256 OutPointHashOf(const std::string& key)
+{
+    if (key.size() < 33) return uint256();
+    return uint256(std::vector<unsigned char>(key.begin() + 1, key.begin() + 33));
+}
+
+uint32_t OutPointIndexOf(const std::string& key)
+{
+    if (key.size() < 37) return 0;
+    return ((uint32_t)(unsigned char)key[33] << 24) | ((uint32_t)(unsigned char)key[34] << 16) |
+           ((uint32_t)(unsigned char)key[35] << 8) | (uint32_t)(unsigned char)key[36];
+}
 
 } // namespace keys
 
@@ -137,22 +159,32 @@ bool DeserializeRecord(const std::string& s, T& t)
 }
 
 // Explicit instantiations for every record type.
-#define YD_RECORD(T) \
+#define YB_RECORD(T) \
     template std::string SerializeRecord<T>(const T&); \
     template bool DeserializeRecord<T>(const std::string&, T&);
-YD_RECORD(TipRecord)
-YD_RECORD(AnchorRecord)
-YD_RECORD(RosterRecord)
-YD_RECORD(VaultRecord)
-YD_RECORD(TokenRecord)
-YD_RECORD(TxLogRecord)
-YD_RECORD(Totals)
-YD_RECORD(Volatility)
-YD_RECORD(Snapshot)
-YD_RECORD(UndoRecord)
-YD_RECORD(int64_t)
-YD_RECORD(uint32_t)
-#undef YD_RECORD
+YB_RECORD(TipRecord)
+YB_RECORD(TagRecord)
+YB_RECORD(Judgement)
+YB_RECORD(Activation)
+YB_RECORD(VaultRecord)
+YB_RECORD(TokenRecord)
+YB_RECORD(TxLogRecord)
+YB_RECORD(Totals)
+YB_RECORD(Snapshot)
+YB_RECORD(RejectedRecord)
+YB_RECORD(ParamsRecord)
+YB_RECORD(UndoRecord)
+#undef YB_RECORD
+
+const char* ActivationStatusName(ActivationStatus s)
+{
+    switch (s) {
+    case ActivationStatus::SIGNALING: return "SIGNALING";
+    case ActivationStatus::LOCKED_IN: return "LOCKED_IN";
+    case ActivationStatus::ACTIVE: return "ACTIVE";
+    }
+    return "UNKNOWN";
+}
 
 const char* VaultStatusName(VaultStatus s)
 {
@@ -160,8 +192,33 @@ const char* VaultStatusName(VaultStatus s)
     case VaultStatus::ACTIVE: return "ACTIVE";
     case VaultStatus::VOID: return "VOID";
     case VaultStatus::CLOSED: return "CLOSED";
+    case VaultStatus::CLAIMED: return "CLAIMED";
     }
     return "UNKNOWN";
+}
+
+const char* TxLogTypeName(TxLogType t)
+{
+    switch (t) {
+    case TxLogType::NONE: return "NONE";
+    case TxLogType::MINT: return "MINT";
+    case TxLogType::TRANSFER: return "TRANSFER";
+    case TxLogType::REDEEM: return "REDEEM";
+    }
+    return "UNKNOWN";
+}
+
+std::vector<std::string> HaltMaskNames(uint32_t mask)
+{
+    static const std::pair<uint32_t, const char*> names[] = {
+        { HALT_NOT_ACTIVE, "NOT_ACTIVE" }, { HALT_NO_PRICE, "NO_PRICE" }, { HALT_PARTICIPATION, "PARTICIPATION" },
+        { HALT_GLOBAL_RATIO, "GLOBAL_RATIO" }, { HALT_DIVERGENCE, "DIVERGENCE" }, { HALT_ENFORCEMENT, "ENFORCEMENT" },
+    };
+    std::vector<std::string> out;
+    for (const auto& n : names) {
+        if (mask & n.first) out.push_back(n.second);
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,54 +255,25 @@ std::optional<TipRecord> State::GetTip() const
     return t;
 }
 
-AnchorRecord State::GetAnchor() const
+std::optional<TagRecord> State::GetTag(uint32_t height) const
 {
-    AnchorRecord a;
-    if (!Get(keys::Anchor(), a)) return AnchorRecord();
+    TagRecord t;
+    if (!Get(keys::Tag(height), t)) return std::nullopt;
+    return t;
+}
+
+std::optional<Judgement> State::GetJudgement(uint32_t height) const
+{
+    Judgement j;
+    if (!Get(keys::Judgement(height), j)) return std::nullopt;
+    return j;
+}
+
+Activation State::GetActivation() const
+{
+    Activation a;
+    if (!Get(keys::Activation(), a)) return Activation();
     return a;
-}
-
-std::vector<RosterRecord> State::Rosters() const
-{
-    std::vector<RosterRecord> out;
-    uint32_t count = 0;
-    if (!Get(keys::RosterCount(), count)) return out;
-    for (uint32_t i = 0; i < count; i++) {
-        RosterRecord r;
-        if (Get(keys::Roster(i), r)) out.push_back(r);
-    }
-    return out;
-}
-
-void State::AppendRoster(const RosterRecord& r)
-{
-    uint32_t count = 0;
-    Get(keys::RosterCount(), count);
-    Put(keys::Roster(count), r);
-    Put(keys::RosterCount(), (uint32_t)(count + 1));
-}
-
-std::optional<MicroUsd> State::GetPriceAt(uint32_t height) const
-{
-    int64_t p;
-    if (!Get(keys::Price(height), p)) return std::nullopt;
-    return p;
-}
-
-std::optional<uint32_t> State::PriceSourceHeight(uint32_t height) const
-{
-    for (uint32_t h = height;; h--) {
-        if (Has(keys::Price(h))) return h;
-        if (h == 0 || height - h >= (uint32_t)PRICE_MAX_AGE) break;
-    }
-    return std::nullopt;
-}
-
-std::optional<MicroUsd> State::PriceInEffect(uint32_t height) const
-{
-    auto h = PriceSourceHeight(height);
-    if (!h.has_value()) return std::nullopt;
-    return GetPriceAt(h.value());
 }
 
 std::optional<VaultRecord> State::GetVault(const COutPoint& out) const
@@ -279,32 +307,56 @@ std::optional<Snapshot> State::GetSnapshot(uint32_t height) const
 Totals State::GetTotals() const
 {
     Totals t;
-    Get(keys::Totals(), t);
+    if (!Get(keys::Totals(), t)) return Totals();
     return t;
 }
 
-Volatility State::GetVolatility() const
+std::optional<RejectedRecord> State::GetRejected(const uint256& blockHash) const
 {
-    Volatility v;
-    Get(keys::Volatility(), v);
-    return v;
+    RejectedRecord r;
+    if (!Get(keys::Rejected(blockHash), r)) return std::nullopt;
+    return r;
 }
 
-uint256 StateHash(const StateView& view)
+std::optional<ParamsRecord> State::GetParamsRecord() const
+{
+    ParamsRecord p;
+    if (!Get(keys::Params(), p)) return std::nullopt;
+    return p;
+}
+
+uint256 StateHash(const StateView& view, const std::string& network)
 {
     CSHA256 hasher;
-    view.Iterate("", [&](const std::string& k, const std::string& v) {
-        if (!k.empty() && k[0] == keys::PREFIX_UNDO) return true;
-        uint32_t kl = k.size(), vl = v.size();
-        hasher.Write((const unsigned char*)&kl, 4);
+    auto feed = [&](const std::string& k, const std::string& v) {
         hasher.Write((const unsigned char*)k.data(), k.size());
-        hasher.Write((const unsigned char*)&vl, 4);
         hasher.Write((const unsigned char*)v.data(), v.size());
-        return true;
-    });
-    uint256 out;
-    hasher.Finalize(out.begin());
-    return out;
+    };
+    // Tip first; a zero tip when nothing has been applied yet.
+    {
+        std::string raw;
+        if (!view.Read(keys::Tip(), raw)) {
+            TipRecord t;
+            t.network = network;
+            raw = SerializeRecord(t);
+        }
+        feed(keys::Tip(), raw);
+    }
+    // Then the tables in the §3.6 order; each Iterate visits its keys in ascending order,
+    // which is ascending height (big-endian keys) or ascending outpoint.
+    for (const char* prefix : { "Q", "J", "C", "V", "K", "G", "S", "P" }) {
+        view.Iterate(prefix, [&](const std::string& k, const std::string& v) {
+            feed(k, v);
+            return true;
+        });
+    }
+    // uint256::GetHex() renders bytes reversed; store the digest reversed so the hex the RPC
+    // prints (and the pinned golden hex) is the natural SHA-256 digest order the Python model uses.
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(digest);
+    std::vector<unsigned char> reversed(digest, digest + CSHA256::OUTPUT_SIZE);
+    std::reverse(reversed.begin(), reversed.end());
+    return uint256(reversed);
 }
 
 } // namespace yellowback

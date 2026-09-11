@@ -76,7 +76,8 @@ struct BuiltTx
  * `from` (I2): "" = any confirmed transparent output; an s1… address = that address's
  * outputs only; a ys1… address = its Sapling notes in the same transaction (Sapling shape).
  */
-BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& reservekey, const std::string& from = "");
+/** Phase 2 shim: throws until Phase 6 lands the v2 builder (the v1 builder read deleted tier tables and rosters). */
+BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int lockBlocks, CReserveKey& reservekey, const std::string& from = "");
 
 /** recipients: P2PKH script -> cents. At most 14 recipients (one assignment slot is kept for change). */
 BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients, CReserveKey& reservekey);
@@ -86,6 +87,7 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
  * Returns the transaction UNSIGNED: call FinishSapling() first for the Sapling shape (no lock
  * held), then SignRedeem() under cs_main + cs_wallet for either shape.
  */
+/** Phase 2 shim: throws until Phase 6 lands the v2 builder (owner path, burn = debt, fee output, VOID release). */
 BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to = "");
 
 /** Sapling shape: run TransactionBuilder::Build() (proofs, binding signature). No lock may be held. */

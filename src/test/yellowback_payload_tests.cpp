@@ -134,8 +134,10 @@ BOOST_AUTO_TEST_CASE(mint1_malformed_table)
         { "mint_short_by_one",   "59420201" + mintBody.substr(0, mintBody.size() - 2), false },
         { "mint_no_feevout",     "59420201" "00" "10270000" "e8030000" "b6030000" + KEYHEX, false },   // the v1 length
         { "mint_trailing",       "59420201" + mintBody + "00", false },
-        { "mint_key_prefix_04",  "59420201" "00" "10270000" "e8030000" "b6030000" "04" + KEYHEX.substr(2) + "ff", false },
-        { "mint_key_prefix_01",  "59420201" "00" "10270000" "e8030000" "b6030000" "01" + KEYHEX.substr(2) + "ff", false },
+        // Any 33 bytes decode as the owner key (the codec fixes the shape; MINT-3 gives bad-mint-owner-key
+        // and a VOID vault records the bytes verbatim, SERIALISATION.md §3 C).
+        { "mint_key_prefix_04",  "59420201" "00" "10270000" "e8030000" "b6030000" "04" + KEYHEX.substr(2) + "ff", true },
+        { "mint_key_prefix_01",  "59420201" "00" "10270000" "e8030000" "b6030000" "01" + KEYHEX.substr(2) + "ff", true },
         { "mint_key_prefix_03",  "59420201" "00" "10270000" "e8030000" "b6030000" "03" + KEYHEX.substr(2) + "ff", true },
         { "transfer_empty",      "59420202" "00", true },
         { "transfer_short",      "59420202" "01" "01640000", false },
@@ -337,33 +339,15 @@ BOOST_AUTO_TEST_CASE(tx0_find_payload_in_transaction)
 }
 
 // ---------------------------------------------------------------------------
-// v1, retained (deleted with the version-1 branches in Phase 2). V23 says a
-// v2 node ignores version 1; until state.cpp migrates, version 1 still decodes
-// so the prototype's state tests keep running. This case pins that transitional
-// behaviour so its removal is a deliberate, visible change.
-
-BOOST_AUTO_TEST_CASE(v1_retained_codec)
+// V23: version 1 (the prototype's layout, PRICE 0x10 included) is non-Yellowback.
+// Rule: MINT-1
+BOOST_AUTO_TEST_CASE(version1_is_non_yellowback)
 {
-    CPubKey owner(Hex(KEYHEX));
     Payload p;
-    BOOST_CHECK(DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX), p));
-    BOOST_CHECK_EQUAL(p.version, PAYLOAD_VERSION_V1);
-    BOOST_CHECK_EQUAL(p.tier, 0);
-    BOOST_CHECK_EQUAL(p.evalHeight, 950u);
-    BOOST_CHECK(p == Payload::Mint(0, 10000, 1000, 950, owner));
-    BOOST_CHECK(EncodePayload(Payload::Mint(0, 10000, 1000, 950, owner)) == Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX));
-    BOOST_CHECK(DecodePayload(Hex("59420110" "50c3000000000000"), p));
-    BOOST_CHECK(p.type == PayloadType::PRICE);
-    BOOST_CHECK_EQUAL(p.priceMicroUsd, 50000u);
-    BOOST_CHECK(EncodePayload(Payload::Price(50000)) == Hex("59420110" "50c3000000000000"));
-    BOOST_CHECK(DecodePayload(Hex("59420103" "01" "0139300000"), p));
-    BOOST_CHECK(p == Payload::Redeem({ Assignment(1, 12345) }));
-    // The v1 MINT length is not a v2 MINT and vice versa.
-    BOOST_CHECK(!DecodePayload(Hex("59420201" "00" "10270000" "e8030000" "b6030000" + KEYHEX), p));
-    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX + "ff"), p));
-    // v1 REDEEM has no head; a v2 REDEEM body under version 1 is a 15-assignment shape at best.
-    BOOST_CHECK(!DecodePayload(Hex("59420103" "b6030000" "ff" "00"), p));
-    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::PRICE)), "price");
+    BOOST_CHECK(!DecodePayload(Hex("59420101" "00" "10270000" "e8030000" "b6030000" + KEYHEX), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420110" "50c3000000000000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420103" "01" "0139300000"), p));
+    BOOST_CHECK(!DecodePayload(Hex("59420210" "50c3000000000000"), p));   // 0x10 under version 2: reserved
 }
 
 BOOST_AUTO_TEST_SUITE_END()

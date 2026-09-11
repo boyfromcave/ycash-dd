@@ -417,12 +417,12 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-yellowback", _("Enable the Yellowback overlay index and yed_* RPCs (requires -experimentalfeatures; incompatible with -prune)"));
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
-    strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_MINT_EVAL_LAG, yellowback::MAX_MINT_EVAL_LAG));
+    strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
     if (showDebug) {
-        strUsage += HelpMessageOpt("-yellowbackstartheight=<h>", "Yellowback start height (regtest only; with -yellowbackgenesisanchor and -yellowbackgenesisroster)");
-        strUsage += HelpMessageOpt("-yellowbackgenesisanchor=<txid:n>", "Yellowback genesis anchor outpoint (regtest only)");
-        strUsage += HelpMessageOpt("-yellowbackgenesisroster=<hex>", "Yellowback genesis roster redeem script (regtest only)");
-        strUsage += HelpMessageOpt("-yellowbacksupplycap=<cents>", "Yellowback supply cap override, 0 = none (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbackstartheight=<h>", "Yellowback start height (regtest only; required with -yellowback)");
+        strUsage += HelpMessageOpt("-yellowbacksigmaref=<bps>", "Yellowback SIGMA_REF_BPS override, 0 = multiplier fixed at 1 (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacksupplycapbps=<bps>", "Yellowback supply cap as bps of market cap, 0 = none (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbackenforceuntil=<h>", "Yellowback enforcement sunset height, 0 = none (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -1135,9 +1135,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (yellowback::g_yellowbackFee < yellowback::DEFAULT_YELLOWBACK_FEE) {
             return InitError(strprintf(_("-yellowbackfee must be at least %d zatoshi."), yellowback::DEFAULT_YELLOWBACK_FEE));
         }
-        yellowback::g_yellowbackMintLag = GetArg("-yellowbackmintlag", yellowback::DEFAULT_MINT_EVAL_LAG);
-        if (yellowback::g_yellowbackMintLag < 0 || yellowback::g_yellowbackMintLag > yellowback::MAX_MINT_EVAL_LAG) {
-            return InitError(strprintf(_("-yellowbackmintlag must be between 0 and %d."), yellowback::MAX_MINT_EVAL_LAG));
+        yellowback::g_yellowbackMintLag = GetArg("-yellowbackmintlag", yellowback::DEFAULT_REF_LAG);
+        if (yellowback::g_yellowbackMintLag < 0 || yellowback::g_yellowbackMintLag > yellowback::MAX_REF_LAG) {
+            return InitError(strprintf(_("-yellowbackmintlag must be between 0 and %d."), yellowback::MAX_REF_LAG));
         }
         yellowback::Params yellowbackParams;
         auto yellowbackErr = yellowback::ParamsFromArgs(chainparams.NetworkIDString(), yellowbackParams);
@@ -1145,9 +1145,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(yellowbackErr.value());
         }
         if (!yellowbackParams.IsConfigured()) {
-            return InitError(_("Yellowback has no genesis anchor for this network yet."));
+            return InitError(_("Yellowback has no start height for this network yet."));
         }
-    } else if (mapArgs.count("-yellowbackstartheight") || mapArgs.count("-yellowbackgenesisanchor") || mapArgs.count("-yellowbackgenesisroster") || mapArgs.count("-yellowbacksupplycap") || mapArgs.count("-reindex-yellowback")) {
+    } else if (mapArgs.count("-yellowbackstartheight") || mapArgs.count("-yellowbacksigmaref") || mapArgs.count("-yellowbacksupplycapbps") || mapArgs.count("-yellowbackenforceuntil") || mapArgs.count("-reindex-yellowback")) {
         return InitError(_("Yellowback options require -yellowback."));
     }
 

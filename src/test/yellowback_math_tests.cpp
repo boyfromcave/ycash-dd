@@ -380,26 +380,4 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_THROW(ParamsForNetwork("nope"), std::runtime_error);
 }
 
-// ---------------------------------------------------------------------------
-// v1, retained: the prototype's tables are still linked (state.cpp uses them
-// until Phase 2). These cases go with the symbols.
-
-BOOST_AUTO_TEST_CASE(v1_retained_tables)
-{
-    BOOST_CHECK_EQUAL(Health(1000, 1000 * COIN, 50000), 500);
-    BOOST_CHECK_EQUAL(Health(1000, 1000 * COIN, std::nullopt), 0);
-    BOOST_CHECK_EQUAL(DcaBps(150), 10000);
-    BOOST_CHECK_EQUAL(DcaBps(109), 20000);
-    BOOST_CHECK_EQUAL(ErrBps(100), 10000);
-    BOOST_CHECK_EQUAL(ErrBps(84), 8000);
-    BOOST_CHECK_EQUAL(RequiredBurn(10000, 8000), 12500);
-    BOOST_CHECK_EQUAL(RequiredCollateral(1000, 500, 10000, 50000).value(), 1000 * COIN);
-    BOOST_CHECK_EQUAL(RequiredCollateralRounded(100, 300, 10000, 70000).value(), 4285715000LL);
-    BOOST_CHECK(!RequiredCollateral(MainParams().maxMint, MainParams().tierRatioPct[0], 20000, PRICE_MIN).has_value());
-    BOOST_CHECK(VolatilityBreach(120000, 100000, VOL_1H_BPS));
-    Params r = RegtestParams(150, COutPoint(uint256S("01"), 0), CScript() << OP_1, 0);
-    BOOST_CHECK(r.IsConfigured());
-    BOOST_CHECK_EQUAL(r.tierBlocks[4], 240);
-}
-
 BOOST_AUTO_TEST_SUITE_END()
