@@ -372,6 +372,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             assert_equal(self.nodes[i].yed_getinfo()['enforcing'], True)
         self.cp('active')
 
+        self.rejected_hashes = []
         self.vaults = []
         for _ in range(8):
             self.vaults.append(self.mint())
@@ -461,7 +462,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_same_statehash([self.nodes[i] for i in ENFORCING + [OBSERVER]], 'after the reorg')
         assert_equal(self.nodes[USER].yed_getvault(v['txid'])['status'], 'ACTIVE')
         assert_banscore_zero(self.nodes)
-        self.rejected_hashes = [blockhash]
+        self.rejected_hashes.append(blockhash)
 
     # ------------------------------------------------------------------ case 2
 
@@ -1157,8 +1158,14 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         blockhash, _ = self.stock_block_with(bad)
         self.nodes[STOCK].generate(2)
         sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
-        self.advance_clock(2 * 24 * 60 * 60)       # 2 * nMaxTipAge: every tip is now stale
-        self.restart(pool)                          # the IBD latch is reset by the restart
+        # The plan says advance_clock(2 * nMaxTipAge).  Doing that stamps every later block with
+        # a timestamp two days ahead of the real clock, and the *next* restart of any node then
+        # aborts in VerifyDB ("the block database contains a block which appears to be from the
+        # future" -- setmocktime is only applied after startup), which killed node 1 later in the
+        # script.  -maxtipage=0 puts the node in exactly the state clause 2 tests -- its tip is
+        # always older than nMaxTipAge, so IsInitialBlockDownload() is true -- and leaves the
+        # chain's timestamps alone.  (mapping.md 13.8)
+        self.restart(pool, ['-maxtipage=0'])        # the IBD latch is reset by the restart
         node = self.nodes[pool]
         self.rejoin(pool, STOCK)
         deadline = time.time() + 120
@@ -1176,6 +1183,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_banscore_zero([node])
         print('    accepted in IBD without a rejection or a suppression record')
         self.catchup_recover(pool, blockhash)
+        self.restart(pool)                          # out of IBD again for the cases that follow
+        self.cp('node %d back out of IBD' % pool, ENFORCING)
 
     # ------------------------------------------------------------------ case 9
 

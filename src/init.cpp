@@ -1231,7 +1231,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     bool fDisableWallet = GetBoolArg("-disablewallet", false);
     if (!fDisableWallet) {
         RegisterWalletRPCCommands(tableRPC);
-        RegisterYellowbackWalletRPCCommands(tableRPC);
+        // as for the node-context commands (rpc/yellowback.cpp): a node without -yellowback
+        // shows the v4.5.0 RPC surface exactly (plan section 8.3)
+        if (fExperimentalYellowback) RegisterYellowbackWalletRPCCommands(tableRPC);
     }
 #endif
 
