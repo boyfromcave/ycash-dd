@@ -1,4 +1,4 @@
-# Ycash Yellowback (YED) — node guide
+# Ycash Yellowback (YED) — user guide
 
 Ycash Yellowback (YED) is a decentralized, over-collateralised US-dollar stablecoin **overlay** on
 Ycash. **Yellowback v2 is a miner-enforced soft fork** (plan §1): Tier 1 mining policy plus one
@@ -12,42 +12,41 @@ overlay: ordinary Ycash v4 transactions, one `OP_RETURN` payload, a self-contain
 
 The normative protocol is `doc/yellowback-spec.md` (§3 of the workspace plan, published verbatim
 by `make spec`); the design record, the decisions and the phase plan are the workspace's
-`docs/plans/yellowback-v2-development-plan.md`. This file is the user-facing node guide.
+`docs/plans/yellowback-v2-development-plan.md`; the RPC surface is `doc/yellowback-rpc.md`; what
+a mining pool runs is `doc/yellowback-mining.md`. This file is the user-facing guide to the node
+and its wallet commands.
 
-## Status
+## How it works
 
-| Phase | State |
-|---|---|
-| 0 — branch `feature/yellowback-sf`, strip the federation, re-baseline | node side done (this tree); wallet side and workspace manifest in the same series |
-| 1 — pure library (params, math, tag, payload, script) | done (this tree) |
-| 2 — state machine and view (v2 rules, `EvaluateBlock`) | done (this tree; the 8 CPU-hour fuzz run is the Linux jobs') |
-| 3 — index hooks, node RPCs, `rpcversion 2` | not started |
-| 4 — mining policy (template filter, coinbase tag) | not started |
-| 5 — enforcement (the `main.cpp` hook), devnet on the v2 topology | not started |
-| 6 — wallet RPCs (`yed_mint`, `yed_redeem`, `yed_claim`, `yed_sweep`) | not started |
-| 7 — quote agent (`contrib/yellowback/`) | in progress (built beside the prototype's coordinator) |
-| 7b — YecWallet screens | not started |
-| 8–10 — hardening, testnet, mainnet | not started |
+- **A Yellowback is a vault.** `yed_mint` locks YEC in a pay-to-script-hash output whose script
+  says: *until the lock height nobody spends this; from the lock height the minter's key can; from
+  the claim height (lock + grace) anyone can.* It issues the minted YED to the minter as a
+  transparent output carrying a small `OP_RETURN` payload. Ycash consensus enforces the lock and
+  the owner key; nothing else about Yellowback is consensus.
+- **YED moves like YEC.** `yed_send` builds an ordinary transparent transaction whose payload
+  assigns cents to outputs; every Yellowback-aware node keeps the same ledger of who holds what
+  (`yed_getbalance`, `yed_listunspent`). Spending a YED output with a plain YEC command **burns**
+  the YED it carries; the wallet locks its YED outputs so that cannot happen by accident.
+- **Redemption burns the debt.** `yed_redeem` at or after the lock height burns the vault's minted
+  cents, pays an enforcement fee to a pool that quoted recently, and returns the collateral.
+  Spending the vault *without* that burn is the one thing the enforcing pools reject.
+- **Underwater vaults can be claimed.** After the claim height anyone holding enough YED can
+  `yed_claim` a vault whose collateral is worth less than its debt at the claim price, burning that
+  YED (`yed_listclaimable` lists them).
+- **Prices come from pools.** Every pool running the module tags its coinbase with a YEC/USD quote
+  from its own price agent; the mint price is the minimum of three rolling medians (8, 24 and 64
+  blocks on regtest; longer on mainnet) and the claim price the maximum of the two longer ones. No
+  price is defined until enough blocks in a window carry quotes, and minting is refused while any
+  halt holds (`yed_getstats.mintingAllowed`, `halts`).
+- **Activation is by signalling.** Pools set a signal bit in the same tag; once 75 % of a window
+  signal the rules lock in and one window later they are active (`yed_getactivation`). Before that
+  the module only tags, filters and accounts. Minting is impossible before activation.
+- **Fees pay the enforcers.** Mints, redemptions and claims pay a fee (the larger of a flat minimum
+  and a few basis points of the collateral) to a pool that published a quote in the `payeeWindow`
+  blocks up to the transaction's reference height (100 on mainnet, 10 on regtest); the wallet picks the payee, avoiding pools whose quotes strayed
+  from their peers'.
 
-## Federation prototype, being replaced by phase
-
-Everything below this line describes the **federation prototype, being replaced by phase**: the
-code on this branch is still the prototype's overlay (a k-of-n federation script in the vault,
-anchor-chain PRICE transactions, DCA/ERR/volatility protections), minus the federation itself,
-which Phase 0 removed from the node. Until Phase 6 lands the v2 wallet flows:
-
-- minting, sending and the index work as before on regtest, with the price published by the test
-  harness (`qa/rpc-tests/test_framework/yellowback_util.py: publish_price`) instead of the
-  removed `yed_createpricetx`;
-- **redemption is out of service**: `yed_redeem` still builds and owner-signs the v1 redemption,
-  but the vault script needs the retired federation's signatures, which no node can add
-  (`yed_cosignredeem`, `yed_submitredeem`, `yed_abortredeem` are gone); the functional tests add
-  them from the roster nodes' keys in Python (`cosign_and_submit`);
-- `yed_getroster` is gone (`yed_getinfo.rosterIndex` remains until Phase 3); the coordinator's
-  price rounds, the `/cosign` endpoint, the `yellowback-redeem` client and the one-laptop devnet
-  are out of service (see `contrib/yellowback/README.md`).
-
-### Enabling
+## Enabling
 
 ```
 experimentalfeatures=1
@@ -55,57 +54,101 @@ yellowback=1
 ```
 
 `-yellowback` refuses to start with `-prune` (the index rebuilds from blocks on disk). Other
-options: `-reindex-yellowback` (wipe and rebuild the index), `-yellowbackfee=<zat>` (flat fee, minimum
-1000), `-yellowbackmintlag=<blocks>` (default 2), `-debug=yellowback`. Regtest additionally takes
-`-yellowbackstartheight`, `-yellowbackgenesisanchor`, `-yellowbackgenesisroster` (all three together,
-until Phase 3 replaces them) and `-yellowbacksupplycap`.
+options: `-reindex-yellowback` (wipe and rebuild the index), `-yellowbackfee=<zat>` (the network
+fee of every Yellowback transaction, minimum 1000), `-yellowbackmintlag=<blocks>` (default 2),
+`-yellowbackpreferredpayee=<s1…>` (where this wallet's own transactions pay their enforcement fee
+when that pool is eligible), `-debug=yellowback`. The mining-side options (`-yellowbackpayoutaddress`,
+`-yellowbacksignal`, `-yellowbackenforce`, `-yellowbackquotemaxage`, …) are in
+`doc/yellowback-mining.md`. Regtest additionally takes `-yellowbackstartheight`,
+`-yellowbacksigmaref`, `-yellowbacksupplycapbps` and `-yellowbackenforceuntil`.
 
-### Using Yellowback from `ycash-cli`
+## Using Yellowback from `ycash-cli`
 
-Every amount is in **cents** (`10000` = $100.00). The node must have caught its index up
-(`yed_getinfo` → `synced: true`, `healthy: true`) before any of these work.
+Every amount is in **cents** (`10000` = $100.00); prices are in micro-USD per YEC (`2000000` =
+$2.00). The node must have caught its index up (`yed_getinfo` → `healthy: true`, `height` at the
+chain tip) before any of these work.
 
 ```
-ycash-cli yed_getinfo                       # index height, synced, healthy, anchor, roster index
-ycash-cli yed_getstats                      # supply, collateral, price, health, DCA, ERR, freeze
-ycash-cli yed_getprotectionstatus           # the three protection systems in one view
+ycash-cli yed_getinfo                       # index height, healthy, enforcing, activation, abandoned, miner, params
+ycash-cli yed_getstats                      # supply, collateral, prices, halts, mintingAllowed
+ycash-cli yed_getprice                      # the three medians and their fill
+ycash-cli yed_getactivation                 # signaling / locked_in / active, signalCount
 ycash-cli yed_getnewaddress                 # a YED address (ye… on mainnet)
 ycash-cli yed_getbalance
-ycash-cli yed_estimatecollateral 10000 1    # YEC needed now to mint $100 at tier 1 (30 days)
-ycash-cli yed_mint 10000 1                  # mint; back up wallet.dat afterwards
-ycash-cli yed_mint 10000 1 ys1...           # the same, funded from that Sapling address in one transaction
-ycash-cli yed_mint 10000 1 s1...            # ... or from that transparent address only
-ycash-cli yed_listpositions                 # your vaults: status, unlock height, required burn, canRedeem
+ycash-cli yed_estimatecollateral 10000 48   # YEC needed now to mint $100.00 with a 48-block lock (class A on regtest)
+ycash-cli yed_mint 10000 48                 # mint; back up wallet.dat afterwards
+ycash-cli yed_mint 10000 48 ys1…            # the same, funded from that Sapling address in one transaction
+ycash-cli yed_listpositions                 # your vaults: status, lockHeight, claimHeight, canRedeem, canSweep, sweepBefore
 ycash-cli yed_send ye… 2500                 # send $25.00
+ycash-cli yed_redeem <vaultTxid>            # burn the debt, pay the fee, take the collateral back (a VOID vault: release, no burn)
+ycash-cli yed_listclaimable                 # underwater vaults past their claim height
+ycash-cli yed_claim <vaultTxid>             # claim one with your own YED
 ycash-cli yed_listtransactions
 ```
 
-A mint locks YEC in a vault until the tier's unlock height. The collateral requirement is fixed at
-the moment you sign (it is evaluated at the index tip minus two blocks), so what `yed_mint` reports
-is what the vault holds. Minting is refused when the system health is below 100 % (ERR), while
-minting is frozen after a volatility breach, when no price is in effect, or when the supply cap
-has no room; `yed_getprotectionstatus.mintingAllowed` says which.
+A mint commits to a reference height two blocks below the tip; the collateral requirement is fixed
+there (it is what `yed_mint` reports). A mint whose reference snapshot is not ACTIVE or whose
+collateral is short at that snapshot is **VOID**: the YED it would have issued never exists and the
+collateral is released by its owner with `yed_redeem` at the lock height (no burn, no fee). The
+wallet refuses to build a mint that would be VOID (`mintpol-*` identifiers in `doc/yellowback-rpc.md`).
 
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
 them by accident; `lockunspent true` on one of them removes that protection.
 
-### Rebuilding the index
+## If the pools stop enforcing: abandonment and the sweep
+
+Enforcement is only as strong as the share of blocks that signal. `yed_getactivation.signalCount`
+and `yed_getstats.halts` show it:
+
+- **Below 60 % of blocks signalling, minting pauses** (the `PARTICIPATION` halt); it resumes at
+  75 %. Existing YED stays redeemable by a minter who holds it.
+- **Below 50 %, block rejection pauses too** (the `ENFORCEMENT` halt): while it holds, neither the
+  owner path nor the claim path is policed — collateral can leave a vault without its burn, and
+  YED so left unbacked stays in circulation. Vaults untouched during the pause are protected again
+  when rejection resumes at 60 %.
+- **Two full windows of the `ENFORCEMENT` halt is abandonment** (`yed_getinfo.abandoned`; 128
+  blocks on regtest, 4,032 on mainnet). This is also where a sunset with no successor release ends
+  up. From then on every vault's claim path is spendable by anyone at its claim height and nobody
+  refuses the spend: whoever mines first takes the collateral.
+
+What an owner does under abandonment: **sweep before the claim height.** `yed_listpositions` shows
+`canSweep: true` and `sweepBefore` (the claim height) on every ACTIVE vault you own; `yed_sweep
+<vaultTxid> "I understand this leaves YED unbacked"` spends the vault back to you with no burn and
+no fee, and every node of every release relays and mines it like any other transaction (the
+command also returns the raw `hex` so you can submit it elsewhere). The YED minted against a swept
+or claimed vault is **unbacked** from then on — `yed_getvault.unbacked`, `Totals.unbackedCents` —
+which is why the acknowledgement is required; the claim path stays open to everyone, so the race is
+fair, but it is a race. Outside abandonment `yed_sweep` refuses (`sweep-not-abandoned`) and an
+enforcing pool would never mine such a spend. A VOID vault (a failed mint, which never carried a
+debt) is not affected: its owner releases it with `yed_redeem` at its lock height at any time.
+
+## Rebuilding the index
 
 The index lives under `<datadir>/yellowback/` and is rebuilt from the blocks on disk when it is
 missing, when the node was reindexed, or on `-reindex-yellowback`. `yed_getinfo.healthy: false`
-names the reason and always means "restart with `-reindex-yellowback`". Every `yed_*` call except
-`yed_getinfo` refuses while the index is unhealthy or behind the chain tip.
+names the reason (`unhealthyReason`) and always means "restart with `-reindex-yellowback`". Every
+`yed_*` call except `yed_getinfo`, `yed_getblockverdict`, `yed_gettag`, `yed_decodepayload` and
+`yed_setquote` refuses while the index is unhealthy or behind the chain tip. Plain `-reindex` is
+safe on an enforcing node: nothing is rejected while the node is reindexing or in initial block
+download.
 
-### Backups
+## Backups
 
 Ycash transparent keys are a random keypool, not derived from a seed. The vault owner key of every
 mint lives only in `wallet.dat`. **Back up `wallet.dat` after every mint.** Wallet encryption in
 Ycash is experimental; protect the file with full-disk encryption, keep RPC on localhost and hold an
 offline copy.
 
-The v1 trust statement retired with the federation; what follows is the v2 statement, §8.1 of
-`doc/yellowback-spec.md`, which the `audit` job checks byte for byte against that file.
+## History
+
+v1 was a federation prototype, being replaced by phase since 2026-09-10 (plan §0, retired
+design in `docs/plans/archived/`): a k-of-n federation co-signed every redemption and published
+prices in anchor-chain transactions. v2 keeps the vault, the payload and the index and replaces the
+federation with the pools' quote tags and miner enforcement; the branch `feature/digidollar` in
+this repository is the prototype's record and is never built on. The v1 trust statement retired
+with it; what follows is the v2 statement, §8.1 of `doc/yellowback-spec.md`, which the `audit`
+job checks byte for byte against that file.
 
 ## Trust statement
 
@@ -162,7 +205,6 @@ Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Yca
   against a swept or claimed vault is unbacked from then on. A failed mint's collateral (a VOID
   vault, which never carried a debt) is released by its owner with `yed_redeem` at its lock
   height at any time, abandonment or not.
-
 ## Build and test baseline
 
 Everything below runs from `ycash-dd/` on `feature/yellowback-sf` (plan §6.0 item 0). Python is

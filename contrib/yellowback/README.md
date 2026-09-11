@@ -8,10 +8,10 @@ pushes one number into the pool's node with `yed_setquote`; the node puts it in 
 | File | Role | Status |
 |---|---|---|
 | `yellowback_price.py` | Price-source layer: presets per venue (CoinGecko, Nonkyc, SafeTrade/Peatio, Kraken, Coinbase, generic URL + JSON path), every field overridable, per-source freshness / spread / flag guards, BTC pairs converted with a median of `[[btc_usd_sources]]`, 15-minute per-source VWAP/TWAP, outlier filter, median over `min_sources`/`min_venues` (fail closed); the §5 source-mask bit registry; the §3.2 coinbase-tag codec (TAG-1..5) | done |
-| `yellowback-quote` | The quote agent daemon: `--conf <toml>`, polls every `poll_seconds`, calls `yed_setquote <priceMicroUsd> <sourceMask>`, `yed_setquote 0` after `fail_polls` failed aggregates (L5), RPC failures retried and never fatal; `--once`, `--dry-run`, `--mock-price <file>`, `sources` | done (RPC lands in Phase 3) |
-| `pool/` | Pool-integration kit: `yellowback-quote.toml.sample`, `check-coinbase`, `monitor-quote.sh`, systemd/launchd units, `README.md` with the carriers and per-stack notes (survey §12 Q9 pending) | skeleton notes |
+| `yellowback-quote` | The quote agent daemon: `--conf <toml>`, polls every `poll_seconds`, calls `yed_setquote <priceMicroUsd> <sourceMask>`, `yed_setquote 0` after `fail_polls` failed aggregates (L5), RPC failures retried and never fatal; `--once`, `--dry-run`, `--mock-price <file>`, `sources` | done; `qa/rpc-tests/yellowback_quote.py` runs three of them against pool nodes |
+| `pool/` | Pool-integration kit: `yellowback-quote.toml.sample`, `check-coinbase`, `monitor-quote.sh`, systemd/launchd units, `README.md` with the carriers and per-stack notes | tools done; the per-stack notes stay a skeleton until the operator survey (§12 Q9) |
 | `test_yellowback_price.py`, `test_yellowback_quote.py` | Unit tests, no node, no network: `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py` | done |
-| `devnet/yellowback-devnet` | One-laptop Yellowback network (the v1 federation script; its v2 adaptation follows Phase 3) | pending |
+| `devnet/yellowback-devnet` | One-laptop Yellowback v2 network: `up [--agents]` (five regtest nodes, node 0 funded, three pools quoting — directly or through real `yellowback-quote --mock-price` agents — and mined through activation), `check`, `status`, `mine`, `price`, `wallet`, `cli [--datadir N]`, `down` | done |
 | `yellowback_fed.py`, `test_yellowback_fed.py`, `yellowback-redeem` | The retired federation coordinator and its tests; deleted in Phase 0 / Phase 7 (the feed layer lives on in `yellowback_price.py`) | removed |
 
 ## Quote agent contract
