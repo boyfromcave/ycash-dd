@@ -34,6 +34,9 @@
 #include "txmempool.h"
 #include "utilstrencodings.h"
 #include "utiltime.h"
+#ifdef ENABLE_WALLET
+#include "wallet/wallet.h"
+#endif
 #include "yellowback/address.h"
 #include "yellowback/index.h"
 #include "yellowback/math.h"
@@ -902,12 +905,48 @@ UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
 
     YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "txid");
+#ifdef ENABLE_WALLET
+    LOCK2(cs_main, pwalletMain ? &pwalletMain->cs_wallet : NULL);
+#else
+    LOCK(cs_main);
+#endif
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
     std::optional<TxLogRecord> log = st.GetTxLog(txid);
-    if (!log.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "tx-not-found: " + txid.GetHex() + " is not in the Yellowback index");
-    return TxLogToJSON(txid, log.value());
+    if (log.has_value()) return TxLogToJSON(txid, log.value());
+#ifdef ENABLE_WALLET
+    // §4.6 / N39: a wallet transaction with a payload past its nExpiryHeight that is in neither
+    // TxLog nor the mempool is reported as expired (it left no index trace; the user re-runs it).
+    if (pwalletMain) {
+        std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(txid);
+        if (it != pwalletMain->mapWallet.end()) {
+            const CWalletTx& wtx = it->second;
+            std::optional<FoundPayload> fp = FindPayload(wtx);
+            if (fp.has_value() && wtx.nExpiryHeight != 0 && (int64_t)wtx.nExpiryHeight <= (int64_t)chainActive.Height()
+                && !mempool.exists(txid) && wtx.GetDepthInMainChain() <= 0) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("txid", txid.GetHex());
+                o.pushKV("height", -1);
+                o.pushKV("type", fp->payload.type == PayloadType::MINT ? "mint" : fp->payload.type == PayloadType::TRANSFER ? "transfer" : "redeem");
+                o.pushKV("path", "");
+                o.pushKV("verdict", "expired");
+                o.pushKV("yedIn", 0);
+                o.pushKV("yedOut", 0);
+                o.pushKV("burned", 0);
+                o.pushKV("feeZat", 0);
+                o.pushKV("payee", NullUniValue);
+                o.pushKV("assigned", UniValue(UniValue::VARR));
+                o.pushKV("spentTokens", UniValue(UniValue::VARR));
+                o.pushKV("closedVaults", UniValue(UniValue::VARR));
+                o.pushKV("expired", true);
+                return o;
+            }
+        }
+    }
+#endif
+    throw JSONRPCError(RPC_INVALID_PARAMETER, "tx-not-found: " + txid.GetHex() + " is not in the Yellowback index");
 }
 
 UniValue yed_decodepayload(const UniValue& params, bool fHelp)
