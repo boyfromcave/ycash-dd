@@ -218,11 +218,48 @@ over `hashlib.blake2b`; no framework file is changed. `grep` on this host is ugr
 
 ### Recorded baseline (Phase 0, 2026-09-10, node side)
 
-<!-- baseline-results -->
+Recorded from this tree (commits `6f4380028`, `e394ce7a7`, `bbb132630` on `feature/yellowback-sf`),
+incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host above.
+
+- `src/test/test_bitcoin --run_test='yellowback_*'`: **31 cases, all green** (33 before Phase 0;
+  `genesis_and_prices` and `rotation_and_custody` are behind `#if 0` in
+  `yellowback_state_tests.cpp` until Phase 2).
+- The whole `src/test/test_bitcoin`: **453 cases, 2 failures, both pre-existing at the pin** in
+  files the fork does not touch — `main_tests/subsidy_limit_test` (`nSum` off by one halving:
+  `2099999981520000 != 2099999990760000`) and `rpc_wallet_tests/rpc_z_sendmany_internals`
+  (two change outputs hash to the same address). 121 s. The CI `main` job runs the whole suite;
+  these two must be looked at (or excluded by name) before `main` can be green there.
+- Yellowback functional scripts (run one process each, `--portseed` 11–15, `BITCOIND` set,
+  `DYLD_LIBRARY_PATH` for the Python co-signer): `yellowback_index`, `yellowback_lifecycle`,
+  `yellowback_void_mint`, `yellowback_wallet_restore`, `yellowback_sapling` — **all five green**.
+  `yellowback_reorg_stress` (nightly) was not run in this session.
+- Inherited stock baseline, `qa/pull-tester/rpc-tests.py -j4 --nozmq` over the eleven scripts of
+  plan §6.0 item 6, against the fork binary without `-yellowback`: **7 pass** — `mempool_reorg`,
+  `mempool_tx_expiry`, `reorg_limit`, `reindex`, `wallet`, `rawtransactions`, `txn_doublespend`
+  (these are the CI `STOCK_BASELINE`); **4 fail at the pin**: `getblocktemplate_proposals`,
+  `getblocktemplate_longpoll` and `invalidateblock` crash `ycashd` with `SIGABRT` in
+  `CChainParams::GetFoundersRewardAddressAtHeight` under `getblocktemplate`/`generate` (a stock
+  regtest node activates no Ycash upgrade; every Yellowback script passes the six `-nuparams` at
+  height 1 and never hits it), and `p2p-acceptblock` fails "Unrequested block from whitelisted
+  peer not accepted" (Bitcoin behaviour Zcash/Ycash does not have). The four scripts, the test
+  framework and `main.cpp`/`net.cpp`/`miner.cpp`/`rpc/mining.cpp`/`chainparams.cpp` are
+  byte-identical to `ycash-legacy`, and the failure reproduces with the one framework fix of this
+  phase reverted, so they are the pin's, not the fork's.
+- `python3 -m unittest contrib/yellowback/test_yellowback_fed.py`: 24 tests OK. `pyflakes` over
+  `qa/rpc-tests/yellowback_*.py` and `yellowback_util.py`: clean.
+- Consensus set (`src/consensus`, `src/script`, `src/primitives`, `src/pow`, `chainparams.cpp`,
+  `wallet/wallet.{h,cpp}`, `txdb.*`, `configure.ac`): zero lines changed vs `ycash-legacy`;
+  `main.cpp`, `miner.cpp`, `rpc/mining.cpp`: 0 of 40/35/35.
+- The runner (`rpc-tests.py`) execs each script through `#!/usr/bin/env python3`: put the
+  workspace venv's `bin` first on `PATH` or the scripts start under the system interpreter and
+  fail on `import simplejson`.
 
 ### Open items carried over from the prototype's Phase 0
 
 - The `YCASH_WR=1` build (the Ycash-specific build variant) has still not been run on this host.
-- The inherited `qa/pull-tester/rpc-tests.py` baseline: which of the stock scripts pass on Ycash
-  v4.5.0 after the `ycash.conf` and `src/ycashd` framework fixes. The eleven scripts of the
-  `main` job's `STOCK_BASELINE` are recorded above; the rest of `BASE_SCRIPTS` is still unrun.
+- The inherited `qa/pull-tester/rpc-tests.py` baseline: the eleven scripts of plan §6.0 item 6
+  are recorded above (7 pass, 4 fail at the pin); the rest of `BASE_SCRIPTS` is still unrun. The
+  four that fail need the six `-nuparams` on every node (the Phase 3 `qa/yellowback-wrapped-ycashd.sh`
+  wrapper, or a `regtest`-wide default) before they can join the CI list.
+- The two pre-existing `test_bitcoin` failures (`subsidy_limit_test`, `rpc_z_sendmany_internals`)
+  make the whole-suite step of the CI `main` job red until they are fixed or excluded by name.

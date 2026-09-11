@@ -25,7 +25,13 @@ on:
 
 env:
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore yellowback_sapling
-  STOCK_BASELINE: getblocktemplate_proposals getblocktemplate_longpoll mempool_reorg mempool_tx_expiry p2p-acceptblock invalidateblock reorg_limit reindex wallet rawtransactions txn_doublespend
+  # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
+  # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
+  # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
+  # changed) because a stock regtest node activates no Ycash upgrade, and p2p-acceptblock expects
+  # Bitcoin's unrequested-block behaviour. They rejoin the list when the Phase 3 wrapper passes
+  # the six -nuparams to every node.
+  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend
 
 jobs:
   main:
