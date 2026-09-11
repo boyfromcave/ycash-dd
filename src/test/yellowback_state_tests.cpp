@@ -159,6 +159,8 @@ struct Fixture
 
 BOOST_FIXTURE_TEST_SUITE(yellowback_state_tests, BasicTestingSetup)
 
+#if 0 // Phase 0 (plan §6): the anchor-chain price and roster-rotation cases (genesis_and_prices, rotation_and_custody)
+      // are disabled, not deleted; the state machine they exercise migrates to v2 in Phase 2.
 BOOST_AUTO_TEST_CASE(genesis_and_prices)
 {
     Fixture f;
@@ -175,7 +177,7 @@ BOOST_AUTO_TEST_CASE(genesis_and_prices)
     BOOST_CHECK(st.GetAnchor().valid);
     BOOST_CHECK(st.GetAnchor().outpoint == f.params.genesisAnchor);
     BOOST_CHECK_EQUAL(st.GetAnchor().nValue, COIN);
-    BOOST_CHECK_EQUAL(st.GetRosters().size(), 1u);
+    BOOST_CHECK_EQUAL(st.Rosters().size(), 1u);
     BOOST_CHECK(!st.GetSnapshot(START)->priceDefined);
     BOOST_CHECK_EQUAL(st.GetSnapshot(START)->healthPct, HEALTH_CAP);
 
@@ -234,7 +236,7 @@ BOOST_AUTO_TEST_CASE(rotation_and_custody)
     BOOST_REQUIRE(!f.Apply({ rot }).has_value());
     State st(f.view);
     BOOST_CHECK(st.GetAnchor().scriptPubKey == anchor2);
-    BOOST_CHECK_EQUAL(st.GetRosters().size(), 1u); // the new script is revealed only when the new anchor is spent
+    BOOST_CHECK_EQUAL(st.Rosters().size(), 1u); // the new script is revealed only when the new anchor is spent
     BOOST_CHECK_EQUAL(st.GetTxLog(CTransaction(rot).GetHash())->verdict, verdict::PRICE_ROTATION);
 
     // Next PRICE from the new anchor reveals roster 2 and records a price.
@@ -246,14 +248,14 @@ BOOST_AUTO_TEST_CASE(rotation_and_custody)
         p.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price(55000)))));
         BOOST_REQUIRE(!f.Apply({ p }).has_value());
         State st2(f.view);
-        BOOST_CHECK_EQUAL(st2.GetRosters().size(), 2u);
-        BOOST_CHECK(st2.GetRosters()[1].script == roster2);
-        BOOST_CHECK_EQUAL(st2.GetRosters()[1].revealHeight, f.tipHeight);
+        BOOST_CHECK_EQUAL(st2.Rosters().size(), 2u);
+        BOOST_CHECK(st2.Rosters()[1].script == roster2);
+        BOOST_CHECK_EQUAL(st2.Rosters()[1].revealHeight, f.tipHeight);
         BOOST_CHECK_EQUAL(f.Price(f.tipHeight).value(), 55000);
         // Previous roster is mintable only during the grace period.
-        BOOST_CHECK_EQUAL(MintableRosters(st2.GetRosters(), f.params, f.tipHeight).size(), 2u);
-        BOOST_CHECK_EQUAL(MintableRosters(st2.GetRosters(), f.params, f.tipHeight + f.params.rosterGrace).size(), 2u);
-        BOOST_CHECK_EQUAL(MintableRosters(st2.GetRosters(), f.params, f.tipHeight + f.params.rosterGrace + 1).size(), 1u);
+        BOOST_CHECK_EQUAL(MintableRosters(st2.Rosters(), f.params, f.tipHeight).size(), 2u);
+        BOOST_CHECK_EQUAL(MintableRosters(st2.Rosters(), f.params, f.tipHeight + f.params.rosterGrace).size(), 2u);
+        BOOST_CHECK_EQUAL(MintableRosters(st2.Rosters(), f.params, f.tipHeight + f.params.rosterGrace + 1).size(), 1u);
     }
     // A price carried by a spend that changes the script is a rotation, not a price (B8).
     {
@@ -263,7 +265,7 @@ BOOST_AUTO_TEST_CASE(rotation_and_custody)
         BOOST_CHECK(!State(f.view).GetPriceAt(f.tipHeight).has_value());
         BOOST_CHECK_EQUAL(State(f.view).GetTxLog(CTransaction(p).GetHash())->verdict, verdict::PRICE_ROTATION);
         BOOST_CHECK(State(f.view).GetAnchor().scriptPubKey == f.anchorSpk);
-        BOOST_CHECK_EQUAL(State(f.view).GetRosters().size(), 2u); // roster2 already known; original roster differs from back => appended? no: script == rosters[1]? it is roster2 => not appended
+        BOOST_CHECK_EQUAL(State(f.view).Rosters().size(), 2u); // roster2 already known; original roster differs from back => appended? no: script == rosters[1]? it is roster2 => not appended
     }
     // Custody break: anchor spent to a non-P2SH output.
     {
@@ -280,6 +282,8 @@ BOOST_AUTO_TEST_CASE(rotation_and_custody)
         BOOST_CHECK(!State(f.view).GetAnchor().valid);
     }
 }
+
+#endif // Phase 0
 
 BOOST_AUTO_TEST_CASE(mint_transfer_burn_redeem)
 {

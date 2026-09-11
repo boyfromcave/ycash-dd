@@ -94,24 +94,6 @@ void FinishSapling(BuiltTx& out);
 /** REDEEM: owner-sign vin[0] over the vault script and SignSignature every YED input. Requires cs_main and cs_wallet. */
 void SignRedeem(BuiltTx& out, CWallet& wallet, uint32_t branchId);
 
-/**
- * Add this node's roster signature to vin[0] of a redemption, in roster
- * order (§3.3). `vaultScript` and `vaultValue` come from the index, never
- * from the transaction (C5). Returns the number of quorum signatures now
- * present; throws if the wallet holds no roster key or already signed.
- */
-unsigned int AddCosignature(CMutableTransaction& tx, const CScript& vaultScript, CAmount vaultValue, const Roster& roster,
-                            const CKeyStore& keystore, uint32_t branchId);
-
-/** Number of quorum signatures in vin[0]. */
-unsigned int CountQuorumSignatures(const CTransaction& tx);
-
-/**
- * SUB-1: `returned` equals `original` except for additional quorum
- * signature pushes in vin[0].scriptSig.
- */
-bool SameExceptSignatures(const CTransaction& original, const CTransaction& returned, std::string& why);
-
 } // namespace yellowback
 
 #endif // YCASH_YELLOWBACK_TXBUILDER_H

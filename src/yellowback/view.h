@@ -418,7 +418,7 @@ public:
 
     std::optional<TipRecord> GetTip() const;
     AnchorRecord GetAnchor() const;
-    std::vector<RosterRecord> GetRosters() const;
+    std::vector<RosterRecord> Rosters() const;
     void AppendRoster(const RosterRecord& r);
     std::optional<MicroUsd> GetPriceAt(uint32_t height) const;          //!< the attestation recorded at exactly this height
     std::optional<MicroUsd> PriceInEffect(uint32_t height) const;       //!< price(H) of §3.6

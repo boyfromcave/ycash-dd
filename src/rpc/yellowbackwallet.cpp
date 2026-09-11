@@ -164,7 +164,7 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
 UniValue yed_listunspent(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
-        throw std::runtime_error("yed_listunspent\n\nYED outputs that are mine, with whether each is spendable (not reserved by a pending redemption, not spent by an unconfirmed transaction).\n");
+        throw std::runtime_error("yed_listunspent\n\nYED outputs that are mine, with whether each is spendable (not spent by an unconfirmed transaction).\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -180,7 +180,6 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
         o.pushKV("address", ScriptToYedAddress(c.token.scriptPubKey, index.GetParams()));
         o.pushKV("height", c.token.height);
         o.pushKV("confirmations", IndexHeight(index) - c.token.height + 1);
-        o.pushKV("reserved", yw.IsReserved(c.outpoint));
         o.pushKV("spentUnconfirmed", pwalletMain->IsSpent(c.outpoint.hash, c.outpoint.n));
         o.pushKV("locked", pwalletMain->IsLockedCoin(c.outpoint.hash, c.outpoint.n));
         arr.push_back(o);
@@ -303,20 +302,18 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_redeem \"vaultTxid\" ( \"to\" )\n"
             "\nBuild and owner-sign the redemption of a vault: burns the required YED and returns the collateral.\n"
-            "No network I/O: returns the hex to pass to each operator's yed_cosignredeem (or /cosign) and then to\n"
-            "yed_submitredeem. Records a pending redemption for the vault; yed_abortredeem clears it.\n"
+            "No network I/O and nothing is broadcast: the vault script of this prototype still needs the retired\n"
+            "federation's signatures, so the returned hex cannot be completed by this node (v2 replaces this command).\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
             "2. \"to\"         (string, optional) where the collateral goes: an s1... address, or a ys1... address\n"
             "                  (paid as a Sapling output). Default: a fresh transparent address of this wallet.\n"
-            "\nResult: { \"hex\", \"vault\", \"roster\": {k,n,index,pubkeys}, \"requiredBurnCents\", \"burnCents\", \"changeCents\", \"collateralTo\", \"shielded\", \"expiryHeight\", \"deadlineHeight\" }\n");
+            "\nResult: { \"hex\", \"vault\", \"requiredBurnCents\", \"burnCents\", \"changeCents\", \"collateralTo\", \"shielded\", \"expiryHeight\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
     const std::string to = params.size() > 1 ? params[1].get_str() : "";
     BuiltTx built;
-    std::vector<RosterRecord> rosters;
-    VaultRecord vault;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
@@ -328,9 +325,6 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             } catch (const std::runtime_error& e) {
                 throw JSONRPCError(RPC_WALLET_ERROR, e.what());
             }
-            State st(index.View());
-            rosters = st.GetRosters();
-            vault = st.GetVault(COutPoint(vaultTxid, 0)).value();
         }
         if (!built.NeedsProving()) {
             try {
@@ -356,156 +350,16 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_WALLET_ERROR, e.what());
         }
     }
-    PendingRedemption pr;
-    pr.vault = COutPoint(vaultTxid, 0);
-    pr.ownerSignedTx = CTransaction(built.tx);
-    pr.reservedInputs = built.yedInputs;
-    {
-        LOCK(cs_main);
-        pr.createdHeight = chainActive.Height();
-    }
-    pr.expiryHeight = built.tx.nExpiryHeight;
-    if (!yw.AddPending(pr)) throw JSONRPCError(RPC_WALLET_ERROR, "a redemption of this vault is already pending");
-
+    const CTransaction ownerSignedTx(built.tx);
     UniValue o(UniValue::VOBJ);
-    o.pushKV("hex", EncodeHexTx(pr.ownerSignedTx));
+    o.pushKV("hex", EncodeHexTx(ownerSignedTx));
     o.pushKV("vault", vaultTxid.GetHex() + ":0");
-    UniValue r(UniValue::VOBJ);
-    Roster roster;
-    if (vault.rosterIndex >= 0 && vault.rosterIndex < (int)rosters.size() && ParseRosterScript(rosters[vault.rosterIndex].script, roster)) {
-        r.pushKV("index", vault.rosterIndex);
-        r.pushKV("k", (int64_t)roster.k);
-        r.pushKV("n", (int64_t)roster.n());
-        UniValue keys(UniValue::VARR);
-        for (const CPubKey& key : roster.keys) keys.push_back(HexStr(key.begin(), key.end()));
-        r.pushKV("pubkeys", keys);
-    }
-    o.pushKV("roster", r);
     o.pushKV("requiredBurnCents", built.requiredBurn);
     o.pushKV("burnCents", built.burnCents);
     o.pushKV("changeCents", built.changeCents);
     o.pushKV("collateralTo", built.collateralTo);
-    o.pushKV("shielded", !pr.ownerSignedTx.vShieldedOutput.empty());
+    o.pushKV("shielded", !ownerSignedTx.vShieldedOutput.empty());
     o.pushKV("expiryHeight", (int64_t)built.tx.nExpiryHeight);
-    o.pushKV("deadlineHeight", (int64_t)built.tx.nExpiryHeight - (int64_t)TX_EXPIRING_SOON_THRESHOLD - 1);
-    return o;
-}
-
-UniValue yed_submitredeem(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() != 1)
-        throw std::runtime_error(
-            "yed_submitredeem \"hex\"\n"
-            "\nVerify a co-signed redemption against the pending record (SUB-1: identical except for added quorum\n"
-            "signatures; every input verifies; at or past lockHeight; not expiring soon) and broadcast it.\n");
-    YellowbackWallet& yw = EnsureYW();
-    YellowbackIndex& index = *yw.Index();
-    CTransaction tx;
-    if (!DecodeHexTx(tx, params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
-    if (tx.vin.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "no inputs");
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    std::optional<PendingRedemption> pr = yw.GetPending(tx.vin[0].prevout);
-    if (!pr.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "no pending redemption for vin[0]'s vault (SUB-1)");
-    std::string why;
-    if (!SameExceptSignatures(pr->ownerSignedTx, tx, why)) throw JSONRPCError(RPC_VERIFY_REJECTED, "SUB-1: returned transaction differs from the one yed_redeem produced: " + why);
-    VaultRecord vault;
-    {
-        LOCK(index.cs_yellowback);
-        EnsureHealthy(index);
-        std::optional<VaultRecord> v = State(index.View()).GetVault(pr->vault);
-        if (!v.has_value() || !v->IsOpen()) throw JSONRPCError(RPC_VERIFY_REJECTED, "vault is no longer open");
-        vault = v.value();
-    }
-    if (chainActive.Height() < (int)vault.lockHeight) throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("chain height %d is below lockHeight %u (C22)", chainActive.Height(), vault.lockHeight));
-    if ((int64_t)tx.nExpiryHeight < (int64_t)chainActive.Height() + 1 + (int64_t)TX_EXPIRING_SOON_THRESHOLD) {
-        throw JSONRPCError(RPC_VERIFY_REJECTED, "transaction is expiring too soon; yed_abortredeem and start over");
-    }
-    CCoinsView dummy;
-    CCoinsViewCache view(&dummy);
-    FetchInputs(tx, view);
-    std::string error;
-    if (!VerifyAllInputs(tx, view, SignerBranchId(), error)) throw JSONRPCError(RPC_VERIFY_REJECTED, "SUB-1: " + error);
-
-    BuiltTx built;
-    built.tx = CMutableTransaction(tx);
-    for (const Assignment& a : FindPayload(tx).has_value() ? FindPayload(tx)->payload.assignments : std::vector<Assignment>()) {
-        if (yw.IsMineScript(tx.vout[a.vout].scriptPubKey)) built.ownYedOutputs.push_back(COutPoint(tx.GetHash(), a.vout));
-    }
-    uint256 txid = Commit(yw, built, nullptr);
-    yw.RemovePending(pr->vault);
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
-    o.pushKV("quorumSignatures", (int64_t)CountQuorumSignatures(tx));
-    return o;
-}
-
-UniValue yed_abortredeem(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() != 1)
-        throw std::runtime_error("yed_abortredeem \"vaultTxid\"\n\nClear the pending redemption of a vault that was never broadcast; its YED inputs become selectable again.\n");
-    YellowbackWallet& yw = EnsureYW();
-    uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("aborted", yw.RemovePending(COutPoint(vaultTxid, 0)));
-    return o;
-}
-
-UniValue yed_cosignredeem(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() != 1)
-        throw std::runtime_error(
-            "yed_cosignredeem \"hex\"\n"
-            "\nFederation member: verify a redemption (RED-0..8) and add this node's roster signature in roster order.\n"
-            "Refuses with the failing rule; \"transient\" refusals (RED-0 unsynced, RED-2 not yet at lockHeight here)\n"
-            "should be retried after the next block. Never signs twice for the same vault within one height.\n"
-            "\nResult: { \"hex\", \"quorumSignatures\", \"k\", \"complete\", \"check\": {...} }\n");
-    YellowbackWallet& yw = EnsureYW();
-    YellowbackIndex& index = *yw.Index();
-    CTransaction tx;
-    if (!DecodeHexTx(tx, params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    EnsureWalletIsUnlocked();
-    CCoinsView dummy;
-    CCoinsViewCache view(&dummy);
-    FetchInputs(tx, view);
-    RedeemCheck check;
-    Roster roster;
-    {
-        LOCK(index.cs_yellowback);
-        check = CheckRedeem(index, view, tx, chainActive.Height());
-        if (check.ok) {
-            std::vector<RosterRecord> rosters = State(index.View()).GetRosters();
-            ParseRosterScript(rosters[check.vaultRecord.rosterIndex].script, roster);
-        }
-    }
-    if (!check.ok) {
-        UniValue err(UniValue::VOBJ);
-        err.pushKV("rule", check.rule);
-        err.pushKV("reason", check.reason);
-        err.pushKV("transient", check.transient);
-        throw JSONRPCError(RPC_VERIFY_REJECTED, check.rule + ": " + check.reason + (check.transient ? " (transient)" : ""));
-    }
-    if (!yw.MarkCosigned(check.vault, check.indexHeight)) {
-        throw JSONRPCError(RPC_VERIFY_REJECTED, "already co-signed this vault at this height");
-    }
-    CMutableTransaction mtx(tx);
-    unsigned int n;
-    try {
-        n = AddCosignature(mtx, check.vaultScript, check.vaultRecord.collateralZat, roster, *pwalletMain, check.branchId);
-    } catch (const std::runtime_error& e) {
-        throw JSONRPCError(RPC_WALLET_ERROR, e.what());
-    }
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
-    o.pushKV("quorumSignatures", (int64_t)n);
-    o.pushKV("k", (int64_t)roster.k);
-    o.pushKV("complete", n >= roster.k);
-    UniValue c(UniValue::VOBJ);
-    c.pushKV("burned", check.burned);
-    c.pushKV("requiredBurn", check.requiredBurn);
-    c.pushKV("fee", check.fee);
-    c.pushKV("indexHeight", check.indexHeight);
-    o.pushKV("check", c);
     return o;
 }
 
@@ -546,7 +400,6 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("requiredBurnCents", requiredBurn);
         bool priceOk = !active || (snap.has_value() && snap->priceDefined);
         o.pushKV("canRedeem", v.IsOpen() && h >= (int)v.lockHeight && priceOk && v.rosterIndex >= 0);
-        o.pushKV("pending", yw.GetPending(COutPoint(txid, 0)).has_value());
         if (v.Status() == VaultStatus::VOID) o.pushKV("voidReason", v.voidReason);
         if (v.Status() == VaultStatus::CLOSED) {
             o.pushKV("closeHeight", v.closeHeight);
@@ -670,9 +523,6 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_send",             &yed_send,              false },
     { "yellowback", "yed_sendmany",         &yed_sendmany,          false },
     { "yellowback", "yed_redeem",           &yed_redeem,            false },
-    { "yellowback", "yed_submitredeem",     &yed_submitredeem,      false },
-    { "yellowback", "yed_abortredeem",      &yed_abortredeem,       true  },
-    { "yellowback", "yed_cosignredeem",     &yed_cosignredeem,      false },
     { "yellowback", "yed_listpositions",    &yed_listpositions,     false },
     { "yellowback", "yed_listtransactions", &yed_listtransactions,  false },
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },

@@ -15,46 +15,14 @@
 #include <string>
 
 /**
- * Policy checks of plan §3.8 (RED-0..8): what a federation member verifies
- * before co-signing a redemption and what the wallet verifies before
- * broadcasting one. They never change the state machine (D18); they are
- * the rules §9 would promote to consensus.
- *
- * Pure given the index (under cs_yellowback), the chain tip (under cs_main)
- * and a coins view the caller built exactly as signrawtransaction does —
- * pcoinsTip behind CCoinsViewMemPool (C1) — so the fee and
- * AreInputsStandard see every input.
+ * Wallet-side helpers that need the chain (cs_main): a coins view built
+ * exactly as signrawtransaction does — pcoinsTip behind CCoinsViewMemPool
+ * (C1) — the signer branch ID, and full script verification of a transaction
+ * before it is broadcast. The prototype's co-signer rule set (RED-0..8) was
+ * removed with the federation; v2's RED-1..4 are block-validity rules and
+ * live in state.cpp (plan §4.2).
  */
 namespace yellowback {
-
-struct RedeemCheck
-{
-    bool ok;
-    bool transient;          //!< RED-0 unsynced / RED-2 not yet at lockHeight on this node (E2)
-    std::string rule;        //!< failing rule id, e.g. "RED-3"
-    std::string reason;      //!< human-readable detail
-
-    COutPoint vault;
-    VaultRecord vaultRecord;
-    CScript vaultScript;     //!< reconstructed from the index (C5)
-    CAmount fee;
-    int64_t yedIn;
-    int64_t yedOut;
-    int64_t burned;
-    int64_t requiredBurn;
-    int indexHeight;
-    uint32_t branchId;
-    uint256 sighash;         //!< SIGHASH_ALL over vaultScript for vin[0]
-
-    RedeemCheck() : ok(false), transient(false), fee(0), yedIn(0), yedOut(0), burned(0), requiredBurn(0), indexHeight(-1), branchId(0) {}
-};
-
-/**
- * Run RED-0..8 for `tx` against the index and `view`. Requires cs_main and
- * cs_yellowback held by the caller. `view` must be populated with every
- * input the caller could find (missing inputs are a refusal, D1).
- */
-RedeemCheck CheckRedeem(const YellowbackIndex& index, const CCoinsViewCache& view, const CTransaction& tx, int chainHeight);
 
 /**
  * Populate `view` with the transaction's inputs from pcoinsTip behind the

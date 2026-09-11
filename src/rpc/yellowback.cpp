@@ -256,7 +256,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     anchor.pushKV("valueZat", a.nValue);
     anchor.pushKV("address", ScriptAddress(a.scriptPubKey));
     o.pushKV("anchor", anchor);
-    o.pushKV("rosterIndex", (int64_t)st.GetRosters().size() - 1);
+    o.pushKV("rosterIndex", (int64_t)st.Rosters().size() - 1);
     UniValue pp(UniValue::VOBJ);
     pp.pushKV("minMintCents", p.minMint);
     pp.pushKV("maxMintCents", p.maxMint);
@@ -434,48 +434,6 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
         o.pushKV("sourceHeight", -1);
         o.pushKV("age", -1);
     }
-    return o;
-}
-
-static UniValue RosterToJSON(const RosterRecord& r, int indexNo)
-{
-    UniValue o(UniValue::VOBJ);
-    Roster roster;
-    o.pushKV("index", indexNo);
-    o.pushKV("revealHeight", r.revealHeight);
-    o.pushKV("scriptHex", HexStr(r.script.begin(), r.script.end()));
-    o.pushKV("address", ScriptAddress(P2SHScript(r.script)));
-    if (ParseRosterScript(r.script, roster)) {
-        o.pushKV("k", (int64_t)roster.k);
-        o.pushKV("n", (int64_t)roster.n());
-        UniValue keys(UniValue::VARR);
-        for (const CPubKey& key : roster.keys) keys.push_back(HexStr(key.begin(), key.end()));
-        o.pushKV("pubkeys", keys);
-    }
-    return o;
-}
-
-UniValue yed_getroster(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() != 0)
-        throw std::runtime_error(
-            "yed_getroster\n"
-            "\nThe current federation roster (keys in script order, k, n, script, P2SH address) and the previous one.\n");
-
-    YellowbackIndex& index = EnsureIndex();
-    LOCK(index.cs_yellowback);
-    EnsureHealthy(index);
-    State st(index.View());
-    std::vector<RosterRecord> rosters = st.GetRosters();
-    if (rosters.empty()) throw JSONRPCError(RPC_MISC_ERROR, "index has not reached the start height");
-    UniValue o = RosterToJSON(rosters.back(), rosters.size() - 1);
-    o.pushKV("mintableIndices", [&]() {
-        UniValue a(UniValue::VARR);
-        for (uint32_t i : MintableRosters(rosters, index.GetParams(), IndexHeight(index) + 1)) a.push_back((int64_t)i);
-        return a;
-    }());
-    if (rosters.size() >= 2) o.pushKV("previous", RosterToJSON(rosters[rosters.size() - 2], rosters.size() - 2));
-    else o.pushKV("previous", NullUniValue);
     return o;
 }
 
@@ -709,135 +667,6 @@ UniValue yed_gethistory(const UniValue& params, bool fHelp)
     return arr;
 }
 
-UniValue yed_createpricetx(const UniValue& params, bool fHelp)
-{
-    if (fHelp || params.size() < 1 || params.size() > 3)
-        throw std::runtime_error(
-            "yed_createpricetx priceMicroUsd|\"rotate\" ( \"refillTxid:n\" \"rosterScriptHex\" )\n"
-            "\nBuild the unsigned PRICE transaction that spends the current anchor into a new anchor with the\n"
-            "same roster script plus an OP_RETURN price; or, with \"rotate\", the ROTATION transaction paying\n"
-            "the anchor to a new roster script with no OP_RETURN. An optional confirmed refill input is\n"
-            "absorbed whole into the new anchor (no change output). Sign with signrawtransaction on a node\n"
-            "whose wallet holds the roster script (addmultisigaddress); prevtxs is what signrawtransaction\n"
-            "needs when the anchor is in neither the chain nor the signer's mempool. For a PRICE, rosterScriptHex is\n"
-            "the roster the anchor pays to when it has not been revealed on chain yet (right after a rotation).\n"
-            "\nResult:\n{ \"hex\": \"...\", \"prevtxs\": [...], \"anchor\": {...}, \"newAnchorValueZat\": n, \"fee\": n }\n");
-
-    YellowbackIndex& index = EnsureIndex();
-    const bool rotate = params[0].isStr() && params[0].get_str() == "rotate";
-    int64_t price = 0;
-    if (!rotate) {
-        price = params[0].isNum() ? params[0].get_int64() : std::stoll(params[0].get_str());
-        if (price < PRICE_MIN || price > PRICE_MAX) {
-            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("price must be between %d and %d micro-USD", PRICE_MIN, PRICE_MAX));
-        }
-    }
-    std::optional<COutPoint> refill;
-    if (params.size() > 1 && !params[1].isNull() && !params[1].get_str().empty()) {
-        std::string s = params[1].get_str();
-        size_t colon = s.find(':');
-        if (colon == std::string::npos || colon != 64 || !IsHex(s.substr(0, 64))) throw JSONRPCError(RPC_INVALID_PARAMETER, "refill must be txid:n");
-        refill = COutPoint(uint256S(s.substr(0, 64)), (uint32_t)std::stoul(s.substr(colon + 1)));
-    }
-    CScript newRoster;   // rotate: the new roster; price: an optional hint for an unrevealed anchor script
-    if (params.size() > 2 && !params[2].isNull() && !params[2].get_str().empty()) {
-        if (!IsHex(params[2].get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, "roster script must be hex");
-        std::vector<unsigned char> b = ParseHex(params[2].get_str());
-        newRoster = CScript(b.begin(), b.end());
-        Roster r;
-        if (!ParseRosterScript(newRoster, r)) throw JSONRPCError(RPC_INVALID_PARAMETER, "roster script is not a valid k-of-n script");
-    } else if (rotate) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "rotate requires the new roster script hex");
-    }
-
-    LOCK(cs_main);
-    LOCK(index.cs_yellowback);
-    EnsureHealthy(index);
-    State st(index.View());
-    AnchorRecord anchor = st.GetAnchor();
-    if (!anchor.valid) throw JSONRPCError(RPC_MISC_ERROR, "anchor custody is broken; no price transactions can be built");
-    std::vector<RosterRecord> rosters = st.GetRosters();
-    if (rosters.empty()) throw JSONRPCError(RPC_MISC_ERROR, "index has not reached the start height");
-    CScript rosterScript = rosters.back().script;
-    if (!rotate && !newRoster.empty()) rosterScript = newRoster; // hint for an unrevealed anchor script
-
-    // Follow unconfirmed anchor spends through the mempool (C11): the index moves the anchor
-    // only on block connect, but a price round may chain on a PRICE transaction that is still
-    // unconfirmed. Custody follows vout[0] as in PRICE-2; a mempool spend that changes the
-    // script is a pending rotation and is followed too.
-    CAmount anchorValue = anchor.nValue;
-    CAmount refillValue = 0;
-    bool anchorUnconfirmed = false;
-    {
-        LOCK(mempool.cs);
-        for (int hops = 0; hops < 100; hops++) {
-            auto it = mempool.mapNextTx.find(anchor.outpoint);
-            if (it == mempool.mapNextTx.end() || !it->second.ptx) break;
-            const CTransaction& spender = *it->second.ptx;
-            if (spender.vout.empty() || !spender.vout[0].scriptPubKey.IsPayToScriptHash()) {
-                throw JSONRPCError(RPC_MISC_ERROR, "the anchor is spent in the mempool by a transaction that breaks custody");
-            }
-            anchor.outpoint = COutPoint(spender.GetHash(), 0);
-            anchor.nValue = spender.vout[0].nValue;
-            anchor.scriptPubKey = spender.vout[0].scriptPubKey;
-            anchorValue = anchor.nValue;
-            anchorUnconfirmed = true;
-        }
-        if (P2SHScript(rosterScript) != anchor.scriptPubKey) {
-            throw JSONRPCError(RPC_MISC_ERROR, "the anchor's roster has not been revealed yet; pass the agreed roster script as the third argument");
-        }
-        CCoinsViewMemPool viewMempool(pcoinsTip, mempool);
-        CCoinsViewCache view(&viewMempool);
-        const CCoins* coins = view.AccessCoins(anchor.outpoint.hash);
-        if (coins && coins->IsAvailable(anchor.outpoint.n)) {
-            if (coins->vout[anchor.outpoint.n].nValue != anchorValue) {
-                throw JSONRPCError(RPC_MISC_ERROR, "anchor value in the index differs from the UTXO set");
-            }
-        }
-        if (refill.has_value()) {
-            const CCoins* rc = pcoinsTip->AccessCoins(refill->hash);
-            if (!rc || !rc->IsAvailable(refill->n)) throw JSONRPCError(RPC_INVALID_PARAMETER, "refill outpoint is not a confirmed unspent output");
-            refillValue = rc->vout[refill->n].nValue;
-        }
-    }
-    const CAmount fee = g_yellowbackFee;
-    const CAmount newValue = anchorValue + refillValue - fee;
-    if (newValue <= 0) throw JSONRPCError(RPC_MISC_ERROR, "anchor value does not cover the fee; add a refill input");
-
-    CMutableTransaction mtx = CreateNewContextualCMutableTransaction(::Params().GetConsensus(), chainActive.Height() + 1);
-    mtx.nExpiryHeight = chainActive.Height() + 1 + MINT_WINDOW;
-    mtx.vin.push_back(CTxIn(anchor.outpoint));
-    if (refill.has_value()) mtx.vin.push_back(CTxIn(refill.value()));
-    mtx.vout.push_back(CTxOut(newValue, rotate ? P2SHScript(newRoster) : anchor.scriptPubKey));
-    if (!rotate) mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Price((uint64_t)price)))));
-
-    UniValue prev(UniValue::VOBJ);
-    prev.pushKV("txid", anchor.outpoint.hash.GetHex());
-    prev.pushKV("vout", (int64_t)anchor.outpoint.n);
-    prev.pushKV("scriptPubKey", HexStr(anchor.scriptPubKey.begin(), anchor.scriptPubKey.end()));
-    prev.pushKV("redeemScript", HexStr(rosterScript.begin(), rosterScript.end()));
-    prev.pushKV("amount", ValueFromAmount(anchorValue));
-    UniValue prevtxs(UniValue::VARR);
-    prevtxs.push_back(prev);
-
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
-    o.pushKV("prevtxs", prevtxs);
-    UniValue a(UniValue::VOBJ);
-    a.pushKV("txid", anchor.outpoint.hash.GetHex());
-    a.pushKV("vout", (int64_t)anchor.outpoint.n);
-    a.pushKV("valueZat", anchorValue);
-    a.pushKV("unconfirmed", anchorUnconfirmed);
-    o.pushKV("anchor", a);
-    o.pushKV("refillValueZat", refillValue);
-    o.pushKV("newAnchorValueZat", newValue);
-    o.pushKV("feeZat", fee);
-    o.pushKV("rotation", rotate);
-    if (!rotate) o.pushKV("priceMicroUsd", price);
-    o.pushKV("expiryHeight", (int64_t)mtx.nExpiryHeight);
-    return o;
-}
-
 static const CRPCCommand commands[] =
 { //  category   name                          actor (function)              okSafeMode
   //  ---------  ----------------------------  ----------------------------  ----------
@@ -846,7 +675,6 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_getstats",                &yed_getstats,                 true  },
     { "yellowback", "yed_getprice",                &yed_getprice,                 true  },
     { "yellowback", "yed_getprotectionstatus",     &yed_getprotectionstatus,     true  },
-    { "yellowback", "yed_getroster",               &yed_getroster,                true  },
     { "yellowback", "yed_getvault",                &yed_getvault,                 true  },
     { "yellowback", "yed_listvaults",              &yed_listvaults,               true  },
     { "yellowback", "yed_gettxinfo",               &yed_gettxinfo,                true  },
@@ -854,7 +682,6 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_validaterawtransaction",  &yed_validaterawtransaction,   true  },
     { "yellowback", "yed_estimatecollateral",      &yed_estimatecollateral,       true  },
     { "yellowback", "yed_gethistory",              &yed_gethistory,               true  },
-    { "yellowback", "yed_createpricetx",           &yed_createpricetx,            true  },
 };
 
 void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)

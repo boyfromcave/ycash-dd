@@ -140,9 +140,9 @@ struct Context
         for (const COutput& c : coins) {
             if (!c.fSpendable) continue;
             if (only && c.tx->vout[c.i].scriptPubKey != *only) continue;
-            // Never spend a YED-bearing or reserved output as plain YEC (belt and braces: locked coins are already excluded).
+            // Never spend a YED-bearing output as plain YEC (belt and braces: locked coins are already excluded).
             COutPoint o(c.tx->GetHash(), c.i);
-            if (st.GetToken(o).has_value() || yw.IsReserved(o)) continue;
+            if (st.GetToken(o).has_value()) continue;
             mtx.vin.push_back(CTxIn(o));
             prevs.push_back(std::make_pair(c.tx->vout[c.i].scriptPubKey, c.Value()));
             selected += c.Value();
@@ -262,7 +262,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int tier, CReserveKey& re
     std::optional<CAmount> required = RequiredCollateralRounded(cents, p.tierRatioPct[tier], E->dcaBps, E->price);
     if (!required.has_value()) throw std::runtime_error("collateral requirement out of range");
 
-    std::vector<RosterRecord> rosters = ctx.st.GetRosters();
+    std::vector<RosterRecord> rosters = ctx.st.Rosters();
     if (rosters.empty()) throw std::runtime_error("no roster");
     const uint32_t lockHeight = (uint32_t)evalHeight + p.tierBlocks[tier] + MINT_WINDOW;
     const uint32_t expiry = (uint32_t)evalHeight + MINT_WINDOW;
@@ -401,19 +401,18 @@ BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::s
     if (!vault.has_value()) throw std::runtime_error("vault not found");
     if (!vault->IsOpen()) throw std::runtime_error("vault is already CLOSED");
     if (!yw.IsMineVault(vault.value())) throw std::runtime_error("vault owner key is not in this wallet");
-    if (yw.GetPending(vaultOut).has_value()) throw std::runtime_error("a redemption of this vault is already pending; yed_abortredeem to start over");
     if ((int64_t)ctx.indexHeight < (int64_t)vault->lockHeight) {
         throw std::runtime_error(strprintf("vault is locked until height %u (index at %d)", vault->lockHeight, ctx.indexHeight));
     }
     const bool active = vault->Status() == VaultStatus::ACTIVE;
     std::optional<Snapshot> snap = ctx.st.GetSnapshot((uint32_t)ctx.indexHeight);
-    if (active && (!snap.has_value() || !snap->priceDefined)) throw std::runtime_error("no price in effect; co-signers would refuse (RED-6)");
+    if (active && (!snap.has_value() || !snap->priceDefined)) throw std::runtime_error("no price in effect (RED-6)");
     const int64_t requiredBurn = active ? RequiredBurn(vault->mintedCents, snap->errBps) : 0;
 
     int64_t change = 0;
     std::vector<YedCoin> sel = requiredBurn > 0 ? SelectYed(ctx, requiredBurn, change) : std::vector<YedCoin>();
 
-    std::vector<RosterRecord> rosters = ctx.st.GetRosters();
+    std::vector<RosterRecord> rosters = ctx.st.Rosters();
     if (vault->rosterIndex < 0 || vault->rosterIndex >= (int)rosters.size()) throw std::runtime_error("vault references no known roster");
     CScript vaultScript = VaultScript(vault->lockHeight, vault->ownerPubKey, rosters[vault->rosterIndex].script);
     if (vaultScript.empty()) throw std::runtime_error("cannot reconstruct the vault script");
@@ -526,96 +525,6 @@ void SignRedeem(BuiltTx& out, CWallet& wallet, uint32_t branchId)
     }
     out.ownYedOutputs.clear();
     if (out.changeVout >= 0) out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), out.changeVout));
-}
-
-unsigned int CountQuorumSignatures(const CTransaction& tx)
-{
-    if (tx.vin.empty()) return 0;
-    std::vector<valtype> q;
-    valtype o;
-    CScript s;
-    if (!ParseVaultScriptSig(tx.vin[0].scriptSig, q, o, s)) return 0;
-    return q.size();
-}
-
-unsigned int AddCosignature(CMutableTransaction& tx, const CScript& vaultScript, CAmount vaultValue, const Roster& roster,
-                            const CKeyStore& keystore, uint32_t branchId)
-{
-    if (tx.vin.empty()) throw std::runtime_error("no inputs");
-    std::vector<valtype> existing;
-    valtype ownerSig;
-    CScript supplied;
-    if (!ParseVaultScriptSig(tx.vin[0].scriptSig, existing, ownerSig, supplied) || ownerSig.empty()) {
-        throw std::runtime_error("vin[0] carries no owner signature");
-    }
-    const uint256 hash = SignatureHash(vaultScript, CTransaction(tx), 0, SIGHASH_ALL, vaultValue, branchId);
-
-    // Place existing signatures by the roster key they verify against.
-    std::map<size_t, valtype> byKey;
-    for (const valtype& sig : existing) {
-        if (sig.empty() || sig.back() != SIGHASH_ALL) throw std::runtime_error("a quorum signature is not SIGHASH_ALL");
-        valtype der(sig.begin(), sig.end() - 1);
-        bool matched = false;
-        for (size_t k = 0; k < roster.keys.size(); k++) {
-            if (roster.keys[k].Verify(hash, der)) {
-                byKey[k] = sig;
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) throw std::runtime_error("a quorum signature matches no roster key");
-    }
-    // Our key: the first roster key we hold that has not signed yet.
-    bool signedNow = false;
-    for (size_t k = 0; k < roster.keys.size(); k++) {
-        if (byKey.count(k)) continue;
-        CKey key;
-        if (!keystore.GetKey(roster.keys[k].GetID(), key)) continue;
-        valtype sig;
-        if (!key.Sign(hash, sig)) throw std::runtime_error("signing failed");
-        sig.push_back((unsigned char)SIGHASH_ALL);
-        byKey[k] = sig;
-        signedNow = true;
-        break;
-    }
-    if (!signedNow) {
-        for (size_t k = 0; k < roster.keys.size(); k++) {
-            if (byKey.count(k) && keystore.HaveKey(roster.keys[k].GetID())) throw std::runtime_error("this node has already signed");
-        }
-        throw std::runtime_error("this wallet holds no roster key");
-    }
-    std::vector<valtype> ordered;
-    for (const auto& kv : byKey) ordered.push_back(kv.second);
-    tx.vin[0].scriptSig = BuildVaultScriptSig(ordered, ownerSig, vaultScript);
-    return ordered.size();
-}
-
-bool SameExceptSignatures(const CTransaction& a, const CTransaction& b, std::string& why)
-{
-    if (a.fOverwintered != b.fOverwintered || a.nVersion != b.nVersion || a.nVersionGroupId != b.nVersionGroupId) { why = "version differs"; return false; }
-    if (a.nLockTime != b.nLockTime || a.nExpiryHeight != b.nExpiryHeight) { why = "locktime or expiry differs"; return false; }
-    if (a.valueBalance != b.valueBalance || a.vShieldedSpend != b.vShieldedSpend || a.vShieldedOutput != b.vShieldedOutput ||
-        a.vJoinSplit != b.vJoinSplit || a.bindingSig != b.bindingSig) { why = "shielded components differ"; return false; }
-    if (a.vin.size() != b.vin.size() || a.vout.size() != b.vout.size()) { why = "input or output count differs"; return false; }
-    for (size_t i = 0; i < a.vout.size(); i++) {
-        if (a.vout[i].nValue != b.vout[i].nValue || a.vout[i].scriptPubKey != b.vout[i].scriptPubKey) { why = strprintf("output %u differs", (unsigned)i); return false; }
-    }
-    for (size_t i = 0; i < a.vin.size(); i++) {
-        if (a.vin[i].prevout != b.vin[i].prevout || a.vin[i].nSequence != b.vin[i].nSequence) { why = strprintf("input %u differs", (unsigned)i); return false; }
-        if (i > 0 && a.vin[i].scriptSig != b.vin[i].scriptSig) { why = strprintf("input %u signature differs", (unsigned)i); return false; }
-    }
-    std::vector<valtype> qa, qb;
-    valtype oa, ob;
-    CScript sa, sb;
-    if (!ParseVaultScriptSig(a.vin[0].scriptSig, qa, oa, sa) || !ParseVaultScriptSig(b.vin[0].scriptSig, qb, ob, sb)) { why = "vin[0] scriptSig is malformed"; return false; }
-    if (sa != sb) { why = "vault script differs"; return false; }
-    if (oa != ob) { why = "owner signature differs"; return false; }
-    if (qb.size() < qa.size()) { why = "quorum signatures were removed"; return false; }
-    for (const valtype& s : qa) {
-        if (std::find(qb.begin(), qb.end(), s) == qb.end()) { why = "an original quorum signature is missing"; return false; }
-    }
-    why.clear();
-    return true;
 }
 
 } // namespace yellowback

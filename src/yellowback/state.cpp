@@ -73,7 +73,7 @@ const char* CheckMint(const State& st, const Params& params, const CTransaction&
     if (tx.vout.size() < 3) return verdict::BAD_MINT_OUTPUTS;
     if (!tx.vout[0].scriptPubKey.IsPayToScriptHash()) return verdict::BAD_MINT_OUTPUTS;
     if (!p.ownerPubKey.IsFullyValid() || !p.ownerPubKey.IsCompressed()) return verdict::BAD_MINT_OWNER_KEY;
-    std::vector<RosterRecord> rosters = st.GetRosters();
+    std::vector<RosterRecord> rosters = st.Rosters();
     bool matched = false;
     for (uint32_t idx : MintableRosters(rosters, params, height)) {
         CScript vs = VaultScript(p.lockHeight, p.ownerPubKey, rosters[idx].script);
@@ -291,7 +291,7 @@ TxLogRecord ProcessTx(State& st, const Params& params, const CTransaction& tx, i
             CScript redeem;
             Roster roster;
             if (ExtractRedeemScript(tx.vin[anchorInput].scriptSig, redeem) && ParseRosterScript(redeem, roster)) {
-                std::vector<RosterRecord> rosters = st.GetRosters();
+                std::vector<RosterRecord> rosters = st.Rosters();
                 if (rosters.empty() || rosters.back().script != redeem) {
                     RosterRecord r;
                     r.script = redeem;

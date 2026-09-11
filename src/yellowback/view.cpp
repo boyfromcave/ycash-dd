@@ -205,7 +205,7 @@ AnchorRecord State::GetAnchor() const
     return a;
 }
 
-std::vector<RosterRecord> State::GetRosters() const
+std::vector<RosterRecord> State::Rosters() const
 {
     std::vector<RosterRecord> out;
     uint32_t count = 0;

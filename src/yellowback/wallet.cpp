@@ -55,7 +55,6 @@ std::vector<YedCoin> YellowbackWallet::SpendableCoins() const
     AssertLockHeld(wallet->cs_wallet);
     std::vector<YedCoin> out;
     for (const YedCoin& c : AllCoins()) {
-        if (IsReserved(c.outpoint)) continue;
         if (wallet->IsSpent(c.outpoint.hash, c.outpoint.n)) continue; // spent by one of our unconfirmed transactions (D3)
         out.push_back(c);
     }
@@ -134,72 +133,12 @@ void YellowbackWallet::Reconcile()
             ourLocks.erase(o);
         }
     }
-    // Pending redemptions die with their transaction's expiry (F6).
-    if (tipHeight >= 0) {
-        LOCK(cs_pending);
-        for (auto it = pending.begin(); it != pending.end();) {
-            if ((int64_t)it->second.expiryHeight <= tipHeight) {
-                LogPrint("yellowback", "pending redemption of %s expired at %d\n", it->first.ToString(), tipHeight);
-                it = pending.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
 }
 
 std::set<COutPoint> YellowbackWallet::Locked() const
 {
     LOCK(wallet->cs_wallet);
     return ourLocks;
-}
-
-bool YellowbackWallet::AddPending(const PendingRedemption& p)
-{
-    LOCK(cs_pending);
-    if (pending.count(p.vault)) return false;
-    pending[p.vault] = p;
-    return true;
-}
-
-std::optional<PendingRedemption> YellowbackWallet::GetPending(const COutPoint& vault) const
-{
-    LOCK(cs_pending);
-    auto it = pending.find(vault);
-    if (it == pending.end()) return std::nullopt;
-    return it->second;
-}
-
-bool YellowbackWallet::RemovePending(const COutPoint& vault)
-{
-    LOCK(cs_pending);
-    return pending.erase(vault) > 0;
-}
-
-std::vector<PendingRedemption> YellowbackWallet::AllPending() const
-{
-    LOCK(cs_pending);
-    std::vector<PendingRedemption> out;
-    for (const auto& kv : pending) out.push_back(kv.second);
-    return out;
-}
-
-bool YellowbackWallet::IsReserved(const COutPoint& out) const
-{
-    LOCK(cs_pending);
-    for (const auto& kv : pending) {
-        if (kv.second.reservedInputs.count(out)) return true;
-    }
-    return false;
-}
-
-bool YellowbackWallet::MarkCosigned(const COutPoint& vault, int height)
-{
-    LOCK(cs_pending);
-    auto it = cosigned.find(vault);
-    if (it != cosigned.end() && it->second == height) return false;
-    cosigned[vault] = height;
-    return true;
 }
 
 } // namespace yellowback
