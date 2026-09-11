@@ -83,7 +83,10 @@ Mint page derives from; on regtest `startHeight`, `sigmaRefBps`, `supplyCapBps` 
 `enforceUntilHeight` are the four hashed values (§3.1, M13; `enforceUntilHeight` `0` = none).
 `params.feeZat` is the network fee `YELLOWBACK_FEE`, distinct from the enforcement fee
 (`feeMinZat`/`feeBps`). `params.policy.preferredPayee` is `null` unless `-yellowbackpreferredpayee`
-is set.
+is set. `lockedOutputs` (H10) is how many outpoints the Yellowback wallet layer holds locked
+(stage (i)–(iii) of §4.6; `0` when the node runs without a wallet) and `protectedByIndex` is
+`true` whenever that layer is attached: the GUI treats a mismatch between `lockedOutputs` and the
+length of `yed_listunspent` as the trigger for `yed_lockcoins`.
 
 Result of `yed_getinfo`:
 
@@ -105,6 +108,8 @@ Result of `yed_getinfo`:
   "suppressedBlocks": 0,
   "templatePolicy": "strict",
   "abandoned": false,
+  "lockedOutputs": 2,
+  "protectedByIndex": true,
   "activation": {
     "status": "active",
     "lockInHeight": 129,
@@ -887,10 +892,16 @@ Result of `yed_mint`:
 ### `yed_send <yedaddress> <cents>` and `yed_sendmany <{yedaddress: cents, …}>`
 
 Arguments: `yed_send`: `yedaddress` (string), `cents` (number). `yed_sendmany`: one object of
-at most 14 recipients. Unchanged from the prototype: builds the §3.5 TRANSFER from confirmed YED
-inputs (index) and confirmed YEC fee inputs, locks the outputs, commits. Refusals:
-`not-a-yellowback-address`, `insufficient-yed`, `change-floor` (YED change would lie in
-`(0, MIN_OUTPUT)`; the message names the nearest workable amounts, structured by H2 in Phase 8),
+at most 14 recipients. Builds the §3.5 TRANSFER from confirmed YED inputs (index) and confirmed
+YEC fee inputs, locks the outputs, commits. The YED inputs are chosen by the **floor-aware
+selector** (H1), which is deterministic — the same wallet state and the same amount always give
+the same inputs — and tries, in order: an exact match (change `0`), a single input whose change is
+valid, greedy smallest-first with extension while the change is unworkable, then a bounded search.
+A TRANSFER **never burns** (H2): when no selection leaves change of `0` or `≥ MIN_OUTPUT` the
+command refuses with `change-floor` rather than build one. `yed_estimatesend` runs the same
+selector without signing or locking. Refusals: `not-a-yellowback-address`, `insufficient-yed`,
+`change-floor` (YED change would lie in `(0, MIN_OUTPUT)`; the message carries the nearest
+workable amounts below and above, H2), `too-many-inputs`,
 `RPC_INVALID_PARAMETER` for an amount outside `[MIN_OUTPUT, MAX_OUTPUT]`.
 
 Result of `yed_send`:
@@ -915,6 +926,71 @@ Result of `yed_sendmany`:
 }
 ```
 
+### `yed_estimatesend <{yedaddress: cents, …}|cents>`
+
+Arguments: one object of at most 14 recipients (as `yed_sendmany`), **or** a single number — the
+total cents, when the recipients are not yet known (the GUI calls this while the user types).
+A dry run of `yed_send`/`yed_sendmany` (H3): it runs the same floor-aware selector (H1) over the
+same confirmed YED coins, signs nothing, locks nothing and commits nothing. It mirrors
+`yed_estimatecollateral`: a halted gate or an unworkable amount still returns a figure to show.
+
+`workable` is whether a selection exists whose change is `0` or `≥ MIN_OUTPUT`. When it is
+`true`, `inputs` are the outpoints the selector would spend (in the order it would spend them),
+`selectedCents` their total, `changeCents` the YED change (`0` for an exact match), `stage` the
+selector stage that produced it (`"exact"`, `"single"`, `"greedy"` or `"search"`), and
+`spendableCents` the wallet's confirmed, unspent YED. When it is `false`, `inputs` is empty,
+`changeCents` is `0`, `stage` is `"none"`, `error` is the identifier that `yed_send` would throw
+(`change-floor` or `insufficient-yed`, `""` when `workable`) and `alternatives` names the nearest
+workable amounts: `below` the largest workable amount strictly below the request and `above` the
+smallest strictly above it, each `null` when there is none. `alternatives` is `null` when
+`workable`. The command never refuses for the amount itself; `RPC_INVALID_PARAMETER` only for a
+malformed argument, an amount outside `[MIN_OUTPUT, MAX_OUTPUT]`, or more than 14 recipients.
+
+Result of `yed_estimatesend`:
+
+```json
+{
+  "amountCents": 4000,
+  "recipients": 1,
+  "workable": true,
+  "stage": "greedy",
+  "inputs": [
+    { "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8", "vout": 1, "cents": 10000 }
+  ],
+  "selectedCents": 10000,
+  "changeCents": 6000,
+  "spendableCents": 10000,
+  "error": "",
+  "alternatives": null
+}
+```
+
+### `yed_unlockcoin <txid> <n> <acknowledgement>`
+
+Arguments: `txid` (string), `n` (number), `acknowledgement` (string; must be exactly
+`I understand this burns YED`). The deliberate escape hatch of H5: `lockunspent` refuses to unlock
+an outpoint the Yellowback wallet layer holds (`yed-locked-outpoint`) and `lockunspent true`
+without an argument re-applies those locks after unlocking everything else, so this command is the
+only way to hand a YED outpoint back to plain YEC coin selection. The YED it carries is burned by
+the first transaction that spends it outside the overlay, and the next `yed_lockcoins`,
+reconciliation or restart locks it again — unlock it and spend it in the same session.
+
+Refusals: `unlock-acknowledgement-missing` (the third argument is not the exact string),
+`RPC_INVALID_PARAMETER` for a bad txid or a negative `n`. Unlocking an outpoint the layer does not
+hold succeeds and reports `wasYellowbackLocked: false`.
+
+Result of `yed_unlockcoin`:
+
+```json
+{
+  "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+  "vout": 1,
+  "unlocked": true,
+  "wasYellowbackLocked": true,
+  "cents": 10000
+}
+```
+
 ### `yed_redeem <vaultTxid> [to]`
 
 Arguments: `vaultTxid` (string), `to` (string, optional; a transparent or `ys1…` destination for
@@ -929,7 +1005,11 @@ the collateral; default a fresh own transparent address). One step (V24):
   burn, no fee, no payload; an ordinary spend no rule polices (K3). Returns `burnedCents: 0`,
   `feeZat: 0`, `payee: null`. The GUI calls this **Release**.
 
-`collateralOut` is the zat paid to `to`. Refusals: `vault-not-found`, `vault-not-owned`,
+`collateralOut` is the zat paid to `to`. `extraBurnCents` (H4) is a sub-dollar YED remainder the
+selector burned rather than refuse: it is `0` whenever a selection with change of `0` or
+`≥ MIN_OUTPUT` exists (those are always preferred) and otherwise lies in `[1, MIN_OUTPUT − 1]`,
+i.e. at most $0.99. `burnedCents` stays the vault's debt; `extraBurnCents` is burned on top of it.
+Refusals: `vault-not-found`, `vault-not-owned`,
 `vault-not-active` (CLOSED or CLAIMED only), `vault-locked` (tip below `lockHeight`, ACTIVE and
 VOID alike), `insufficient-yed`, `change-floor`, `mempool-check-failed:<verdict>`,
 `RPC_WALLET_ERROR` for a locked wallet.
@@ -943,7 +1023,8 @@ Result of `yed_redeem`:
   "feeZat": 62814071,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "collateralOut": 25062804070,
-  "to": "smExampleTransparentTwin111111111111"
+  "to": "smExampleTransparentTwin111111111111",
+  "extraBurnCents": 0
 }
 ```
 
@@ -952,7 +1033,7 @@ Result of `yed_redeem`:
 Arguments as `yed_redeem`. The §3.5 CLAIM of somebody else's underwater vault (from
 `yed_listclaimable`): claim-path scriptSig, `nLockTime = claimHeight`, burns `mintedCents` of the
 claimant's own YED, pays the fee from the collateral, collateral to `to`. Same return shape as
-`yed_redeem`. Refusals: `vault-not-found`, `vault-not-active`, `claim-not-yet` (tip below
+`yed_redeem` (including `extraBurnCents`, H4). Refusals: `vault-not-found`, `vault-not-active`, `claim-not-yet` (tip below
 `claimHeight`), `claim-not-underwater` (RED-4 would fail at the reference snapshot),
 `insufficient-yed`, `change-floor`, `mempool-check-failed:<verdict>`.
 
@@ -965,7 +1046,8 @@ Result of `yed_claim`:
   "feeZat": 62814071,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "collateralOut": 25062804070,
-  "to": "smExampleTransparentTwin111111111111"
+  "to": "smExampleTransparentTwin111111111111",
+  "extraBurnCents": 0
 }
 ```
 
@@ -1095,7 +1177,10 @@ what `yellowback_rpc_contract.py` uses.
 | `claim-not-underwater` | `yed_claim` | RED-4 would fail at the reference snapshot (the price did not fall) |
 | `sweep-not-abandoned` | `yed_sweep` | the abandonment predicate is false: enforcement on, or suspended for less than `ABANDON_BLOCKS` (L10, L12 — a passed sunset alone is not abandonment) |
 | `sweep-acknowledgement-missing` | `yed_sweep` | the second argument is not the exact acknowledgement string |
-| `change-floor` | `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim` | YED change would lie in `(0, MIN_OUTPUT)`: send `cents − 50` from a single `cents` output; the message names the nearest workable amounts (structured by H2 in Phase 8) |
+| `change-floor` | `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim` | no selection leaves YED change of `0` or `≥ MIN_OUTPUT` (H2; a REDEEM or CLAIM burns a sub-dollar remainder instead, H4, so it reaches this only when even that is impossible): send `cents − 50` from a single `cents` output. The message is structured and always has this shape: `change-floor: <requested> cents cannot be sent from these coins without change below the $1.00 minimum output; nearest workable amounts: below <n\|none>, above <n\|none>` — the GUI reads the two numbers with that grammar and `yed_estimatesend.alternatives` returns them as fields |
+| `unlock-acknowledgement-missing` | `yed_unlockcoin` | the third argument is not exactly `I understand this burns YED` |
+| `yed-locked-outpoint` | `lockunspent` (the stock RPC) | `lockunspent false\|true [{txid,vout}]` naming an outpoint the Yellowback wallet layer holds: use `yed_unlockcoin` |
+| `yed-burn-refused` | `sendrawtransaction` (the stock RPC) | with `-yellowback`, a raw transaction that spends a `Tokens` outpoint of this wallet without a payload that reassigns it: pass `allowyedburn = true` to send it anyway |
 | `not-a-yellowback-address` | `yed_send`, `yed_sendmany`, `yed_validateaddress` (in `reason`, no throw) | the recipient is not a `ye…`/`yt…`/`yr…` address of this network: pass an `s1…`/`sm…` address |
 | `verdict-parent-not-tip` | `yed_getblockverdict` | the block's parent is not the index tip and the block is not a rejected child of it (N12): pass the tip's grandparent |
 | `insufficient-yed` | `yed_redeem`, `yed_claim`, `yed_send`, `yed_sendmany` | wallet YED below the burn or amount |
@@ -1141,8 +1226,8 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_listtransactions` | 0, 1 (unchanged) |
 | `yed_send` | 1 (unchanged) |
 | `yed_sendmany` | 0 (unchanged; the object) |
-| `yed_estimatesend` | 0 (Phase 8) |
-| `yed_unlockcoin` | 1 (Phase 8) |
+| `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
+| `yed_unlockcoin` | 1 (Phase 8; the vout) |
 | `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_claim`, `yed_sweep`, `yed_listpositions` | none (all strings) |
 
 ## Configuration the contract depends on
@@ -1160,14 +1245,33 @@ regtest only: `-yellowbackstartheight`, `-yellowbacksigmaref`, `-yellowbacksuppl
 `-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|template|novalve`. `-prune` is refused
 with `-yellowback`.
 
-## Phase 8 additions (rpcversion stays 2; no shape until then)
+## Phase 8 additions (delivered; `rpcversion` stays 2)
 
-- `yed_estimatesend` (H3): dry run of `yed_send`/`yed_sendmany` — the selection, the change and,
-  when the amount is unworkable, the nearest workable amounts; no signing, no locking.
-- `yed_unlockcoin <txid> <n> "I understand this burns YED"` (H5): the deliberate escape hatch once
-  `lockunspent` refuses to unlock a Yellowback-held outpoint.
-- `yed_getinfo.lockedOutputs` (number) and `protectedByIndex: true` (H10): the GUI treats a
-  mismatch between `lockedOutputs` and `yed_listunspent` as the trigger for `yed_lockcoins`.
-- `yed_redeem.extraBurnCents` (H4): a sub-dollar remainder the builder burned rather than refuse.
+Every item below is implemented and has its shape above; the `rpcversion` rule holds (additions
+only, nothing removed and nothing reshaped).
 
-Their shapes are added to this file, as `json` blocks, in Phase 8's first commit.
+- `yed_estimatesend` (H3): the dry run of `yed_send`/`yed_sendmany` — the selection, the change
+  and, when the amount is unworkable, the nearest workable amounts; no signing, no locking.
+- `yed_unlockcoin <txid> <n> "I understand this burns YED"` (H5): the deliberate escape hatch now
+  that `lockunspent` refuses to unlock a Yellowback-held outpoint.
+- `yed_getinfo.lockedOutputs` (number) and `protectedByIndex` (boolean) (H10).
+- `yed_redeem.extraBurnCents` and `yed_claim.extraBurnCents` (H4): a sub-dollar remainder the
+  selector burned rather than refuse, `0` whenever a selection with valid change exists.
+
+### Stock RPCs the overlay changes (H5, H7, H8; wallet tier, no consensus effect)
+
+These are Ycash's own commands. Each change is additive and inert without `-yellowback`:
+
+| Command | Change |
+|---|---|
+| `lockunspent` | With `-yellowback` and a wallet, `lockunspent false\|true [{txid,vout},…]` refuses (`yed-locked-outpoint`, `RPC_WALLET_ERROR`) when any named outpoint is held by the Yellowback wallet layer, and nothing in the call is applied. `lockunspent true` with no second argument still unlocks everything, then **re-applies** the Yellowback locks before returning, so it can never leave YED spendable as plain YEC. |
+| `sendrawtransaction` | Third parameter `allowyedburn` (boolean, default `false`), the same shape as `allowhighfees`: with `-yellowback` and a wallet, a raw transaction that spends a `Tokens` outpoint that is mine and carries no payload assigning cents to an output is refused with `yed-burn-refused` (`RPC_WALLET_ERROR`) unless it is `true`. Without `-yellowback`, without a wallet, or for a transaction that spends no YED of this wallet, the parameter changes nothing. |
+| `importprivkey`, `importaddress`, `importwallet`, `z_importkey` | After their rescan, each calls the Yellowback wallet layer's `Reconcile()` (H8), so YED that has just become mine is locked before the next block rather than at the next reconciliation. No return-value change. |
+
+### Startup (H6)
+
+A datadir that holds a Yellowback index refuses to start without `-yellowback`: `init` fails with
+*"This datadir holds a Yellowback index … start with -yellowback, or with -yellowback=0 to
+acknowledge that any YED outputs in this wallet are spendable as plain YEC."* Passing
+`-yellowback=0` explicitly is that acknowledgement and starts normally (with the warning logged);
+the check is skipped with `-disablewallet`, which cannot burn anything.

@@ -113,6 +113,7 @@ BITCOIN_TESTS =\
   test/util_tests.cpp \
   test/sha256compress_tests.cpp \
   test/yellowback_address_tests.cpp \
+  test/yellowback_coinselect_tests.cpp \
   test/yellowback_math_tests.cpp \
   test/yellowback_payload_tests.cpp \
   test/yellowback_script_tests.cpp \
