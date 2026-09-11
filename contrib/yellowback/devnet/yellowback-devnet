@@ -85,13 +85,17 @@ def stop_agents(state):
         if agent_alive(pid):
             try: os.kill(pid, 15); print("stopping quote agent of node%d (pid %d)" % (node, pid))
             except OSError as error: print("agent of node%d: %s" % (node, error))
-def wait_quotes(state, timeout=60):
-    """Wait until every pool's next tag is a quote (the agents have published)."""
+def wait_quotes(state, since=None, timeout=60):
+    """Wait until every pool's next tag is a quote; with `since` (a wall-clock time), until each
+    pool's quote was stamped at least two seconds after it, so the agents have re-read the mock."""
     deadline = time.time() + timeout
     while True:
-        kinds = {node: rpc(state, node).yed_getinfo()["miner"]["quoteKind"] for node in POOLS}
-        if all(kind == "quote" for kind in kinds.values()): return
-        if time.time() > deadline: raise RuntimeError("quote agents did not publish within %ds: %s" % (timeout, kinds))
+        miners = {node: rpc(state, node).yed_getinfo()["miner"] for node in POOLS}
+        def fresh(miner):
+            if miner["quoteKind"] != "quote": return False
+            return since is None or (time.time() - since) - miner["quoteAgeSeconds"] >= 2
+        if all(fresh(miner) for miner in miners.values()): return
+        if time.time() > deadline: raise RuntimeError("quote agents did not publish within %ds: %s" % (timeout, {node: miner["quoteKind"] for node, miner in miners.items()}))
         time.sleep(0.5)
 def load(directory):
     try:
@@ -197,6 +201,8 @@ def command_check(args):
 def status(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     for index, role in enumerate(("user", "stock", "pool", "pool", "pool")): print("node%d %-5s rpc %d %s" % (index, role, rpc_port(index), "up" if alive(state, index) else "DOWN"))
+    if not alive(state, USER):
+        print("node0 is down: no chain state to report (`up --force` rebuilds, `down --wipe` removes the directory)"); return 1
     node = rpc(state, USER); activation, stats = node.yed_getactivation(), node.yed_getstats()
     print("height %d; activation %s; minting %s" % (node.getblockcount(), activation["status"], "allowed" if stats["mintingAllowed"] else "halted"))
     for row in node.yed_listminers(): print("pool %s registered: %s eligible: %s" % (row["payoutAddress"], json.dumps(row["registered"]), json.dumps(row["eligible"])))
@@ -219,9 +225,9 @@ def price(args):
     state, value = load(os.path.abspath(args.dir)), Decimal(args.usd)
     if value <= 0: sys.exit("price must be positive")
     if agent_pids(state):
-        write_mock(os.path.abspath(args.dir), value)
+        since = time.time(); write_mock(os.path.abspath(args.dir), value)
         state["price_usd"] = str(value); save(os.path.abspath(args.dir), state)
-        try: wait_quotes(state)
+        try: wait_quotes(state, since)
         except RuntimeError as error: sys.exit(str(error))
         print("set the mock price to $%s; the agents have pushed it, mine a pool block to publish each quote" % value)
         return
