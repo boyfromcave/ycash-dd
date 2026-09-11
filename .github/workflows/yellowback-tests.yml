@@ -28,7 +28,15 @@ on:
   workflow_dispatch:
 
 env:
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore yellowback_sapling yellowback_claim yellowback_pricefeed yellowback_rpc_contract
+  # Plan section 6.0 item 6's list for Phase 6 and after, plus yellowback_hardening (Phase 8,
+  # written after that list). Each phase registered its script in qa/pull-tester/rpc-tests.py but
+  # this variable was not updated with it, so mining, enforcement, stock_node and hardening — the
+  # soft fork's own safety evidence among them — were never run by CI. Added 2026-09-11.
+  # yellowback_quote is still absent: it starts the quote agent, which reads TOML with the stdlib
+  # tomllib (Python >= 3.11) while this job runs ubuntu-22.04's 3.10, and moving the job to 3.11
+  # also moves it off the apt python3-zmq the prerequisite step imports. Its unit tests do run, in
+  # the python job. Closing that gap is a CI change on its own.
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening
   SANITIZER_SCRIPTS: yellowback_index
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
