@@ -1279,6 +1279,14 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         rejected_start = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks']
         stock_blocks = 0
         unbacked_peak = 0
+        # Case 9 leaves every enforcing node on node 1's chain (the valve tripped and they
+        # reorganised onto it), so the vault whose rule-breaking spend was in the tripping branch
+        # is legitimately unbacked there before this case starts.  The invariant is therefore
+        # "no *new* unbacked vault appears while this case runs".
+        pre_unbacked = {row['txid'] for i in ENFORCING
+                        for row in self.nodes[i].yed_listvaults() if row.get('unbacked', False)}
+        if pre_unbacked:
+            print('  %d vault(s) already unbacked from the earlier cases; excluded' % len(pre_unbacked))
         for n in range(n_blocks):
             roll = rng.random()
             if n and n % 20 == 0:
@@ -1324,6 +1332,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             if n % 10 == 0:                       # the invariant, every tenth step
                 for i in ENFORCING:
                     for row in self.nodes[i].yed_listvaults():
+                        if row['txid'] in pre_unbacked:
+                            continue
                         assert_equal((i, row['txid'], row.get('unbacked', False)),
                                      (i, row['txid'], False))
         rejected = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks'] - rejected_start
