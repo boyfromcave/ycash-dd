@@ -105,7 +105,7 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         assert_equal(sorted(gbt.keys()), V450_GBT_KEYS)
         assert_equal(gbt['mutable'], V450_MUTABLE)
         cb = ym.tx_from_hex(gbt['coinbasetxn']['data'])
-        assert ym.TAG_MAGIC not in bytes(cb.vin[0].scriptSig), 'the stock template carries a tag'
+        assert ym.TAG_MAGIC not in bytes(cb.vin[0].script_sig), 'the stock template carries a tag'
 
     def mine_and_relay(self, label):
         """Node 1 mines and the whole network follows; node 1 relays a pool's block too."""
