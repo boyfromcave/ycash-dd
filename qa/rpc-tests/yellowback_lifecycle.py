@@ -97,7 +97,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
 
-        # Rule: MINT-1 MINT-2 MINT-3 MINT-5 MINT-8 MINTPOL-1 FEE-1 FEE-W
+# Rule: MINT-1 MINT-2 MINT-3 MINT-5 MINT-8 MINTPOL-1 FEE-1 FEE-W
         print('mint_class_a: 107 YED locked 48 blocks; collateral fixed at the reference snapshot')
         ref = user.yed_getinfo()['height'] - REF_LAG
         est = user.yed_estimatecollateral(10700, 48)
@@ -119,7 +119,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(mint_a['feeZat'], payee['feeZat'])
         assert_equal(raw['vout'][3]['scriptPubKey']['addresses'], [mint_a['payee']])
         assert_equal(raw['expiryheight'], ref + REF_WINDOW)
-        # Rule: MINT-4
+# Rule: MINT-4
         print('zero_conf_lock: the token output is locked before confirmation')
         assert {'txid': mint_a['txid'], 'vout': 1} in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
         assert_equal(user.yed_getbalance()['unconfirmedCents'], 10700)
@@ -137,7 +137,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 10700)
         self.checkpoint('mint A')
 
-        # Rule: MINT-2 UNDO
+# Rule: MINT-2 UNDO
         print('two_block_reorg_tolerance: the mint confirms again two blocks later after a reorg')
         self.split_network()
         mint_b = user.yed_mint(10000, 48)
@@ -168,7 +168,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(len(observer.yed_listpositions()), 1)
         assert_equal(user.yed_getbalance()['confirmedCents'], 30700)
 
-        # Rule: XFER-1 XFER-2 XFER-3
+# Rule: XFER-1 XFER-2 XFER-3
         print('send: 1 YED to the observer, 3 YED back')
         sent = user.yed_send(observer.yed_getnewaddress(), 100)
         assert_equal(sent['changeCents'], 9900)
@@ -182,14 +182,14 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(user.yed_getbalance()['confirmedCents'], 30900)
         assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [300, 9900, 10000, 10700])
 
-        # Rule: XFER-1
+# Rule: XFER-1
         print('change_floor: 101.50 YED from the smallest-first prefix 3 + 99 leaves 50 cents of change')
         assert_rpc_error('change-floor', user.yed_send, observer.yed_getnewaddress(), 10150)
         assert_rpc_error('not-a-yellowback-address', user.yed_send, observer.getnewaddress(), 100)
         assert_rpc_error('insufficient-yed', observer.yed_send, user.yed_getnewaddress(), 20000)
         assert_equal(observer.yed_validateaddress(observer.getnewaddress())['reason'], 'not-a-yellowback-address')
 
-        # Rule: IN-1 IN-3
+# Rule: IN-1 IN-3
         print('plain_yec_burn_recorded: the observer spends its 98 YED output as plain YEC')
         coin = coin_of(observer, 9800)
         raw = observer.createrawtransaction([{'txid': coin['txid'], 'vout': coin['vout']}],
@@ -204,7 +204,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 30900)
         assert_equal([x['type'] for x in observer.yed_listtransactions() if x['txid'] == burn_txid], ['burn'])
 
-        # Rule: XFER-2
+# Rule: XFER-2
         print('under_assigned_raw_transfer: 99 YED in, 98 YED assigned, 1 YED burned')
         coin = coin_of(user, 9900)
         dest = user.yed_getnewaddress()
@@ -230,7 +230,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(rows[back['txid']]['type'], 'receive')
         self.checkpoint('transfers')
 
-        # Rule: RED-1
+# Rule: RED-1
         print('redeem_before_lock_refused')
         assert_rpc_error('vault-locked', user.yed_redeem, mint_b['txid'])
         assert_rpc_error('vault-not-owned', observer.yed_redeem, mint_b['txid'])
@@ -252,7 +252,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         default = payees['default']['payoutAddress']
         other = [a for a in payees['eligible'] if a != default][0]
 
-        # Rule: RED-3 BLK-1 BLK-2
+# Rule: RED-3 BLK-1 BLK-2
         print('raw_redemption_outside_payee_set_rejected: the fee to a key outside E(R)')
         hex_out = self.raw_redeem(user, vault_a, 10700, stock.getnewaddress(), fee, r)
         assert_equal(nodes[2].yed_validaterawtransaction(hex_out)['verdict'], 'vault-spend-bad-payee')
@@ -260,14 +260,14 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         result, bad = mine_block_raw(nodes[2], [hex_out])
         assert_equal(result, 'yellowback-vault-spend')
         assert_equal(nodes[2].yed_getvault(mint_a['txid'])['status'], 'ACTIVE')
-        # Rule: RED-3
+# Rule: RED-3
         print('raw_redemption_short_fee_rejected')
         hex_short = self.raw_redeem(user, vault_a, 10700, default, fee - 1, r)
         assert_equal(nodes[3].yed_validaterawtransaction(hex_short)['verdict'], 'vault-spend-bad-fee')
         result, _ = mine_block_raw(nodes[3], [hex_short])
         assert_equal(result, 'yellowback-vault-spend')
         assert_rpc_error('yellowback-vault-spend', nodes[3].sendrawtransaction, hex_short)
-        # Rule: RED-1 RED-2 RED-3 MP-1
+# Rule: RED-1 RED-2 RED-3 MP-1
         print('raw_redemption_non_default_eligible_payee_accepted')
         hex_ok = self.raw_redeem(user, vault_a, 10700, other, fee, r)
         v = nodes[2].yed_validaterawtransaction(hex_ok)
@@ -286,7 +286,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(user.yed_getbalance()['confirmedCents'], 20100)
         self.checkpoint('raw redemption of A')
 
-        # Rule: RED-1 RED-2 RED-3 FEE-1 FEE-W MP-1
+# Rule: RED-1 RED-2 RED-3 FEE-1 FEE-W MP-1
         print('one_step_redeem: yed_redeem burns the debt, pays the fee to the default payee')
         r = user.getblockcount()
         vault_b = user.yed_getvault(mint_b['txid'])
@@ -317,7 +317,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_rpc_error('vault-not-active', user.yed_redeem, mint_b['txid'])
         self.checkpoint('redeem B')
 
-        # Rule: RED-1 MP-1
+# Rule: RED-1 MP-1
         print('sweep_refused_while_enforcing')
         assert_equal(user.yed_getinfo()['abandoned'], False)
         assert_rpc_error('sweep-not-abandoned', user.yed_sweep, mint_c['txid'], SWEEP_ACK)
@@ -325,7 +325,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_equal(user.yed_getvault(mint_c['txid'])['status'], 'ACTIVE')
         assert_equal([p['canSweep'] for p in user.yed_listpositions('ACTIVE')], [False])
 
-        # Rule: MINT-2
+# Rule: MINT-2
         print('expired_transaction_display: an observer mint left unmined past nExpiryHeight')
         self.split_network()
         expired = observer.yed_mint(10000, 48)
@@ -343,7 +343,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         assert_rpc_error('tx-not-found', nodes[2].yed_gettxinfo, expired['txid'])
         assert_equal(nodes[2].yed_getstats()['activeVaults'], 2)   # C and D; the expired mint left no trace
 
-        # Rule: FEE-0 RED-3
+# Rule: FEE-0 RED-3
         print('fee_0: no pool tagged in the payee window, so the redemption carries no fee output')
         stock.generate(PAYEE_WINDOW + 1)
         self.sync_all(blocks_only=True)

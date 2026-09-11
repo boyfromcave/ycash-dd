@@ -646,7 +646,7 @@ UniValue yed_listtransactions(const UniValue& params, bool fHelp)
         }
         else if (l.Type() == TxLogType::REDEEM && ok && l.path == "claim" && spent > 0) { type = "claim"; }
         else if (spent > 0 && l.burned > 0 && l.yedOut == received) { type = "burn"; }   // nothing left this wallet but the burn
-        else if (spent > received) { type = "send"; }
+        else if (spent > 0) { type = "send"; }        // incl. an own-to-own transfer (amountCents 0)
         else { type = "receive"; }
         UniValue o(UniValue::VOBJ);
         o.pushKV("txid", txid.GetHex());

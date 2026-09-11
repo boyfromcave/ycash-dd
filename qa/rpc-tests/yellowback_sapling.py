@@ -2,256 +2,199 @@
 # Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
 """
-Yellowback Sapling funding and destinations (plan revision 15, I2):
-  - a mint funded from a ys1... address in one transaction (no transparent inputs, vShieldedSpend,
-    positive valueBalance) registers like any other and debits the shielded balance;
-  - a mint funded from one s1... address spends only that address's outputs, and is refused when
+Sapling funding and destinations (plan §4.6, §3.5, the transaction_builder extension):
+
+  - a mint funded from a ys1… address in one transaction (no transparent inputs, vShieldedSpend,
+    positive valueBalance) registers like any other (TX-0: the YEC side is never restricted) and
+    debits the shielded balance; the token output is locked before confirmation;
+  - a mint funded from one s1… address spends only that address's outputs, and is refused when
     that address cannot cover the collateral;
-  - a redemption pays its collateral straight to a ys1... address (vShieldedOutput, negative
-    valueBalance) through the federation's co-signers, and to a chosen s1... address;
-  - a co-signer refuses a redemption that carries a Sapling spend (RED-4);
+  - a redemption pays its collateral straight to a ys1… address (vShieldedOutput, negative
+    valueBalance): the transparent outputs are YED change at vout[0] (when there is change), the
+    payload, then the fee output — feeVout names it wherever it lands: vout[2] with change,
+    vout[1] without (N39);
   - bad `from` / `to` values are refused before anything is signed.
-Nodes: 0 user, 1 second user, 2-4 federation (2-of-3).
+
+Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (a second wallet).
 """
+
 from decimal import Decimal
-from io import BytesIO
 
-from test_framework.mininode import CTransaction
-from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import (
-    assert_equal,
-    assert_greater_than,
-    bytes_to_hex_str,
-    connect_nodes_bi,
-    hex_str_to_bytes,
-    start_node,
-    start_nodes,
-    stop_node,
-    sync_mempools,
-    wait_and_assert_operationid_status,
-)
+from test_framework.util import assert_equal, assert_greater_than, wait_and_assert_operationid_status
 from test_framework.yellowback_util import (
+    COIN,
+    POOLS,
+    REF_LAG,
     TOKEN_VALUE,
-    assert_yed_synced,
-    cosign_and_submit,
-    fund_genesis_anchor,
-    make_regtest_roster,
-    publish_price,
-    yellowback_node_args,
+    YELLOWBACK_FEE,
+    YellowbackTestFramework,
+    fee_zat,
 )
-
-FEE = 1000  # DEFAULT_FEE = YELLOWBACK_FEE, in zat
-COIN = 100000000
+from test_framework import yellowback_model as ym
 
 
 def assert_rpc_error(substr, fn, *args):
     try:
         fn(*args)
     except Exception as e:
-        assert substr in str(e), "expected %r in %r" % (substr, str(e))
+        assert substr in str(e), 'expected %r in %r' % (substr, str(e))
         return
-    raise AssertionError("expected an error containing %r" % substr)
-
-
-def tx_from_hex(h):
-    tx = CTransaction()
-    tx.deserialize(BytesIO(hex_str_to_bytes(h)))
-    return tx
-
-
-def tx_to_hex(tx):
-    return bytes_to_hex_str(tx.serialize())
+    raise AssertionError('expected an error containing %r' % substr)
 
 
 def zat(d):
     return int(Decimal(str(d)) * COIN)
 
 
-class YellowbackSaplingTest(BitcoinTestFramework):
-
-    def __init__(self):
-        super().__init__()
-        self.num_nodes = 5
-        self.setup_clean_chain = True
-        self.genesis = None
-
-    def node_args(self, i):
-        return yellowback_node_args(genesis=self.genesis, yellowback=(self.genesis is not None))
-
-    def setup_nodes(self):
-        return start_nodes(self.num_nodes, self.options.tmpdir,
-                           extra_args=[self.node_args(i) for i in range(self.num_nodes)])
-
-    def setup_network(self, split=False):
-        self.nodes = self.setup_nodes()
-        self.reconnect_all()
-        self.is_network_split = False
-        self.sync_all()
-
-    def reconnect_all(self):
-        for i in range(self.num_nodes - 1):
-            connect_nodes_bi(self.nodes, i, i + 1)
-
-    def restart_all(self):
-        for i in range(self.num_nodes):
-            stop_node(self.nodes[i], i)
-        for i in range(self.num_nodes):
-            self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i))
-        self.reconnect_all()
-
-    def mine(self, n=1, node=0):
-        self.nodes[node].generate(n)
-        self.sync_all()
-        assert_yed_synced(self.nodes)
-
-    def price(self, p):
-        publish_price(self.nodes[2], [self.nodes[2], self.nodes[3]], p)
-        sync_mempools(self.nodes)
-
-    def mine_to(self, height, price):
-        while self.nodes[0].getblockcount() < height:
-            step = min(40, height - self.nodes[0].getblockcount())
-            self.price(price)
-            self.mine(step)
-
-    def vault(self, node, txid):
-        for p in node.yed_listpositions():
-            if p['vaultTxid'] == txid:
-                return p
-        raise AssertionError("vault %s not listed" % txid)
+class YellowbackSaplingTest(YellowbackTestFramework):
 
     def run_test(self):
         nodes = self.nodes
-        print("Funding")
-        nodes[0].generate(105)
-        self.sync_all()
-        nodes[0].sendtoaddress(nodes[1].getnewaddress(), Decimal('5'))
-        for i in (2, 3, 4):
-            nodes[0].sendtoaddress(nodes[i].getnewaddress(), Decimal('2'))
-        nodes[0].generate(1)
-        self.sync_all()
+        user, other = nodes[0], nodes[5]
 
-        print("Roster 2-of-3 on nodes 2-4, genesis anchor, restart with -yellowback")
-        roster = make_regtest_roster(nodes[2:5], 2)
-        self.genesis = fund_genesis_anchor(nodes[0], roster, Decimal('1.0'))
-        self.sync_all()
-        self.restart_all()
-        self.sync_all()
-        assert_yed_synced(nodes)
+        print('activate at $50: $100 at 500 % is 10 YEC of collateral')
+        self.activate(POOLS, quote_usd=50)
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        assert_equal(user.yed_estimatecollateral(10000, 48)['requiredZat'], 10 * COIN)
 
-        print("Price $50/YEC, so $100 at 1000 % is 20 YEC of collateral")
-        self.price(50000000)
-        self.mine(3)
-        assert_equal(nodes[0].yed_estimatecollateral(10000, 0)['requiredZat'], 20 * COIN)
-
-        print("Shield 30 YEC into a ys1... address of node 0")
-        ys = nodes[0].z_getnewaddress('sapling')
+        print('shield 30 YEC into a ys1... address of node 0')
+        ys = user.z_getnewaddress('sapling')
         assert ys.startswith('yregtestsapling')
-        taddr = nodes[0].getnewaddress()
-        nodes[0].sendtoaddress(taddr, Decimal('30.001'))
-        self.mine(1)
-        opid = nodes[0].z_sendmany(taddr, [{'address': ys, 'amount': Decimal('30')}], 1, Decimal('0.0001'))
-        wait_and_assert_operationid_status(nodes[0], opid)
-        self.mine(1)
-        assert_equal(nodes[0].z_getbalance(ys), Decimal('30'))
+        taddr = user.getnewaddress()
+        user.sendtoaddress(taddr, Decimal('30.001'))
+        user.sendtoaddress(other.getnewaddress(), 5)
+        self.sync_all()
+        self.mine(POOLS[0])
+        opid = user.z_sendmany(taddr, [{'address': ys, 'amount': Decimal('30')}], 1, Decimal('0.0001'))
+        wait_and_assert_operationid_status(user, opid)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.z_getbalance(ys), Decimal('30'))
 
-        print("I2: mint from the ys1... address in one transaction")
-        assert_rpc_error("not a transparent (s1", nodes[0].yed_mint, 10000, 0, "nonsense")
-        assert_rpc_error("not a transparent (s1", nodes[0].yed_mint, 10000, 0, nodes[0].yed_getnewaddress())
-        assert_rpc_error("no spending key", nodes[1].yed_mint, 10000, 0, ys)
-        mint1 = nodes[0].yed_mint(10000, 0, ys)
+# Rule: MINT-1 MINT-3 TX-0
+        print('mint from the ys1... address in one transaction')
+        assert_rpc_error('bad-address', user.yed_mint, 10000, 48, 'nonsense')
+        assert_rpc_error('bad-address', user.yed_mint, 10000, 48, user.yed_getnewaddress())
+        assert_rpc_error('bad-address', other.yed_mint, 10000, 48, ys)          # no spending key there
+        z_before = user.z_getbalance(ys)
+        mint1 = user.yed_mint(10000, 48, ys)
         vault1 = mint1['txid']
         assert_equal(mint1['fundedFrom'], 'sapling')
-        assert_equal(mint1['from'], ys)
-        assert_equal(mint1['collateralZat'], 20 * COIN)
-        raw = nodes[0].getrawtransaction(vault1, 1)
+        assert_equal(mint1['collateralZat'], 10 * COIN)
+        assert_greater_than(mint1['feeZat'], 0)
+        raw = user.getrawtransaction(vault1, 1)
         assert_equal(raw['vin'], [])
         assert_greater_than(len(raw['vShieldedSpend']), 0)
-        assert_equal(len(raw['vShieldedOutput']), 1)          # change back to ys
-        assert_equal(zat(raw['valueBalance']), 20 * COIN + TOKEN_VALUE + FEE)
-        assert_equal(len(raw['vout']), 3)
-        # B4 still holds for the Sapling shape: the token output is locked before confirmation.
-        assert {'txid': vault1, 'vout': 1} in [{'txid': l['txid'], 'vout': l['vout']} for l in nodes[0].listlockunspent()]
-        sync_mempools(nodes)
-        assert_equal(nodes[2].yed_gettxinfo(vault1)['verdict'], 'mint-registered')
-        self.mine(1)
-        assert_equal(nodes[2].yed_gettxinfo(vault1)['verdict'], 'mint-registered')
-        assert_equal(self.vault(nodes[0], vault1)['status'], 'ACTIVE')
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 10000)
-        assert_equal(nodes[0].z_getbalance(ys), Decimal('30') - Decimal(20 * COIN + TOKEN_VALUE + FEE) / COIN)
+        assert_equal(len(raw['vShieldedOutput']), 1)                        # change back to ys
+        assert_equal(zat(raw['valueBalance']), 10 * COIN + TOKEN_VALUE + mint1['feeZat'] + YELLOWBACK_FEE)
+        assert_equal(len(raw['vout']), 4)                                  # vault, token, payload, fee
+        assert_equal(raw['vout'][3]['scriptPubKey']['addresses'], [mint1['payee']])
+        assert {'txid': vault1, 'vout': 1} in [{'txid': l['txid'], 'vout': l['vout']} for l in user.listlockunspent()]
+        assert_equal(user.yed_getbalance()['unconfirmedCents'], 10000)
+        self.sync_all()
+        self.mine(POOLS[2])
+        assert_equal(nodes[2].yed_gettxinfo(vault1)['verdict'], 'ok')
+        assert_equal(user.yed_getvault(vault1)['status'], 'ACTIVE')
+        assert_equal(user.yed_getbalance()['confirmedCents'], 10000)
+        assert_equal(user.z_getbalance(ys), z_before - Decimal(10 * COIN + TOKEN_VALUE + mint1['feeZat'] + YELLOWBACK_FEE) / COIN)
 
-        print("I2: mint from one s1... address only")
-        t2 = nodes[0].getnewaddress()
-        t_empty = nodes[0].getnewaddress()
-        fund = nodes[0].sendtoaddress(t2, Decimal('21'))
-        self.mine(1)
-        assert_rpc_error("insufficient YEC at " + t_empty, nodes[0].yed_mint, 10000, 0, t_empty)
-        mint2 = nodes[0].yed_mint(10000, 0, t2)
+# Rule: MINT-1
+        print('mint from one s1... address only')
+        t2 = user.getnewaddress()
+        t_empty = user.getnewaddress()
+        fund = user.sendtoaddress(t2, Decimal('11'))
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_rpc_error('insufficient-yec', user.yed_mint, 10000, 48, t_empty)
+        mint2 = user.yed_mint(10000, 48, t2)
         vault2 = mint2['txid']
         assert_equal(mint2['fundedFrom'], 'transparent')
-        raw2 = nodes[0].getrawtransaction(vault2, 1)
+        raw2 = user.getrawtransaction(vault2, 1)
         assert_equal(len(raw2['vin']), 1)
         assert_equal(raw2['vin'][0]['txid'], fund)
         funded_vout = raw2['vin'][0]['vout']
-        assert_equal(nodes[0].getrawtransaction(fund, 1)['vout'][funded_vout]['scriptPubKey']['addresses'], [t2])
+        assert_equal(user.getrawtransaction(fund, 1)['vout'][funded_vout]['scriptPubKey']['addresses'], [t2])
         assert_equal(raw2['vShieldedSpend'], [])
-        self.mine(1)
-        assert_equal(self.vault(nodes[0], vault2)['status'], 'ACTIVE')
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 20000)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(vault2)['status'], 'ACTIVE')
+        assert_equal(user.yed_getbalance()['confirmedCents'], 20000)
 
-        print("Wait for both vaults to unlock")
-        lock1 = mint1['lockHeight']
-        lock2 = mint2['lockHeight']
-        self.mine_to(max(lock1, lock2), 50000000)
-        assert_equal(self.vault(nodes[0], vault1)['canRedeem'], True)
+        print('arrange the YED coins so vault 1 redeems with change and vault 2 without')
+        user.yed_send(other.yed_getnewaddress(), 9900)      # picks one 100 YED coin: 1 YED change
+        self.sync_all()
+        self.mine(POOLS[2])
+        other.yed_send(user.yed_getnewaddress(), 9800)      # 1 YED stays with node 5
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [100, 9800, 10000])
 
-        print("I2: bad destinations are refused before signing")
-        assert_rpc_error("not a transparent (s1", nodes[0].yed_redeem, vault1, "nonsense")
-        assert_rpc_error("not a transparent (s1", nodes[0].yed_redeem, vault1, nodes[0].yed_getnewaddress())
+        print('wait for both vaults to unlock')
+        lock = max(mint1['lockHeight'], mint2['lockHeight'])
+        self.mine_round_robin(POOLS, lock - user.getblockcount())
+        assert_equal([p['canRedeem'] for p in user.yed_listpositions()], [True, True])
 
-        print("I2: redeem vault 1 straight to the ys1... address")
-        z_before = nodes[0].z_getbalance(ys)
-        red1 = nodes[0].yed_redeem(vault1, ys)
-        assert_equal(red1['collateralTo'], ys)
-        assert_equal(red1['shielded'], True)
-        assert_equal(red1['requiredBurnCents'], 10000)
-        assert_equal(red1['changeCents'], 0)
-        rraw = nodes[0].decoderawtransaction(red1['hex'])
+        print('bad destinations are refused before signing')
+        assert_rpc_error('bad-address', user.yed_redeem, vault1, 'nonsense')
+        assert_rpc_error('bad-address', user.yed_redeem, vault1, user.yed_getnewaddress())
+
+# Rule: RED-1 RED-2 RED-3 XFER-1 TX-0
+        print('redeem vault 1 straight to the ys1... address, with YED change: fee output at vout[2]')
+        z_before = user.z_getbalance(ys)
+        red1 = user.yed_redeem(vault1, ys)
+        assert_equal(red1['to'], ys)
+        assert_equal(red1['burnedCents'], 10000)
+        rraw = user.getrawtransaction(red1['txid'], 1)
         assert_equal(len(rraw['vShieldedOutput']), 1)
         assert_equal(rraw['vShieldedSpend'], [])
         assert_equal(rraw['vin'][0]['txid'], vault1)
-        assert_equal(len(rraw['vin']), 2)                    # vault + one 10,000-cent token
-        assert_equal(len(rraw['vout']), 1)                   # the payload only: no YED change
-        collateral_out = 20 * COIN + TOKEN_VALUE - FEE
+        assert_equal(len(rraw['vin']), 4)                                  # the vault, 1 + 98 + 100 YED (smallest first)
+        assert_equal(len(rraw['vout']), 3)                                 # YED change, payload, fee
+        assert_equal(rraw['vout'][0]['valueZat'], TOKEN_VALUE)
+        assert_equal(rraw['vout'][2]['scriptPubKey']['addresses'], [red1['payee']])
+        assert_equal(rraw['vout'][2]['valueZat'], red1['feeZat'])
+        payload = user.yed_decodepayload(rraw['vout'][1]['scriptPubKey']['hex'][4:])
+        assert_equal((payload['type'], payload['feeVout']), ('redeem', 2))
+        assert_equal(payload['assignments'], [{'vout': 0, 'cents': 9900}])
+        collateral_out = 10 * COIN + 3 * TOKEN_VALUE - YELLOWBACK_FEE - red1['feeZat'] - TOKEN_VALUE
+        assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
-        assert_equal(rraw['locktime'], lock1)
+        assert_equal(rraw['locktime'], mint1['lockHeight'])
+        assert_equal(nodes[2].yed_validaterawtransaction(rraw['hex'])['verdict'], 'ok')
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(vault1)['status'], 'CLOSED')
+        assert_equal(user.z_getbalance(ys), z_before + Decimal(collateral_out) / COIN)
+        assert_equal(nodes[2].yed_gettxinfo(red1['txid'])['verdict'], 'ok')
+        assert_equal(nodes[2].yed_gettxinfo(red1['txid'])['feeZat'], red1['feeZat'])
+        assert_equal(user.yed_getbalance()['confirmedCents'], 9900)
 
-        txid1 = cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red1['hex'])
-        sync_mempools(nodes)
-        self.mine(1)
-        assert_equal(self.vault(nodes[0], vault1)['status'], 'CLOSED')
-        assert_equal(nodes[0].z_getbalance(ys), z_before + Decimal(collateral_out) / COIN)
-        assert_equal(nodes[0].yed_gettxinfo(txid1)['verdict'], 'redeem-ok')
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 10000)
-
-        print("I2: redeem vault 2 to a chosen s1... address")
-        t3 = nodes[0].getnewaddress()
-        red2 = nodes[0].yed_redeem(vault2, t3)
-        assert_equal(red2['collateralTo'], t3)
-        assert_equal(red2['shielded'], False)
-        rraw2 = nodes[0].decoderawtransaction(red2['hex'])
-        assert_equal(rraw2['vShieldedOutput'], [])
-        assert_equal(rraw2['vout'][0]['scriptPubKey']['addresses'], [t3])
-        cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red2['hex'])
-        sync_mempools(nodes)
-        self.mine(1)
-        assert_equal(self.vault(nodes[0], vault2)['status'], 'CLOSED')
-        got = [u for u in nodes[0].listunspent(1) if u['address'] == t3]
-        assert_equal(len(got), 1)
-        assert_equal(zat(got[0]['amount']), collateral_out)
-        assert_equal(nodes[0].yed_getbalance()['confirmedCents'], 0)
-        print("Done")
+        print('redeem vault 2 to the ys1... address without change: fee output at vout[1]')
+        other.yed_send(user.yed_getnewaddress(), 100)
+        self.sync_all()
+        self.mine(POOLS[2])
+        assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [100, 9900])
+        z_before = user.z_getbalance(ys)
+        red2 = user.yed_redeem(vault2, ys)
+        rraw2 = user.getrawtransaction(red2['txid'], 1)
+        assert_equal(len(rraw2['vin']), 3)
+        assert_equal(len(rraw2['vout']), 2)                                # payload, fee
+        assert_equal(rraw2['vout'][1]['scriptPubKey']['addresses'], [red2['payee']])
+        payload2 = user.yed_decodepayload(rraw2['vout'][0]['scriptPubKey']['hex'][4:])
+        assert_equal((payload2['type'], payload2['feeVout'], payload2['assignments']), ('redeem', 1, []))
+        collateral_out2 = 10 * COIN + 2 * TOKEN_VALUE - YELLOWBACK_FEE - red2['feeZat']
+        assert_equal(red2['collateralOut'], collateral_out2)
+        assert_equal(zat(rraw2['valueBalance']), -collateral_out2)
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(vault2)['status'], 'CLOSED')
+        assert_equal(user.z_getbalance(ys), z_before + Decimal(collateral_out2) / COIN)
+        assert_equal(user.yed_getbalance()['confirmedCents'], 0)
+        assert_equal(nodes[2].yed_getstats()['supplyCents'], 0)
+        ym.assert_model_matches(nodes[2], full=True)
+        self.checkpoint('sapling shapes')
 
 
 if __name__ == '__main__':

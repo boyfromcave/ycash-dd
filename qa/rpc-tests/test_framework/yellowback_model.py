@@ -1910,7 +1910,10 @@ def _norm_outpoint(x):
 
 
 def _price_eq(model_v, rpc_v):
-    if model_v is None:
+    # M1: the index stores an undefined quantity as 0 and the RPC renders a stored 0 as null, so
+    # a defined value of exactly 0 (a global ratio with no collateral left) is indistinguishable
+    # from undefined on the wire; both directions are accepted.
+    if model_v is None or model_v == 0:
         return rpc_v is None or int(rpc_v) == 0
     return rpc_v is not None and int(rpc_v) == model_v
 
