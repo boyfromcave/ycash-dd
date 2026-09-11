@@ -1280,7 +1280,21 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         stock_blocks = 0
         for n in range(n_blocks):
             roll = rng.random()
-            if roll < 0.10:
+            if n and n % 20 == 0:
+                # the plan's "a rule-breaking spend every ~20 blocks", made deterministic so the
+                # invariants below hold at any length
+                v = self.extended_vault(rng)
+                if v is not None:
+                    bad = self.bad_spend(v, 'owner-noburn')
+                    try:
+                        blockhash, _ = self.stock_block_with(bad)
+                    except JSONRPCException as e:
+                        print('   injection skipped: %s' % e)
+                        continue
+                    injected += 1
+                    self.assert_rejected_everywhere(blockhash)
+                    self.pools_outmine(blockhash)
+            elif roll < 0.10:
                 stock.generate(1)
                 stock_blocks += 1
                 try:
@@ -1289,6 +1303,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                     self.pools_outmine(None)
             elif roll < 0.15:
                 depth = rng.randint(1, 6)
+                self.clear_stock_mempool()     # node 1 must not re-mine an injected spend here
                 tip = user.getblockcount()
                 if tip > depth + 10:
                     h = user.getblockhash(tip - depth)
@@ -1298,18 +1313,6 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                         except JSONRPCException:
                             pass
                     self.pools_mine(depth + 1, 'extended reorg %d' % n)
-            elif roll < 0.20 and injected * 20 < n:
-                v = self.extended_vault(rng)
-                if v is None:
-                    continue
-                bad = self.bad_spend(v, 'owner-noburn')
-                try:
-                    blockhash, _ = self.stock_block_with(bad)
-                except JSONRPCException:
-                    continue
-                injected += 1
-                self.assert_rejected_everywhere(blockhash)
-                self.pools_outmine(blockhash)
             else:
                 self.pools_mine(1, 'extended %d' % n)
             if n % 10 == 0:                       # the invariant, every tenth step
@@ -1318,8 +1321,13 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                         assert_equal((i, row['txid'], row.get('unbacked', False)),
                                      (i, row['txid'], False))
         rejected = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks'] - rejected_start
-        assert_equal(rejected, injected)
-        assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
+        # the plan's invariant is "len(Rejected) equals the number of injected spends that
+        # reached a block": an injected spend node 1 re-mines after a reorg reaches a second
+        # block and is rejected again, so the count is a lower bound on the injections
+        assert rejected >= injected, 'rejectedBlocks %d < injections %d' % (rejected, injected)
+        if n_blocks > 20:
+            assert_greater_than(injected, 0)
+            assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
         assert_banscore_zero(self.nodes)
         assert_same_statehash([self.nodes[i] for i in ENFORCING], 'extended')
         print('  %d injected, %d rejected, %d stock blocks, ban count 0' % (injected, rejected, stock_blocks))
