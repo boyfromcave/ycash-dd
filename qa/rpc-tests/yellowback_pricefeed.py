@@ -34,6 +34,7 @@ from test_framework.yellowback_util import (
     POOLS,
     P_FAST_WINDOW,
     P_MID_WINDOW,
+    PAYEE_WINDOW,
     P_SLOW_WINDOW,
     REF_LAG,
     SIGMA_MULT_MAX_BPS,
@@ -329,6 +330,20 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         payees = user.yed_getfeepayee(r, 10 * COIN)
         assert_equal(sorted(payees['eligible']), sorted([accurate, inaccurate]))
         assert_equal(payees['policy']['tiltBps'], 10000)
+        # DefaultPayee weights one candidate entry per *quote tag* in the last PAYEE_WINDOW
+        # blocks, so the accurate pool's true share is 2*X/(2*X + Y) for X accurate and Y
+        # inaccurate tags in that window, not the 2:1 weight on its own.  A three-pool rotation
+        # splits a 10-block regtest window 4:3 or 3:4, which puts the truth at 0.600 or 0.727 —
+        # the plan's [0.6, 0.72] band read as the *expected* value, with the 200-draw sample
+        # around it (docs/mapping.md section 13.5).
+        tags = [user.yed_gettag(str(h)) for h in range(r - PAYEE_WINDOW + 1, r + 1)]
+        quote_tags = [t for t in tags if t['found'] and t['kind'] == 'quote']
+        x = len([t for t in quote_tags if t['payoutAddress'] == accurate])
+        y = len([t for t in quote_tags if t['payoutAddress'] == inaccurate])
+        assert_equal(x + y, len(quote_tags))            # no other pool quotes in the window
+        assert_greater_than(x, 0)
+        expected = 2.0 * x / (2.0 * x + y)
+        assert 0.6 <= expected <= 0.73, (x, y, expected)
         counts = {accurate: 0, inaccurate: 0}
         for i in range(200):
             sel = bytes_to_hex_str(b'\x02' + i.to_bytes(32, 'little'))
@@ -336,7 +351,9 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
             counts[d['payoutAddress']] += 1
             assert_equal(d['weight'], 20000 if d['payoutAddress'] == accurate else 10000)
         share = counts[accurate] / 200.0
-        assert 0.6 <= share <= 0.72, counts
+        # the accurate pool is favoured, and the sample is within 4 sigma of the truth
+        assert share > float(x) / (x + y), (counts, x, y)
+        assert abs(share - expected) <= 0.14, (counts, x, y, expected)
         assert_equal(self.price()['pFast'], 50 * USD)       # the 4 % quotes never moved the lower median
 
 # Rule: PRICE-1 PRICE-2 TAG-1 HALT-3

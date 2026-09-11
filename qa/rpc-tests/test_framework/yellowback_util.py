@@ -386,6 +386,11 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # ``run_test`` (docs/mapping.md section 13.2).  Every node is therefore in IBD only until that
     # first block (P12).
     initial_blocks = 101
+    # -yellowbacktemplatepolicy for the pool nodes (None = the daemon default, "strict").  A
+    # script that must get a deliberately invalid MINT or TRANSFER mined sets "consensus": under
+    # strict, TPL-2 skips a MINT whose verdict would be VOID, so the pools would never mine it
+    # (docs/mapping.md section 13.5).
+    template_policy = None
 
     def __init__(self):
         super().__init__()
@@ -414,7 +419,10 @@ class YellowbackTestFramework(BitcoinTestFramework):
         if not self.yellowback_enabled or i == STOCK:
             return yellowback_node_args(extra, yellowback=False)
         if i in POOLS:
-            return pool_args(self.pool_addresses[POOLS.index(i)], extra, **kw)
+            pool_extra = list(extra or [])
+            if self.template_policy is not None:
+                pool_extra.append('-yellowbacktemplatepolicy=%s' % self.template_policy)
+            return pool_args(self.pool_addresses[POOLS.index(i)], pool_extra, **kw)
         if i == OBSERVER:
             return observer_args(extra, **kw)
         return yellowback_node_args(extra, **kw)

@@ -56,6 +56,10 @@ def assert_rpc_error(substr, fn, *args):
 
 class YellowbackVoidMintTest(YellowbackTestFramework):
 
+    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so the pools would
+    # never mine the deliberately invalid mints this script needs (docs/mapping.md section 13.5).
+    template_policy = 'consensus'
+
     initial_blocks = 112     # eleven mature coinbases (68.75 YEC) fund the pre-activation raw mint
 
     def node_args(self, i, extra=None):

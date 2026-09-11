@@ -85,6 +85,10 @@ def coin_of(node, cents):
 
 class YellowbackClaimTest(YellowbackTestFramework):
 
+    # TPL-2 (strict, the default) skips a MINT whose verdict would be VOID, so the pools would
+    # never mine the deliberately invalid mints this script needs (docs/mapping.md section 13.5).
+    template_policy = 'consensus'
+
     def sync_all(self, blocks_only=False):
         """Blocks everywhere; mempools among the overlay nodes only — the stock node keeps the raw
         claim of a healthy vault that every overlay mempool refuses (MP-1), so a six-node mempool
@@ -103,14 +107,15 @@ class YellowbackClaimTest(YellowbackTestFramework):
         return build_vault_spend_raw(node, vault, 'claim', [(coin['txid'], coin['vout'])], payload=payload,
                                      fee=(payees['default']['payoutAddress'], payees['feeZat']), ref_height=ref_height)
 
-    def quote(self, usd):
+    def price(self, usd):
+        """Set the same quote on all three pools (framework `quote` takes a node index)."""
         for i in POOLS:
             set_quote(self.nodes[i], usd)
 
     def set_pools(self, extra):
         for i in POOLS:
             self.restart(i, extra)
-        self.quote(self.current_quote)
+        self.price(self.current_quote)
 
     def run_test(self):
         nodes = self.nodes
@@ -177,7 +182,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         v3_claim_height = user.yed_getvault(mint_v3['txid'])['claimHeight']
         self.current_quote = '0.01'
-        self.quote('0.01')
+        self.price('0.01')
         self.mine_round_robin(POOLS, 8 + REF_LAG)
         assert 'DIVERGENCE' in user.yed_getstats()['haltMask']
         assert_equal(user.yed_getstats()['mintingAllowed'], False)
@@ -268,7 +273,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
         assert_equal(vault_v['claimable'], True)
         hex_v = self.raw_claim(claimant, vault_v, 10000, r)
         self.current_quote = 50
-        self.quote(50)
+        self.price(50)
         self.mine_round_robin(POOLS, 30)
         assert_equal(user.yed_getprice()['pClaim'], 50000000)         # pMid recovered
         assert_equal(user.yed_getvault(mints['V']['txid'])['claimable'], False)
