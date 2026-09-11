@@ -214,16 +214,21 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        # yellowback-quote reads TOML with the stdlib tomllib (Python >= 3.11, plan section 5);
+        # ubuntu-22.04's python3 is 3.10. The functional script yellowback_quote.py runs the agent
+        # too, so it joins the main job's list only once that job's interpreter is >= 3.11.
+        with:
+          python-version: '3.11'
       - run: python3 -m pip install --user pyflakes
-      - name: Price-feed unit tests
-        # The feed half of the prototype's coordinator (sources, presets, guards, TWAP, median);
-        # Phase 7 replaces the file with test_yellowback_price.py / test_yellowback_quote.py.
+      - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: pyflakes (functional tests and the shared helper)
         run: python3 -m pyflakes qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py
-      - name: pyflakes (contrib; blocking from Phase 7 when yellowback_fed.py is replaced)
-        continue-on-error: true
-        run: python3 -m pyflakes contrib/yellowback/*.py
+      - name: pyflakes (contrib; blocking from Phase 7)
+        run: python3 -m pyflakes contrib/yellowback/*.py contrib/yellowback/yellowback-quote contrib/yellowback/pool/check-coinbase contrib/yellowback/devnet/yellowback-devnet
+      - name: The quote agent's acceptance line (plan Phase 7)
+        run: contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
       - name: Fuzz corpora and the embedded replay tables agree (N34)
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
         run: python3 src/test/gen_yellowback_corpus.py --check
