@@ -58,6 +58,7 @@ void EnsureWalletIsUnlocked();
 namespace {
 
 const char* const SWEEP_ACKNOWLEDGEMENT = "I understand this leaves YED unbacked";
+const char* const UNLOCK_ACKNOWLEDGEMENT = "I understand this burns YED";
 
 YellowbackWallet& EnsureYW()
 {
@@ -267,6 +268,7 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
     o.pushKV("payee", PayeeToJSON(built.payee));
     o.pushKV("collateralOut", built.collateralOut);
     o.pushKV("to", built.collateralTo);
+    o.pushKV("extraBurnCents", built.extraBurnCents);   // H4: 0 unless the selector had to burn a sub-dollar remainder
     return o;
 }
 
@@ -716,6 +718,113 @@ UniValue yed_lockcoins(const UniValue& params, bool fHelp)
     return arr;
 }
 
+UniValue yed_estimatesend(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "yed_estimatesend {\"yedaddress\":cents,...}|cents\n"
+            "\nDry run of yed_send / yed_sendmany (H3): the YED inputs the floor-aware selector would spend, the change it\n"
+            "would leave and, when the amount cannot be sent without change below the minimum output, the nearest workable\n"
+            "amounts below and above it. Signs nothing, locks nothing, commits nothing, and never refuses for the amount.\n"
+            "\nArguments:\n"
+            "1. recipients  (object or numeric, required) {\"yedaddress\": cents, ...} as yed_sendmany, or just the total cents\n"
+            "\nResult: { \"amountCents\", \"recipients\", \"workable\", \"stage\", \"inputs\": [{\"txid\",\"vout\",\"cents\"}],\n"
+            "          \"selectedCents\", \"changeCents\", \"spendableCents\", \"error\", \"alternatives\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    int64_t amount = 0;
+    size_t recipients = 1;
+    if (params[0].isObject()) {
+        const UniValue& obj = params[0].get_obj();
+        const std::vector<std::string> keys = obj.getKeys();
+        if (keys.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "no recipients");
+        if (keys.size() > MAX_ASSIGNMENTS - 1) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("at most %u recipients per transaction", (unsigned)(MAX_ASSIGNMENTS - 1)));
+        for (const std::string& name : keys) {
+            ParseYedAddress(name, index.GetParams());             // the same address check yed_sendmany applies
+            amount += obj[name].get_int64();
+        }
+        recipients = keys.size();
+    } else {
+        amount = params[0].get_int64();
+    }
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    const yellowback::Params& p = index.GetParams();
+    if (amount < p.minOutput || amount > p.maxOutput) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("bad-xfer-amount: each amount must be between %d and %d cents", p.minOutput, p.maxOutput));
+    }
+    SendEstimate e = EstimateTransfer(yw, amount, recipients);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("amountCents", e.amountCents);
+    o.pushKV("recipients", (int64_t)e.recipients);
+    o.pushKV("workable", e.workable);
+    o.pushKV("stage", e.stage);
+    UniValue arr(UniValue::VARR);
+    for (const YedCoin& c : e.inputs) {
+        UniValue i(UniValue::VOBJ);
+        i.pushKV("txid", c.outpoint.hash.GetHex());
+        i.pushKV("vout", (int64_t)c.outpoint.n);
+        i.pushKV("cents", c.token.cents);
+        arr.push_back(i);
+    }
+    o.pushKV("inputs", arr);
+    o.pushKV("selectedCents", e.selectedCents);
+    o.pushKV("changeCents", e.changeCents);
+    o.pushKV("spendableCents", e.spendableCents);
+    o.pushKV("error", e.error);
+    if (e.workable) {
+        o.pushKV("alternatives", NullUniValue);
+    } else {
+        UniValue alt(UniValue::VOBJ);
+        alt.pushKV("below", e.below.has_value() ? UniValue(e.below.value()) : NullUniValue);
+        alt.pushKV("above", e.above.has_value() ? UniValue(e.above.value()) : NullUniValue);
+        o.pushKV("alternatives", alt);
+    }
+    return o;
+}
+
+UniValue yed_unlockcoin(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 3)
+        throw std::runtime_error(
+            std::string("yed_unlockcoin \"txid\" n \"acknowledgement\"\n"
+            "\nUnlock one Yellowback-held outpoint (H5): the deliberate escape hatch, since lockunspent refuses to unlock one.\n"
+            "The YED it carries is burned by the first transaction that spends it outside the overlay, and the next\n"
+            "yed_lockcoins, reconciliation or restart locks it again.\n"
+            "\nArguments:\n"
+            "1. \"txid\"             (string, required)\n"
+            "2. n                   (numeric, required) the output index\n"
+            "3. \"acknowledgement\"  (string, required) exactly \"") + UNLOCK_ACKNOWLEDGEMENT + "\"\n"
+            "\nResult: { \"txid\", \"vout\", \"unlocked\", \"wasYellowbackLocked\", \"cents\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const uint256 txid = ParseHashV(params[0], "txid");
+    const int n = params[1].get_int();
+    if (n < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must not be negative");
+    if (params[2].get_str() != UNLOCK_ACKNOWLEDGEMENT) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("unlock-acknowledgement-missing: the third argument must be exactly \"") + UNLOCK_ACKNOWLEDGEMENT + "\"");
+    }
+    const COutPoint out(txid, (uint32_t)n);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    int64_t cents = 0;
+    {
+        LOCK(index.cs_yellowback);
+        if (index.IsHealthy()) {
+            std::optional<TokenRecord> t = State(index.View()).GetToken(out);
+            if (t.has_value()) cents = t->cents;
+        }
+    }
+    const bool was = yw.ReleaseLock(out);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    o.pushKV("vout", (int64_t)n);
+    o.pushKV("unlocked", true);
+    o.pushKV("wasYellowbackLocked", was);
+    o.pushKV("cents", cents);
+    return o;
+}
+
 static const CRPCCommand commands[] =
 { //  category     name                    actor (function)        okSafeMode
   //  -----------  ----------------------  ----------------------  ----------
@@ -732,6 +841,8 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_listpositions",    &yed_listpositions,     false },
     { "yellowback", "yed_listtransactions", &yed_listtransactions,  false },
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },
+    { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
+    { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
 };
 
 void RegisterYellowbackWalletRPCCommands(CRPCTable &tableRPC)

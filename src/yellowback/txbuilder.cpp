@@ -17,6 +17,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "wallet/wallet.h"
+#include "yellowback/coinselect.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
 #include "yellowback/policy.h"
@@ -356,26 +357,62 @@ struct Context
     }
 };
 
-/** Select YED coins smallest-first for `needed` cents; applies the change floor (§4.6). */
-std::vector<YedCoin> SelectYed(const Context& ctx, int64_t needed, int64_t& change)
+/** The spendable YED coins in the selector's canonical order: (cents, txid, vout) — H1, determinism. */
+std::vector<YedCoin> RankedCoins(const Context& ctx)
 {
     std::vector<YedCoin> coins = ctx.yw.SpendableCoins();
-    std::sort(coins.begin(), coins.end(), [](const YedCoin& a, const YedCoin& b) { return a.token.cents < b.token.cents; });
-    std::vector<YedCoin> sel;
-    int64_t sum = 0;
+    std::sort(coins.begin(), coins.end(), [](const YedCoin& a, const YedCoin& b) {
+        if (a.token.cents != b.token.cents) return a.token.cents < b.token.cents;
+        if (a.outpoint.hash != b.outpoint.hash) return a.outpoint.hash < b.outpoint.hash;
+        return a.outpoint.n < b.outpoint.n;
+    });
+    return coins;
+}
+
+/** The H2 refusal: the request, and the nearest workable amounts below and above it. */
+std::string ChangeFloorMessage(const std::vector<int64_t>& cents, int64_t needed, const yellowback::Params& p)
+{
+    const Alternatives alt = NearestWorkable(cents, needed, p.minOutput, MAX_YED_INPUTS);
+    return strprintf("change-floor: %d cents cannot be sent from these coins without change below the $%d.%02d minimum output; "
+                     "nearest workable amounts: below %s, above %s",
+                     needed, p.minOutput / 100, p.minOutput % 100,
+                     alt.below.has_value() ? strprintf("%d", alt.below.value()) : std::string("none"),
+                     alt.above.has_value() ? strprintf("%d", alt.above.value()) : std::string("none"));
+}
+
+/**
+ * Select YED coins for `needed` cents with the floor-aware selector (H1). `allowBurn` (a REDEEM
+ * or a CLAIM, H4) accepts a sub-dollar remainder — reported in `extraBurn`, bounded by
+ * MIN_OUTPUT - 1 — when no selection leaves change of 0 or >= MIN_OUTPUT; a TRANSFER never burns
+ * and refuses instead (H2). Throws the identifier of doc/yellowback-rpc.md in every refusal.
+ */
+std::vector<YedCoin> SelectYed(const Context& ctx, int64_t needed, int64_t& change, bool allowBurn, int64_t& extraBurn)
+{
+    const std::vector<YedCoin> coins = RankedCoins(ctx);
+    std::vector<int64_t> cents;
+    int64_t have = 0;
     for (const YedCoin& c : coins) {
-        sel.push_back(c);
-        sum += c.token.cents;
-        if (sum >= needed) break;
+        cents.push_back(c.token.cents);
+        have += c.token.cents;
     }
-    if (sum < needed) throw std::runtime_error(strprintf("insufficient-yed: need %d cents, have %d confirmed and spendable", needed, sum));
-    change = sum - needed;
-    if (change > 0 && change < ctx.params.minOutput) {
-        throw std::runtime_error(strprintf("change-floor: change of %d cents is below the minimum output of %d cents; send %d cents (all selected inputs) or at most %d cents",
-                                           change, ctx.params.minOutput, sum, sum - ctx.params.minOutput));
+    const Selection s = SelectFloorAware(cents, needed, ctx.params.minOutput, MAX_YED_INPUTS, allowBurn);
+    if (!s.ok) {
+        if (s.insufficient) throw std::runtime_error(strprintf("insufficient-yed: need %d cents, have %d confirmed and spendable", needed, have));
+        if (s.tooManyInputs) throw std::runtime_error(strprintf("too-many-inputs: more than %u YED inputs would be needed; consolidate first", (unsigned)MAX_YED_INPUTS));
+        throw std::runtime_error(ChangeFloorMessage(cents, needed, ctx.params));
     }
-    if (sel.size() > MAX_YED_INPUTS) throw std::runtime_error("too-many-inputs: too many YED inputs; consolidate first");
+    change = s.change;
+    extraBurn = s.extraBurn;
+    std::vector<YedCoin> sel;
+    for (size_t i : s.inputs) sel.push_back(coins[i]);
     return sel;
+}
+
+/** The TRANSFER selector: never burns (H2). */
+std::vector<YedCoin> SelectYed(const Context& ctx, int64_t needed, int64_t& change)
+{
+    int64_t extraBurn = 0;
+    return SelectYed(ctx, needed, change, false, extraBurn);
 }
 
 /**
@@ -415,7 +452,9 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
     if (withPayload) {
         // RED-2: the burn is exactly the debt (V20); RED-3: the fee from the collateral.
         int64_t change = 0;
-        std::vector<YedCoin> sel = SelectYed(ctx, vault.mintedCents, change);
+        int64_t extraBurn = 0;   // H4: a sub-dollar remainder burned on top of the debt (RED-2 allows over-burning)
+        std::vector<YedCoin> sel = SelectYed(ctx, vault.mintedCents, change, true, extraBurn);
+        out.extraBurnCents = extraBurn;
         shape.yedInputs = sel;
         shape.changeCents = change;
         if (change > 0) {
@@ -580,6 +619,35 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     out.fundedFrom = "transparent";
     out.ownYedOutputs.push_back(COutPoint(CTransaction(mtx).GetHash(), 1));
     return out;
+}
+
+SendEstimate EstimateTransfer(YellowbackWallet& yw, int64_t amountCents, size_t recipients)
+{
+    Context ctx(yw);
+    const yellowback::Params& p = ctx.params;
+    SendEstimate e;
+    e.amountCents = amountCents;
+    e.recipients = recipients;
+    const std::vector<YedCoin> coins = RankedCoins(ctx);
+    std::vector<int64_t> cents;
+    for (const YedCoin& c : coins) {
+        cents.push_back(c.token.cents);
+        e.spendableCents += c.token.cents;
+    }
+    const Selection s = SelectFloorAware(cents, amountCents, p.minOutput, MAX_YED_INPUTS, false);
+    e.stage = SelectStageName(s.stage);
+    if (s.ok) {
+        e.workable = true;
+        for (size_t i : s.inputs) e.inputs.push_back(coins[i]);
+        e.selectedCents = s.selected;
+        e.changeCents = s.change;
+        return e;
+    }
+    e.error = s.insufficient ? "insufficient-yed" : (s.tooManyInputs ? "too-many-inputs" : "change-floor");
+    const Alternatives alt = NearestWorkable(cents, amountCents, p.minOutput, MAX_YED_INPUTS);
+    e.below = alt.below;
+    e.above = alt.above;
+    return e;
 }
 
 BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients, CReserveKey& reservekey)

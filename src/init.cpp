@@ -1138,6 +1138,20 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     // Yellowback overlay (plan §4.3, §4.5): the index rebuilds from blocks on disk, so it refuses
     // -prune; the flat fee may not go below DEFAULT_FEE; the regtest parameter flags and the test
     // fault are regtest-only; the payout and payee addresses must be P2PKH (K22).
+    // H6 (Phase 8): a datadir that already holds a Yellowback index must not be started without
+    // -yellowback — the wallet's YED outputs would be unlocked and an ordinary sendtoaddress could
+    // burn them. -yellowback=0 given explicitly is the acknowledgement and starts normally.
+    // -disablewallet cannot burn anything, so it is exempt.
+    if (!fExperimentalYellowback && !GetBoolArg("-disablewallet", false) && !mapArgs.count("-yellowback") &&
+        boost::filesystem::exists(GetDataDir() / "yellowback")) {
+        return InitError(_("This datadir holds a Yellowback index, so this wallet may hold YED. "
+                           "Start with -experimentalfeatures -yellowback to keep those outputs locked, "
+                           "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
+    }
+    if (!fExperimentalYellowback && mapArgs.count("-yellowback") && !GetBoolArg("-yellowback", false) &&
+        boost::filesystem::exists(GetDataDir() / "yellowback")) {
+        LogPrintf("Yellowback: -yellowback=0 with an index present — any YED outputs in this wallet are spendable as plain YEC (H6).\n");
+    }
     if (fExperimentalYellowback) {
         if (fPruneMode) {
             return InitError(_("-yellowback is incompatible with -prune."));

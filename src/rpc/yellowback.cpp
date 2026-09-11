@@ -46,6 +46,9 @@
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
 #include "yellowback/view.h"
+#ifdef ENABLE_WALLET
+#include "yellowback/wallet.h"
+#endif
 
 #include <univalue.h>
 
@@ -387,6 +390,15 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("suppressedBlocks", index.SuppressedCount());
     o.pushKV("templatePolicy", cfg.templatePolicy);
     o.pushKV("abandoned", index.IsAbandoned());
+#ifdef ENABLE_WALLET
+    // H10: what the Yellowback wallet layer holds locked, and that it is there at all. The GUI
+    // reads a mismatch between lockedOutputs and yed_listunspent as the trigger for yed_lockcoins.
+    o.pushKV("lockedOutputs", yellowback::g_yellowbackWallet ? (int64_t)yellowback::g_yellowbackWallet->LockedCount() : (int64_t)0);
+    o.pushKV("protectedByIndex", yellowback::g_yellowbackWallet != nullptr);
+#else
+    o.pushKV("lockedOutputs", (int64_t)0);
+    o.pushKV("protectedByIndex", false);
+#endif
 
     UniValue act(UniValue::VOBJ);
     const Activation a = snap.has_value() ? snap->activation : st.GetActivation();

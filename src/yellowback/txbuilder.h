@@ -90,6 +90,7 @@ struct BuiltTx
     CAmount collateralOut;                  //!< zat paid to the destination
     int64_t burnCents;                      //!< YED burned (the debt for REDEEM/CLAIM, 0 otherwise)
     int64_t changeCents;                    //!< YED change (TRANSFER / REDEEM / CLAIM)
+    int64_t extraBurnCents;                 //!< H4: sub-dollar remainder burned on top of the debt (REDEEM / CLAIM), else 0
     int changeVout;                         //!< index of the YED change output, -1 if none
     CScript vaultScript;                    //!< signing material for SignVaultSpend
     CAmount vaultValue;
@@ -97,7 +98,7 @@ struct BuiltTx
     std::vector<std::pair<CScript, CAmount>> yedPrevs;     //!< scriptPubKey/value of vin[1..] (YED inputs)
 
     BuiltTx() : kind(BuiltKind::TRANSFER), refHeight(0), feeZat(0), feeVout(-1), termClass(0), lockHeight(0), claimHeight(0),
-                collateralZat(0), collateralOut(0), burnCents(0), changeCents(0), changeVout(-1), vaultValue(0) {}
+                collateralZat(0), collateralOut(0), burnCents(0), changeCents(0), extraBurnCents(0), changeVout(-1), vaultValue(0) {}
     bool NeedsProving() const { return builder.has_value(); }
     bool IsVaultSpend() const { return kind == BuiltKind::REDEEM || kind == BuiltKind::RELEASE || kind == BuiltKind::CLAIM || kind == BuiltKind::SWEEP; }
 };
@@ -218,6 +219,32 @@ void FinishSapling(BuiltTx& out);
 
 /** The FEE-W selector of a vault spend: the 36-byte serialised vault outpoint (§3.7). */
 std::vector<unsigned char> OutPointSelector(const COutPoint& out);
+
+/**
+ * The dry run of yed_send / yed_sendmany (H3, yed_estimatesend): the same floor-aware selection
+ * over the same coins, with nothing signed, locked or committed. `recipients` only shapes the
+ * argument checks (at most MAX_ASSIGNMENTS - 1); the selection depends on the total alone.
+ * Requires cs_main, cs_wallet and cs_yellowback, like every Build*.
+ */
+struct SendEstimate
+{
+    int64_t amountCents;
+    size_t recipients;
+    bool workable;
+    std::string stage;                  //!< "exact" | "single" | "greedy" | "search" | "none"
+    std::vector<YedCoin> inputs;        //!< empty when !workable
+    int64_t selectedCents;
+    int64_t changeCents;
+    int64_t spendableCents;             //!< the wallet's confirmed, unspent YED
+    std::string error;                  //!< "" | "insufficient-yed" | "change-floor" | "too-many-inputs"
+    std::optional<int64_t> below;       //!< H2 alternatives, only when !workable
+    std::optional<int64_t> above;
+
+    SendEstimate() : amountCents(0), recipients(0), workable(false), stage("none"), selectedCents(0),
+                     changeCents(0), spendableCents(0) {}
+};
+
+SendEstimate EstimateTransfer(YellowbackWallet& yw, int64_t amountCents, size_t recipients);
 
 /** The largest YED input count the builders accept (H11: 250 P2PKH inputs ≈ 37 kB). */
 static const size_t MAX_YED_INPUTS = 250;
