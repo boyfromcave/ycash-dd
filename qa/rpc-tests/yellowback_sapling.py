@@ -17,7 +17,7 @@ Nodes: 0 user, 1 second user, 2-4 federation (2-of-3).
 from decimal import Decimal
 from io import BytesIO
 
-from test_framework.mininode import CTransaction, SpendDescription
+from test_framework.mininode import CTransaction
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -32,7 +32,6 @@ from test_framework.util import (
     wait_and_assert_operationid_status,
 )
 from test_framework.yellowback_util import (
-    MINT_WINDOW,
     TOKEN_VALUE,
     assert_yed_synced,
     cosign_and_submit,
@@ -210,7 +209,6 @@ class YellowbackSaplingTest(BitcoinTestFramework):
         print("I2: bad destinations are refused before signing")
         assert_rpc_error("not a transparent (s1", nodes[0].yed_redeem, vault1, "nonsense")
         assert_rpc_error("not a transparent (s1", nodes[0].yed_redeem, vault1, nodes[0].yed_getnewaddress())
-        assert_equal(nodes[0].yed_abortredeem(vault1)['aborted'], False)  # nothing was recorded
 
         print("I2: redeem vault 1 straight to the ys1... address")
         z_before = nodes[0].z_getbalance(ys)
@@ -229,15 +227,6 @@ class YellowbackSaplingTest(BitcoinTestFramework):
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
         assert_equal(rraw['locktime'], lock1)
 
-        print("RED-4: a co-signer refuses a redemption carrying a Sapling spend")
-        spend = tx_from_hex(red1['hex'])
-        dummy = SpendDescription()
-        dummy.cv = dummy.anchor = dummy.nullifier = dummy.rk = 1
-        dummy.zkproof = b'\x00' * 192
-        dummy.spendAuthSig = b'\x00' * 64
-        spend.shieldedSpends.append(dummy)
-        assert_rpc_error("RED-4", nodes[2].yed_cosignredeem, tx_to_hex(spend))
-
         txid1 = cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red1['hex'])
         sync_mempools(nodes)
         self.mine(1)
@@ -254,7 +243,7 @@ class YellowbackSaplingTest(BitcoinTestFramework):
         rraw2 = nodes[0].decoderawtransaction(red2['hex'])
         assert_equal(rraw2['vShieldedOutput'], [])
         assert_equal(rraw2['vout'][0]['scriptPubKey']['addresses'], [t3])
-        txid2 = cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red2['hex'])
+        cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red2['hex'])
         sync_mempools(nodes)
         self.mine(1)
         assert_equal(self.vault(nodes[0], vault2)['status'], 'CLOSED')

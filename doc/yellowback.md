@@ -1,32 +1,53 @@
-# Yellowback (experimental)
+# Ycash Yellowback (YED) — node guide
 
-Yellowback is a federated, over-collateralised US-dollar stablecoin **overlay** on Ycash. It is a
-Tier-0 feature: no consensus change, no policy change, no new opcodes and no network upgrade. A
-Yellowback balance is an ordinary transparent output whose dollar value is declared in the
-transaction's single `OP_RETURN` payload; collateral sits in a P2SH vault of
-`CLTV + owner key + k-of-n federation keys`; the YEC/USD price is published by the federation
-spending a well-known anchor UTXO. Every node that runs with `-yellowback` computes the same Yellowback
-state from the same chain in a self-contained, rebuildable index under `<datadir>/yellowback/`.
+Ycash Yellowback (YED) is a decentralized, over-collateralised US-dollar stablecoin **overlay** on
+Ycash. **Yellowback v2 is a miner-enforced soft fork** (plan §1): Tier 1 mining policy plus one
+block-validity hook in `main.cpp` that is inert until an activation derived from the chain itself,
+that only ever fires on transactions spending a Yellowback vault, that never bans a peer, that fails
+open only on a storage failure, and that an operator can switch off with one flag. Every block an
+enforcing miner produces is valid to a stock node; a stock miner's block is rejected only if it
+spends a vault in a way the rules forbid — a soft fork in the P2SH/CLTV sense. Everything else is an
+overlay: ordinary Ycash v4 transactions, one `OP_RETURN` payload, a self-contained index under
+`<datadir>/yellowback/`. A node that does not enable the feature runs v4.5.0's code paths.
 
-Nodes that do not enable the feature are unaffected in every way.
-
-The normative protocol, the design record and the trust statement live in the workspace that
-develops this fork (`docs/plans/yellowback-v1-development-plan.md`); this file is the user-facing
-guide and will grow with each phase.
+The normative protocol is `doc/yellowback-spec.md` (§3 of the workspace plan, published verbatim
+by `make spec`); the design record, the decisions and the phase plan are the workspace's
+`docs/plans/yellowback-v2-development-plan.md`. This file is the user-facing node guide.
 
 ## Status
 
 | Phase | State |
 |---|---|
-| 0 — groundwork (test framework fix, CI, baseline) | done except the inherited functional-test baseline run |
-| 1 — pure protocol library (`src/yellowback/{params,math,payload,script,address}`) | done |
-| 2 — state machine, index, node RPCs | done |
-| 3 — wallet RPCs (mint, send, redeem, co-sign) | done |
-| 4 — federation coordinator (`contrib/yellowback/`) | done |
-| 5 — protections (DCA, ERR, volatility) | done |
-| 6 — hardening and review | done locally (fuzz targets, stress test, review package); external maintainer review pending |
+| 0 — branch `feature/yellowback-sf`, strip the federation, re-baseline | node side done (this tree); wallet side and workspace manifest in the same series |
+| 1 — pure library (params, math, tag, payload, script) | not started |
+| 2 — state machine and view (v2 rules, `EvaluateBlock`) | not started |
+| 3 — index hooks, node RPCs, `rpcversion 2` | not started |
+| 4 — mining policy (template filter, coinbase tag) | not started |
+| 5 — enforcement (the `main.cpp` hook), devnet on the v2 topology | not started |
+| 6 — wallet RPCs (`yed_mint`, `yed_redeem`, `yed_claim`, `yed_sweep`) | not started |
+| 7 — quote agent (`contrib/yellowback/`) | in progress (built beside the prototype's coordinator) |
+| 7b — YecWallet screens | not started |
+| 8–10 — hardening, testnet, mainnet | not started |
 
-## Enabling
+## Federation prototype, being replaced by phase
+
+Everything below this line describes the **federation prototype, being replaced by phase**: the
+code on this branch is still the prototype's overlay (a k-of-n federation script in the vault,
+anchor-chain PRICE transactions, DCA/ERR/volatility protections), minus the federation itself,
+which Phase 0 removed from the node. Until Phase 6 lands the v2 wallet flows:
+
+- minting, sending and the index work as before on regtest, with the price published by the test
+  harness (`qa/rpc-tests/test_framework/yellowback_util.py: publish_price`) instead of the
+  removed `yed_createpricetx`;
+- **redemption is out of service**: `yed_redeem` still builds and owner-signs the v1 redemption,
+  but the vault script needs the retired federation's signatures, which no node can add
+  (`yed_cosignredeem`, `yed_submitredeem`, `yed_abortredeem` are gone); the functional tests add
+  them from the roster nodes' keys in Python (`cosign_and_submit`);
+- `yed_getroster` is gone (`yed_getinfo.rosterIndex` remains until Phase 3); the coordinator's
+  price rounds, the `/cosign` endpoint, the `yellowback-redeem` client and the one-laptop devnet
+  are out of service (see `contrib/yellowback/README.md`).
+
+### Enabling
 
 ```
 experimentalfeatures=1
@@ -36,10 +57,10 @@ yellowback=1
 `-yellowback` refuses to start with `-prune` (the index rebuilds from blocks on disk). Other
 options: `-reindex-yellowback` (wipe and rebuild the index), `-yellowbackfee=<zat>` (flat fee, minimum
 1000), `-yellowbackmintlag=<blocks>` (default 2), `-debug=yellowback`. Regtest additionally takes
-`-yellowbackstartheight`, `-yellowbackgenesisanchor`, `-yellowbackgenesisroster` (all three together) and
-`-yellowbacksupplycap`.
+`-yellowbackstartheight`, `-yellowbackgenesisanchor`, `-yellowbackgenesisroster` (all three together,
+until Phase 3 replaces them) and `-yellowbacksupplycap`.
 
-## Using Yellowback from `ycash-cli`
+### Using Yellowback from `ycash-cli`
 
 Every amount is in **cents** (`10000` = $100.00). The node must have caught its index up
 (`yed_getinfo` → `synced: true`, `healthy: true`) before any of these work.
@@ -65,88 +86,143 @@ is what the vault holds. Minting is refused when the system health is below 100 
 minting is frozen after a volatility breach, when no price is in effect, or when the supply cap
 has no room; `yed_getprotectionstatus.mintingAllowed` says which.
 
-Redeeming (getting the collateral back) burns YED equal to the mint (more during ERR) and needs
-the federation's co-signature. From the unlock height on:
-
-```
-contrib/yellowback/yellowback-redeem --rpc-url http://user:pass@127.0.0.1:8232 \
-    --vault <mint txid> --endpoints-file operators.txt
-```
-
-which runs `yed_redeem` on your node, collects `k` co-signatures from the operators' `/cosign`
-endpoints and submits through `yed_submitredeem`. Your node re-verifies the returned transaction
-before broadcasting it; the operators cannot change where the collateral goes. If the deadline (36
-blocks after `yed_redeem`) passes, the client aborts with `yed_abortredeem` and you start over.
-Without the client: `yed_redeem <txid>` gives you the hex, each operator's `yed_cosignredeem`
-adds a signature, and `yed_submitredeem <hex>` broadcasts. Either way, `--to <address>` /
-`yed_redeem <txid> <address>` sends the collateral to a chosen `s1…` address or, as a Sapling
-output, straight to a `ys1…` address; by default it goes to a fresh transparent address.
-
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
 them by accident; `lockunspent true` on one of them removes that protection.
 
-## Rebuilding the index
+### Rebuilding the index
 
 The index lives under `<datadir>/yellowback/` and is rebuilt from the blocks on disk when it is
 missing, when the node was reindexed, or on `-reindex-yellowback`. `yed_getinfo.healthy: false`
 names the reason and always means "restart with `-reindex-yellowback`". Every `yed_*` call except
 `yed_getinfo` refuses while the index is unhealthy or behind the chain tip.
 
-## Trust statement
-
-Yellowback v1 is a federated, over-collateralised stablecoin overlay on Ycash.
-
-- Consensus-enforced (by every Ycash node, upgraded or not): collateral cannot leave a vault before
-  its lock height; only the owner *and* k of n federation keys can spend it; price updates carry k of
-  n federation signatures.
-- Enforced by every Yellowback-aware node deterministically: Yellowback accounting (conservation, supply,
-  collateral totals, vault status, DCA/ERR/volatility state).
-- Enforced by the federation's mechanical policy: collateral is released only against the required
-  burn; published prices reflect market medians.
-- **Therefore:** a colluding quorum of k operators can release collateral without a burn or publish
-  a false price. A federation with fewer than k live keys halts redemptions and mints until it
-  recovers. Nothing the federation does can create Yellowback out of nothing, move a user's Yellowback, or
-  take collateral without the owner's signature.
-
-## Backups
+### Backups
 
 Ycash transparent keys are a random keypool, not derived from a seed. The vault owner key of every
 mint lives only in `wallet.dat`. **Back up `wallet.dat` after every mint.** Wallet encryption in
 Ycash is experimental; protect the file with full-disk encryption, keep RPC on localhost and hold an
 offline copy.
 
-## Baseline test run (Phase 0)
+The v1 trust statement retired with the federation; what follows is the v2 statement, §8.1 of
+`doc/yellowback-spec.md`, which the `audit` job checks byte for byte against that file.
 
-Recorded here once the Phase 0 build completes; see the section "Build and test baseline" below.
+## Trust statement
 
-### Build and test baseline
+Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Ycash.
 
-Host: macOS 26 (Darwin 25.0.0), Apple Silicon, Apple clang 17, GNU make 3.81. Recorded 2026-09-05
-at `ycash-legacy` = v4.5.0 plus the Yellowback commits.
+- Consensus-enforced (by every Ycash node, upgraded or not): collateral cannot leave a vault
+  before its lock height; before the claim height only the minter's key can spend it.
+- Enforced by every Yellowback-aware node deterministically: Yellowback accounting (conservation,
+  supply, collateral totals, vault status, prices, activation, halts).
+- Enforced by the mining pools that run the Yellowback module, and effective for the whole
+  network once a supermajority of blocks signal: collateral is released only against the burn of
+  the vault's debt; an underwater, abandoned vault can be claimed only by burning that debt; both
+  pay a fee to a pool that published a price quote in the 100 blocks up to the transaction's
+  reference height.
+- Prices are the medians of the quotes pools publish in their own blocks; moving them needs a
+  majority of *quote-tagged* blocks over a window, which is a majority of hashpower only when
+  most blocks carry quotes — so the windows that decide claims are undefined until two-thirds of
+  their blocks carry quotes, and the mint window until half do. A pool whose quotes stray from
+  its peers' loses the fee income that wallets' default payee choice would otherwise send it.
+- **Therefore:** a majority of hashpower that runs the module and follows it makes the rules
+  hold; a majority that does not — or a minority that the trailing signal count mistakes for a
+  majority, since the count is self-reported — could release collateral without burns or, with
+  enough quote-tagged blocks, move the price; the same majority could already reorganise the
+  chain. No operator, committee or key other than the minter's can move collateral before the
+  claim height; after it, only a burn of the vault's debt can. No pool can move a user's YED or
+  take collateral before the grace period; a pool can create YED only by first moving the mint
+  price with a majority of quote-tagged blocks.
+- An enforcing node that finds itself on the minority side of a split — a rejected chain that
+  outruns its own by six blocks — stops enforcing for the session, rejoins the network's chain,
+  raises an alert and waits for its operator; it is never stranded for more than six blocks, and
+  it never bans the peers that relayed the other chain, neither for the rejected block nor for
+  its descendants. A node that catches up after an outage never rejects a block the network has
+  already built six blocks on; it accepts it, records that it did, and keeps enforcing.
+  Enforcement means "majority in fact", not "majority by count".
+- Every release enforces only until a sunset height about a year past its start; past it the
+  node keeps publishing quotes and accounting but rejects nothing until upgraded, so two
+  releases with different rules can never both be enforcing.
+- As with any soft fork, every pool — participating or not — should run the module at least in
+  filter-only mode, or its blocks can be orphaned by rule-breaking transactions it cannot see.
+- Signalling is announced only once the pools running the module are diverse enough that no one
+  of them decides alone (at least three independent pools, none above 40 % of quoting blocks,
+  measured and published before the announcement).
+- If pools stop participating: below 60 % of blocks signalling, minting pauses; below 50 %, block
+  rejection pauses as well, and while it is paused neither the owner path nor the claim path is
+  policed — collateral can leave a vault without its burn and YED so unbacked stays in
+  circulation; vaults untouched during the pause are protected again when it ends. Minting resumes
+  at 75 % and rejection at 60 %. Existing YED always remains redeemable by a minter who holds it.
+- If the module is abandoned — rejection paused for two full windows, which is also where a
+  sunset with no successor release ends up — every vault's claim path becomes spendable by
+  anyone at its claim height: owners must sweep their collateral before that height
+  (`yed_sweep`, which every node of every release offers under that one same condition, and
+  whose transaction every node then relays and mines like any other) or lose it to whoever
+  claims first; the claim path stays open to everyone, so the race is fair, but the YED minted
+  against a swept or claimed vault is unbacked from then on. A failed mint's collateral (a VOID
+  vault, which never carried a debt) is released by its owner with `yed_redeem` at its lock
+  height at any time, abandonment or not.
 
-- `zcutil/build.sh` (without `YCASH_WR=1`) builds `ycashd`, `ycash-cli`, `ycash-tx` and
-  `src/test/test_bitcoin` on this host with three host-side conditions that are not fork changes:
-  Homebrew `automake` and GNU `libtool` on the PATH (`LIBTOOLIZE=glibtoolize`; libevent's
-  `autoreconf` needs them), GNU coreutils' `sha256sum` on the PATH for `zcutil/fetch-params.sh`
-  (macOS ships a BSD `sha256sum` whose flags differ), and `CARGO_TARGET_DIR` pointed at
-  `<repo>/target` when the user's shell sets a global cargo target directory (the Makefile links
-  `target/<triple>/release/librustzcash.a` relative to the repo). The `YCASH_WR=1` build has not
-  been run yet.
-- Depends: the native `aarch64-apple-darwin` toolchain (clang 18.1.8, rust, boost, libevent,
-  zeromq, libsodium, utfcpp, googletest, bdb) builds from `depends/` unchanged.
-- `src/test/test_bitcoin --run_test='yellowback_*'`: 31 cases green (28 after Phase 2; Phase 6
-  added the two corpus-replay cases and the index fault-injection case).
-- `qa/rpc-tests/yellowback_index.py`: green (about five minutes, four nodes).
-- Full `src/test/test_bitcoin` (450 cases): 2 failures, both pre-existing at the pin and in files
-  the fork does not touch — `main_tests/subsidy_limit_test` (subsidy sum) and
-  `rpc_wallet_tests/rpc_z_sendmany_internals`. Everything else passes, including all 28
-  `yellowback_*` cases.
-- `qa/rpc-tests/yellowback_lifecycle.py`, `yellowback_void_mint.py`, `yellowback_wallet_restore.py`,
-  `yellowback_federation.py`, `yellowback_protection.py`, `yellowback_reorg_stress.py` (30 reorgs over 300
-  blocks): green (five nodes each, 5-15 minutes).
-- The inherited `qa/pull-tester/rpc-tests.py` baseline (which tests at the pin pass on Ycash after
-  the `ycash.conf` and `src/ycashd` framework fixes) and the `YCASH_WR=1` build are still to be run.
-- Python 3.12+ note: the inherited `test_framework/mininode.py` imports `asyncore` (removed in
-  3.12) and `pyblake2` (unmaintained). The workspace venv carries `pyasyncore` and a one-line
-  `pyblake2` shim over `hashlib.blake2b`; no framework file is changed.
+## Build and test baseline
+
+Everything below runs from `ycash-dd/` on `feature/yellowback-sf` (plan §6.0 item 0). Python is
+always the workspace venv (`../.venv/bin/python`), never the system interpreter.
+
+```
+# host conditions (macOS, Apple Silicon; Linux CI needs none of the three exports)
+export PATH="/opt/homebrew/opt/libtool/libexec/gnubin:/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/bin:$PATH"
+export CARGO_TARGET_DIR="$PWD/target"          # the Makefile links target/<triple>/release/librustzcash.a relative to the repo
+LIBTOOLIZE=glibtoolize BUILD_STAGE=depends ./zcutil/build.sh -j8    # once (~25 min): the depends tree
+./zcutil/build.sh -j8                                              # ycashd, ycash-cli, ycash-tx, src/test/test_bitcoin
+./zcutil/fetch-params.sh                                           # needs GNU sha256sum
+# after a path change (workspace rename): configure bakes absolute depends paths, so reconfigure, then incremental
+CONFIG_SITE="$PWD/depends/$(ls depends | grep -m1 darwin)/share/config.site" ./configure && make -C src -j8 test/test_bitcoin ycashd ycash-cli
+make -C src -j8 ycash-cli                                          # after EVERY src/rpc/client.cpp change (conversions live in the CLI)
+
+# unit tests
+src/test/test_bitcoin --run_test='yellowback_*'
+# one functional script (distinct --portseed per concurrent run; --nocleanup --noshutdown keeps the playground)
+BITCOIND="$PWD/src/ycashd" ../.venv/bin/python -u qa/rpc-tests/yellowback_index.py --srcdir="$PWD/src" --tmpdir=/tmp/yb-index --portseed=11
+# the suite by name (the runner does not glob; scripts are registered in BASE_SCRIPTS / EXTENDED_SCRIPTS)
+qa/pull-tester/rpc-tests.py -j4 --nozmq yellowback_index yellowback_activation
+# the Python owner-path signer (build_vault_spend_raw) loads libcrypto through ctypes; on macOS it aborts (exit 134) without:
+export DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"
+# devnet (§5)
+../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up && ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet check
+
+# fuzz (Ycash's own harness: --enable-fuzz-main replaces main(); zcutil/clean.sh removes src/fuzz.cpp, confirming the layout)
+CONFIG_SITE="$PWD/depends/<triple>/share/config.site" ./configure --enable-fuzz-main CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address'
+ln -sf fuzzing/YellowbackEvaluate/fuzz.cpp src/fuzz.cpp && make -C src -j8 ycashd
+src/ycashd src/fuzzing/YellowbackEvaluate/output src/fuzzing/YellowbackEvaluate/input -max_len=4096   # libFuzzer; corpus in, findings out
+../.venv/bin/python src/test/gen_yellowback_corpus.py --check                                          # embedded C++ corpus == input/ files
+```
+
+A failed `make` leaves the old `test_bitcoin` in place, so "tests pass" after a failed build means
+nothing: check the make exit code. The `build_vault_spend_raw`, `yellowback_activation`, devnet
+`check` and fuzz lines name Phase 1–5 artefacts; on the Phase 0 tree the Python signer that needs
+`DYLD_LIBRARY_PATH` is `cosign_and_submit`, and the fuzz targets are the prototype's
+`src/fuzzing/Yellowback{Payload,Script}/`.
+
+### Host notes (macOS, Apple Silicon)
+
+Host: macOS 26 (Darwin 25.0.0), Apple clang 17, GNU make 3.81; depends toolchain
+`aarch64-apple-darwin` (clang 18.1.8, rust, boost, libevent, zeromq, libsodium, utfcpp,
+googletest, bdb) builds from `depends/` unchanged. `zcutil/build.sh` needs three host-side
+conditions that are not fork changes: Homebrew `automake` and GNU `libtool` on the PATH
+(`LIBTOOLIZE=glibtoolize`; libevent's `autoreconf` needs them), GNU coreutils' `sha256sum` for
+`zcutil/fetch-params.sh` (macOS ships a BSD `sha256sum` whose flags differ), and
+`CARGO_TARGET_DIR` pointed at `<repo>/target` when the shell sets a global cargo target directory.
+Python 3.12+: the inherited `test_framework/mininode.py` imports `asyncore` (removed in 3.12) and
+`pyblake2` (unmaintained); the workspace venv carries `pyasyncore` and a one-line `pyblake2` shim
+over `hashlib.blake2b`; no framework file is changed. `grep` on this host is ugrep.
+
+### Recorded baseline (Phase 0, 2026-09-10, node side)
+
+<!-- baseline-results -->
+
+### Open items carried over from the prototype's Phase 0
+
+- The `YCASH_WR=1` build (the Ycash-specific build variant) has still not been run on this host.
+- The inherited `qa/pull-tester/rpc-tests.py` baseline: which of the stock scripts pass on Ycash
+  v4.5.0 after the `ycash.conf` and `src/ycashd` framework fixes. The eleven scripts of the
+  `main` job's `STOCK_BASELINE` are recorded above; the rest of `BASE_SCRIPTS` is still unrun.

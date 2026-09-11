@@ -1,20 +1,35 @@
 name: yellowback tests
 
-# Fork-local CI for the Yellowback overlay. Upstream Ycash runs no tests in CI (book.yml only).
-# Uses the same zcutil/build.sh a developer runs locally so a green CI and a green laptop mean the
-# same thing. See docs/plans/yellowback-v1-development-plan.md §6.0 item 6 in the workspace.
+# Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
+# The same zcutil/build.sh a developer runs locally, so a green CI and a green laptop mean the
+# same thing. Layout per the workspace plan (docs/plans/yellowback-v2-development-plan.md, §6.0
+# item 6): `main`, `audit` and `python` block merges; `nightly` opens an issue. `lockorder`,
+# `sanitizers` and `coverage` arrive with Phase 3, `weekly-fuzz` with Phase 2.
+#
+# Functional scripts are listed by name: rpc-tests.py does not glob. YELLOWBACK_SCRIPTS is the
+# current phase's list (Phase 0: the retained v1 flows; they leave at Phase 2's first commit and
+# return at Phase 6). STOCK_BASELINE is the inherited Ycash suite that must keep passing against
+# the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
+# doc/yellowback.md "Build and test baseline".
 
 on:
   push:
     branches:
-      - feature/digidollar
+      - feature/yellowback-sf
   pull_request:
     branches:
-      - feature/digidollar
+      - feature/yellowback-sf
+  schedule:
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
+env:
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore yellowback_sapling
+  STOCK_BASELINE: getblocktemplate_proposals getblocktemplate_longpoll mempool_reorg mempool_tx_expiry p2p-acceptblock invalidateblock reorg_limit reindex wallet rawtransactions txn_doublespend
+
 jobs:
-  build-and-test:
+  main:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
@@ -67,39 +82,28 @@ jobs:
       - name: Build ycashd
         run: ./zcutil/build.sh -j$(nproc)
 
-      - name: Determinism audit (plan §3.10, §8.4 items 2 and 8)
-        # The state machine and the pure modules may not read the clock, the mempool, the wallet or
-        # configuration, and must never use floating point; the overlay adds no networking to the node.
-        run: |
-          set -e
-          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" \
-              src/yellowback/state.cpp src/yellowback/state.h src/yellowback/math.h src/yellowback/payload.cpp \
-              src/yellowback/payload.h src/yellowback/script.cpp src/yellowback/script.h src/yellowback/view.cpp src/yellowback/view.h
-          ! grep -n "evhttp\|socket\|connect(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp
-          # The consensus set is untouched (plan §1, §4.1).
-          test -z "$(git diff --stat ycash-legacy...HEAD -- src/main.cpp src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet src/txdb.cpp src/txdb.h configure.ac 2>/dev/null)"
+      - name: Unit tests (the whole test_bitcoin, P5)
+        # Not only yellowback_*: the Phase 3 hooks sit in files that miner_tests, main_tests,
+        # mempool_tests and rpc_tests cover.
+        run: src/test/test_bitcoin --log_level=test_suite
 
-      - name: Unit tests (yellowback_*)
-        run: src/test/test_bitcoin --run_test='yellowback_*' --log_level=test_suite
-
-      - name: Coordinator unit tests (contrib/yellowback)
-        run: python3 -m unittest contrib/yellowback/test_yellowback_fed.py
-
-      - name: Functional tests (yellowback_*)
-        # Names must be listed explicitly: rpc-tests.py does not glob (G3). Extend this list as
-        # phases add scripts to BASE_SCRIPTS.
+      - name: Functional tests (Yellowback scripts of this phase)
         # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below
-        # does not have to glob all of /tmp (which contains root-only /tmp/snap-private-tmp on
-        # the GitHub runners and makes upload-artifact fail with EACCES).
+        # does not have to glob all of /tmp (root-only /tmp/snap-private-tmp on the GitHub runners
+        # makes upload-artifact fail with EACCES). --nocleanup is forwarded to every script:
+        # without it test_framework.py rmtree()s its tmpdir even when the test fails.
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          # --nocleanup is forwarded to every script: without it test_framework.py rmtree()s its
-          # tmpdir even when the test fails, and there is nothing left for the upload step.
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup \
-            yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore \
-            yellowback_federation yellowback_protection yellowback_sapling
+          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
+
+      - name: Functional tests (inherited stock baseline, without -yellowback)
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
 
       - name: Upload node logs on failure
         if: failure()
@@ -108,13 +112,117 @@ jobs:
           name: yellowback-test-logs
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-            ${{ runner.temp }}/yellowback-tests/**/yellowback-fed*.log
           if-no-files-found: ignore
 
+  audit:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the pristine baseline branch
+        # Every diff below is against ycash-legacy (= upstream v4.5.0). A missing branch is an
+        # error, never a vacuous pass.
+        run: |
+          git fetch --no-tags origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
+          git rev-parse --verify ycash-legacy
+
+      - name: Line budget and the consensus zero set (plan §4.1)
+        run: |
+          set -e
+          for f in src/main.cpp:40 src/miner.cpp:35 src/rpc/mining.cpp:35; do
+            p=${f%%:*}; b=${f##*:}
+            n=$(git diff --numstat ycash-legacy...HEAD -- $p | awk '{s+=$1+$2} END {print s+0}')
+            echo "$p: $n changed lines (budget $b)"
+            test "$n" -le "$b" || exit 1
+          done
+          # Zero lines in the consensus set. src/wallet/rpcwallet.cpp and src/rpc/rawtransaction.cpp
+          # leave this set in Phase 8 (M7); until then src/wallet as a whole stays at zero.
+          test -z "$(git diff --stat ycash-legacy...HEAD -- src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet src/txdb.cpp src/txdb.h configure.ac)"
+
+      - name: Determinism, no clock, no sockets, no bans (plan §3.10, §8.4 items 2 and 8)
+        # The state machine and the pure modules may not read the clock, the mempool, the wallet
+        # or configuration, and never use floating point. Comment lines are skipped (they may
+        # name what is forbidden). tag.cpp joins the list when Phase 1 adds it (K23).
+        run: |
+          set -e
+          pure=""
+          for f in state math tag payload script view; do
+            for x in src/yellowback/$f.cpp src/yellowback/$f.h; do test -f "$x" && pure="$pure $x"; done
+          done
+          echo "pure modules:$pure"
+          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
+          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          # GetTime() has two homes only: the quote RPC (stamps receivedAt) and policy.cpp (BuildTagScript), M11.
+          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy.cpp\|rpc/yellowback.cpp' || true)
+          test -z "$homes" || { echo "GetTime outside its two homes: $homes"; exit 1; }
+          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever.
+          ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp src/main.cpp
+          # EvaluateBlock is total (K1): no throw, no assert in the state machine or the arithmetic.
+          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h
+          # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
+          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp
+          # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
+          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*'
+
+      - name: Documents (fork-local only, P4)
+        # Staleness against the plan is a workspace check (make status -> spec-check), not a fork check.
+        run: |
+          set -e
+          ! grep -q 'no consensus change' doc/yellowback.md
+          grep -q 'federation prototype, being replaced' doc/yellowback.md
+          grep -q 'Build and test baseline' doc/yellowback.md
+          # The published spec copy was not hand-edited: its header hash equals the hash of its body.
+          test "$(sed -n 's/^Source: .*sha256: \([0-9a-f]*\).*/\1/p' doc/yellowback-spec.md)" = "$(sed '1,/^---$/d' doc/yellowback-spec.md | sha256sum | cut -c1-64)"
+          # The trust statement in doc/yellowback.md is the spec's §8.1, byte for byte (leading and
+          # trailing blank lines aside).
+          section() { awk -v h="$1" '$0 ~ h {f=1; next} f && /^#/ {exit} f' "$2" | awk 'NF{p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
+          diff <(section '^### 8\.1 ' doc/yellowback-spec.md) <(section '^## Trust statement' doc/yellowback.md)
+          python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
+
+      - name: v2 gates (blocking from Phase 3)
+        # Every yed_* the node registers is in the RPC contract, and every rule has a tagged test.
+        # Both are false on the Phase 0-2 tree by construction (the v1 RPCs are still registered,
+        # no test is tagged yet); they report until Phase 3 makes them block.
+        continue-on-error: true
+        run: |
+          set -e
+          registered=$(grep -oh '"yed_[a-z]*"' src/rpc/yellowback*.cpp | tr -d '"' | sort -u)
+          missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
+          test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
+          tagged=$(grep -ho '\(//\|#\) Rule: [A-Z0-9-]*' src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py | sed 's/.*Rule: //' | sort -u)
+          echo "rules with a tagged test:"; echo "$tagged"
+          test -n "$tagged"
+
+  python:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install --user pyflakes
+      - name: Price-feed unit tests
+        # The feed half of the prototype's coordinator (sources, presets, guards, TWAP, median);
+        # Phase 7 replaces the file with test_yellowback_price.py / test_yellowback_quote.py.
+        run: python3 -m unittest contrib/yellowback/test_yellowback_fed.py
+      - name: pyflakes (functional tests and the shared helper)
+        run: python3 -m pyflakes qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py
+      - name: pyflakes (contrib; blocking from Phase 7 when yellowback_fed.py is replaced)
+        continue-on-error: true
+        run: python3 -m pyflakes contrib/yellowback/*.py
+      # Phase 2 adds: python3 src/test/gen_yellowback_corpus.py --check
+
   nightly:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 600
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - name: Install build prerequisites
@@ -124,9 +232,6 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - name: Install Python test prerequisites
-        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
-        # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
-        # one-line shim stands in for it). No framework file is changed.
         run: |
           python3 -m pip install --user simplejson
           site=$(python3 -c 'import site; print(site.getusersitepackages())')
@@ -134,7 +239,6 @@ jobs:
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
           python3 -c 'import asyncore, zmq, simplejson, pyblake2'
-
       - uses: actions/cache@v4
         with:
           path: |
@@ -150,8 +254,35 @@ jobs:
       - run: ./zcutil/build.sh -j$(nproc)
       - name: Full make check
         run: make check
-      - name: Reorg stress (extended)
-        run: qa/pull-tester/rpc-tests.py -j2 --nozmq yellowback_reorg_stress
       - name: Inherited functional tests recorded as passing in Phase 0
-        # Fill in from doc/yellowback.md "Build and test baseline".
-        run: qa/pull-tester/rpc-tests.py -j4 --nozmq
+        # The list is STOCK_BASELINE above, recorded by name in doc/yellowback.md "Build and test baseline".
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
+      - name: Reorg stress (extended)
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_reorg_stress
+      # Later phases add here (§6.0 item 6): the STOCK_BASELINE a second time with
+      # BITCOIND=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
+      # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
+      # the ycash-legacy worktree build, yellowback_stockparity.py, yellowback_stock_node.py and
+      # yellowback_enforcement.py --stock-binary (Phase 3+); the fuzz smoke (Phase 2).
+      - name: Upload node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yellowback-nightly-logs
+          path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+          if-no-files-found: ignore
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed: run $GITHUB_RUN_ID" \
+            --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true

@@ -147,7 +147,7 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
 
     def try_redeem(self, rng, node):
         try:
-            pos = [p for p in node.yed_listpositions("ACTIVE") if p["canRedeem"] and not p["pending"]]
+            pos = [p for p in node.yed_listpositions("ACTIVE") if p["canRedeem"]]
             if not pos:
                 return "redeem-none"
             p = rng.choice(pos)
@@ -224,7 +224,7 @@ class YellowbackReorgStressTest(BitcoinTestFramework):
             self.soft_sync_mempools()
             if rng.random() < 0.12:
                 k = rng.randint(1, 6)
-                victim = self.reorg(rng, k)
+                self.reorg(rng, k)
                 reorgs += 1
                 assert_same_statehash(nodes)
             else:

@@ -34,6 +34,7 @@ from test_framework.yellowback_util import (
     YELLOWBACK_FEE,
     assert_same_statehash,
     assert_yed_synced,
+    build_price_tx,
     fund_genesis_anchor,
     genesis_args,
     make_regtest_roster,
@@ -144,12 +145,6 @@ class YellowbackIndexTest(BitcoinTestFramework):
             assert_equal(info['anchor']['txid'], self.genesis['txid'])
             assert_equal(info['anchor']['address'], roster['address'])
             assert_equal(info['anchor']['valueZat'], 100000000)
-            r = n.yed_getroster()
-            assert_equal(r['k'], 2)
-            assert_equal(r['n'], 3)
-            assert_equal(r['address'], roster['address'])
-            assert_equal(r['pubkeys'], roster['pubkeys'])
-            assert_equal(r['scriptHex'], roster['script'])
             assert_equal(n.yed_getprice()['priceMicroUsd'], None)
             stats = n.yed_getstats()
             assert_equal(stats['supplyCents'], 0)
@@ -180,7 +175,7 @@ class YellowbackIndexTest(BitcoinTestFramework):
         assert_same_statehash(nodes)
 
         print("A node without the roster script cannot complete the signature (checklist item 14)")
-        built = nodes[0].yed_createpricetx(50500, "")
+        built = build_price_tx(nodes[0], 50500)
         partial = nodes[3].signrawtransaction(built['hex'])   # node 3 holds no roster key and never ran addmultisigaddress
         assert_equal(partial['complete'], False)
         assert_equal(nodes[0].signrawtransaction(built['hex'])['complete'], False)  # one of two
@@ -193,12 +188,12 @@ class YellowbackIndexTest(BitcoinTestFramework):
         nodes[0].generate(1)
         self.sync_all()
         refill = self.find_utxo(nodes[0], Decimal('0.5'))
-        built = nodes[0].yed_createpricetx(51000, refill)
+        built = build_price_tx(nodes[0], 51000, refill=refill)
         decoded = nodes[0].decoderawtransaction(built['hex'])
         assert_equal(len(decoded['vin']), 2)
         assert_equal(len(decoded['vout']), 2)
         assert_equal(built['newAnchorValueZat'], 100000000 - YELLOWBACK_FEE + 50000000 - YELLOWBACK_FEE)
-        txid2 = publish_price(nodes[0], [nodes[0], nodes[1]], 51000, refill=refill)  # node 0 also signs its refill
+        publish_price(nodes[0], [nodes[0], nodes[1]], 51000, refill=refill)  # node 0 also signs its refill
         sync_mempools(nodes)
         nodes[0].generate(1)
         self.sync_all()
@@ -252,12 +247,6 @@ class YellowbackIndexTest(BitcoinTestFramework):
             assert_equal(info['rosterIndex'], 0)  # not revealed until the new anchor is spent
             assert_equal(n.yed_gettxinfo(rot)['verdict'], 'price-rotation')
             assert_equal(n.yed_getprice()['priceMicroUsd'], None)
-        # yed_createpricetx refuses while the new roster is unrevealed (the signers still know it).
-        try:
-            nodes[0].yed_createpricetx(54000)
-            raise AssertionError("yed_createpricetx should refuse an unrevealed roster")
-        except Exception as e:
-            assert 'not been revealed' in str(e)
         # Build the reveal transaction by hand: the same shape, signed with the new roster.
         anchor = nodes[0].yed_getinfo()['anchor']
         raw = nodes[0].createrawtransaction([{'txid': anchor['txid'], 'vout': anchor['vout']}],
@@ -273,20 +262,17 @@ class YellowbackIndexTest(BitcoinTestFramework):
         self.sync_all()
         assert_yed_synced(nodes)
         for n in nodes:
-            r = n.yed_getroster()
-            assert_equal(r['index'], 1)
-            assert_equal(r['address'], roster2['address'])
-            assert_equal(r['pubkeys'], roster2['pubkeys'])
-            assert_equal(r['previous']['address'], roster['address'])
+            assert_equal(n.yed_getinfo()['rosterIndex'], 1)
+            assert_equal(n.yed_getinfo()['anchor']['address'], roster2['address'])
             assert_equal(n.yed_getinfo()['anchor']['txid'], reveal)
-        txid5 = publish_price(nodes[0], [nodes[1], nodes[2]], 54000)
+        publish_price(nodes[0], [nodes[1], nodes[2]], 54000)
         sync_mempools(nodes)
         nodes[0].generate(1)
         self.sync_all()
         assert_yed_synced(nodes)
         for n in nodes:
             assert_equal(n.yed_getprice()['priceMicroUsd'], 54000)
-            assert_equal(n.yed_getroster()['index'], 1)
+            assert_equal(n.yed_getinfo()['rosterIndex'], 1)
         assert_same_statehash(nodes)
 
         print("Reorg across a price change: the losing branch is undone and the winning one applied")

@@ -216,16 +216,11 @@ class YellowbackVoidMintTest(BitcoinTestFramework):
         assert_equal(red['burnCents'], 0)
         decoded = nodes[0].decoderawtransaction(red['hex'])
         assert_equal(len(decoded['vin']), 1)  # the vault only: no YED inputs, no YEC inputs (C10)
-        # B19: an abandoned redemption is cleared by yed_abortredeem and can be rebuilt.
-        assert_equal(nodes[0].yed_abortredeem(void2)['aborted'], True)
-        red = nodes[0].yed_redeem(void2)
-        # RED-6 does not apply to a VOID vault: co-signers release it even with no price in effect (E3).
-        self.mine(49)  # the price ages out (49 > 48) and the pending redemption expires (40)
+        # RED-6 does not apply to a VOID vault: it is released even with no price in effect (E3).
+        self.mine(49)  # the price ages out (49 > 48)
         assert_equal(nodes[2].yed_getprice()['priceMicroUsd'], None)
-        assert_rpc_error("RED-8", nodes[2].yed_cosignredeem, red['hex'])  # the old redemption expired meanwhile
-        nodes[0].yed_abortredeem(void2)  # already dropped at expiry (F6); harmless
-        red = nodes[0].yed_redeem(void2)
-        txid = cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red['hex'])
+        red = nodes[0].yed_redeem(void2)  # rebuilt: the first one has expired meanwhile (40 blocks)
+        cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red['hex'])
         self.mine(1)
         v2 = nodes[4].yed_getvault(void2)
         assert_equal(v2['status'], 'CLOSED')

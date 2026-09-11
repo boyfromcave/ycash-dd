@@ -34,6 +34,7 @@ from test_framework.yellowback_util import (
     TOKEN_VALUE,
     assert_same_statehash,
     assert_yed_synced,
+    cosign_and_submit,
     fund_genesis_anchor,
     make_regtest_roster,
     publish_price,
@@ -281,13 +282,12 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         print("C22: redemption before lockHeight is refused")
         assert_rpc_error("locked until", nodes[0].yed_redeem, vault1)
 
-        print("Redeem vault 1 with RPC co-signing on two federation nodes")
+        print("Redeem vault 1: owner-signed by yed_redeem, roster-signed by the test (two roster nodes)")
         lock1 = nodes[0].yed_getvault(vault1)['lockHeight']
         self.mine_to(lock1, 50000000)
         assert_equal([p for p in nodes[0].yed_listpositions() if p['vaultTxid'] == vault1][0]['canRedeem'], True)
         red = nodes[0].yed_redeem(vault1)
         assert_equal(red['requiredBurnCents'], 10000)
-        assert_equal(red['roster']['k'], 2)
         decoded = nodes[0].decoderawtransaction(red['hex'])
         yed_outpoints = set((c['txid'], c['vout']) for c in nodes[0].yed_listunspent())
         for i, vin in enumerate(decoded['vin']):
@@ -296,54 +296,14 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
             else:
                 assert (vin['txid'], vin['vout']) in yed_outpoints  # C10: no YEC inputs
         assert_equal(len(decoded['vout']), 3)  # collateral, YED change ($50), REDEEM payload
-        # The reserved inputs are not selectable by another send while the redemption is pending.
-        assert_rpc_error("insufficient YED", nodes[0].yed_send, addr1, 14000)
-        assert_rpc_error("already pending", nodes[0].yed_redeem, vault1)
-
-        # Refusals by a co-signer.
-        stripped = tx_from_hex(red['hex'])
-        script_only = stripped.vin[0].scriptSig
-        vault_script = nodes[0].decodescript(bytes_to_hex_str(script_only))['asm'].split(' ')[-1]
-        stripped.vin[0].scriptSig = CScript([b'', hex_str_to_bytes(vault_script)])
-        assert_rpc_error("RED-7", nodes[2].yed_cosignredeem, tx_to_hex(stripped))
-        far = tx_from_hex(red['hex'])
-        far.nExpiryHeight = nodes[2].getblockcount() + 100
-        assert_rpc_error("RED-8", nodes[2].yed_cosignredeem, tx_to_hex(far))
-        bogus = tx_from_hex(red['hex'])
-        sigs = nodes[0].decodescript(bytes_to_hex_str(bogus.vin[0].scriptSig))['asm'].split(' ')
-        # A different redeem script (same owner key, different lockHeight) in the scriptSig: C5.
-        bogus_script = bytearray(hex_str_to_bytes(vault_script))
-        bogus_script[1] ^= 0x01  # perturb the pushed lockHeight
-        bogus.vin[0].scriptSig = CScript([b'', hex_str_to_bytes(sigs[1]), bytes(bogus_script)])
-        assert_rpc_error("RED-7", nodes[2].yed_cosignredeem, tx_to_hex(bogus))
-        assert_rpc_error("RED-1", nodes[2].yed_cosignredeem, signed['hex'])  # the transfer: vin[0] is no vault
-        # D1: an input that does not exist is refused before any policy call touches it (no assert, no crash).
+        # D1: the dry run reads only the index; an input that does not exist is no crash.
         phantom = tx_from_hex(red['hex'])
         phantom.vin[1].prevout = COutPoint(int('ab' * 32, 16), 0)
-        assert_rpc_error("unknown or spent", nodes[2].yed_cosignredeem, tx_to_hex(phantom))
+        nodes[2].yed_validaterawtransaction(tx_to_hex(phantom))
         assert_equal(nodes[2].yed_getinfo()['healthy'], True)
-        nodes[2].yed_validaterawtransaction(tx_to_hex(phantom))  # the dry run only reads the index: no crash either
-        # RED-3: a price crash raises the required burn above what the redemption burns.
-        self.price(1000000)  # $1: 60 YEC backing $250 => 24 % health => errBps 8000 => 12,500 cents required
-        self.mine(1)
-        assert_rpc_error("RED-3", nodes[2].yed_cosignredeem, red['hex'])
-        self.price(50000000)
-        self.mine(1)
-        # Happy path: two co-signers in sequence, then submit.
-        c1 = nodes[2].yed_cosignredeem(red['hex'])
-        assert_equal(c1['quorumSignatures'], 1)
-        assert_equal(c1['complete'], False)
-        assert_rpc_error("already co-signed", nodes[2].yed_cosignredeem, c1['hex'])
-        c2 = nodes[3].yed_cosignredeem(c1['hex'])
-        assert_equal(c2['quorumSignatures'], 2)
-        assert_equal(c2['complete'], True)
-        # SUB-1: a modified output is refused; a stranger's hex is refused.
-        tampered = tx_from_hex(c2['hex'])
-        tampered.vout[0].nValue -= 1
-        assert_rpc_error("SUB-1", nodes[0].yed_submitredeem, tx_to_hex(tampered))
-        assert_rpc_error("no pending redemption", nodes[1].yed_submitredeem, c2['hex'])
-        sub = nodes[0].yed_submitredeem(c2['hex'])
-        assert_equal(sub['quorumSignatures'], 2)
+        # Phase 0: the co-signer refusals (RED-0..8, SUB-1) went with the federation; the roster
+        # signatures are made by the test and the complete transaction is broadcast.
+        cosign_and_submit(nodes[0], [nodes[2], nodes[3]], red['hex'])
         self.mine(1)
         v = nodes[4].yed_getvault(vault1)
         assert_equal(v['status'], 'CLOSED')
@@ -361,16 +321,12 @@ class YellowbackLifecycleTest(BitcoinTestFramework):
         assert_equal(nodes[0].yed_listpositions('CLOSED')[0]['vaultTxid'], vault1)
         assert_same_statehash(nodes)
 
-        print("Abort: a pending redemption can be dropped and its inputs become selectable again")
+        print("A second redemption builds once its vault unlocks (nothing is recorded or broadcast)")
         lock2 = nodes[0].yed_getvault(vault2)['lockHeight']
         self.mine_to(lock2, 50000000)
         red2 = nodes[0].yed_redeem(vault2)
-        pos2 = lambda: [p for p in nodes[0].yed_listpositions('ACTIVE') if p['vaultTxid'] == vault2][0]
-        assert_equal(pos2()['pending'], True)
-        assert_equal(nodes[0].yed_abortredeem(vault2)['aborted'], True)
-        assert_equal(nodes[0].yed_abortredeem(vault2)['aborted'], False)
-        assert_rpc_error("no pending redemption", nodes[0].yed_submitredeem, red2['hex'])
-        assert_equal(pos2()['pending'], False)
+        assert_equal(red2['requiredBurnCents'], 10000)
+        assert_equal([p for p in nodes[0].yed_listpositions('ACTIVE') if p['vaultTxid'] == vault2][0]['canRedeem'], True)
         assert_same_statehash(nodes)
         print("Done")
 

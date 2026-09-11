@@ -15,12 +15,18 @@ Shared helpers for the Yellowback functional tests (plan §6.0, §7).
 - make_regtest_roster(): k-of-n roster from the operator nodes' own keys,
   registered with addmultisigaddress on every signer (B2, C7).
 - fund_genesis_anchor(): creates the anchor UTXO on chain.
-- publish_price(): builds with yed_createpricetx, signs on k nodes with
-  signrawtransaction (partials merged in one call, F2), broadcasts.
+- publish_price(): builds the PRICE transaction here (build_price_tx; the
+  node's yed_createpricetx went with the federation in Phase 0), signs on k
+  nodes with signrawtransaction (partials merged in one call, F2), broadcasts.
+- cosign_and_submit(): completes an owner-signed yed_redeem with the roster
+  signatures made here from the signer nodes' keys (yed_cosignredeem and
+  yed_submitredeem went with the federation too), then broadcasts.
+These v1 helpers are test-only and retire with the v1 flows in Phase 2.
 - assert_yed_synced(): sync_blocks already waits for the notifier cycle in
   which the index ran (C13), so this is a sync plus an assertion.
 """
 
+import hashlib
 from decimal import Decimal
 
 from .util import (
@@ -31,7 +37,6 @@ from .util import (
     stop_node,
     sync_blocks,
     sync_mempools,
-    wait_bitcoinds,
 )
 
 # ref/ycash/src/consensus/upgrades.cpp
@@ -107,12 +112,53 @@ def assert_same_statehash(nodes):
     return hashes[0]
 
 
+_PUBKEY_ADDR = {}   # pubkey hex -> the address it was drawn from, so cosign_and_submit can dumpprivkey it
+
+
 def node_pubkey(node):
-    """A fresh compressed public key from the node's wallet (C7: keys never leave the node)."""
+    """A fresh compressed public key from the node's wallet."""
     addr = node.getnewaddress()
     pubkey = node.validateaddress(addr)['pubkey']
     assert_equal(len(pubkey), 66)
+    _PUBKEY_ADDR[pubkey] = addr
     return pubkey
+
+
+_B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+
+
+def wif_to_secret(wif):
+    """Decode a WIF private key to its 32 secret bytes (the framework has no base58 decoder)."""
+    n = 0
+    for c in wif:
+        n = n * 58 + _B58.index(c)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    raw = b'\x00' * (len(wif) - len(wif.lstrip('1'))) + raw
+    body, check = raw[:-4], raw[-4:]
+    assert_equal(hashlib.sha256(hashlib.sha256(body).digest()).digest()[:4], check)
+    secret = body[1:]                                   # the version byte
+    if len(secret) == 33 and secret[-1] == 1:
+        secret = secret[:-1]                            # the compressed-key marker
+    assert_equal(len(secret), 32)
+    return secret
+
+
+def _low_s(der):
+    """Re-encode a DER signature with a low S (STANDARD_SCRIPT_VERIFY_FLAGS include LOW_S)."""
+    assert der[0] == 0x30 and der[2] == 0x02
+    rlen = der[3]
+    r = der[4:4 + rlen]
+    assert der[4 + rlen] == 0x02
+    slen = der[5 + rlen]
+    s = int.from_bytes(der[6 + rlen:6 + rlen + slen], 'big')
+    if s > _SECP256K1_N // 2:
+        s = _SECP256K1_N - s
+    sb = s.to_bytes((s.bit_length() + 7) // 8, 'big')
+    if sb[0] & 0x80:
+        sb = b'\x00' + sb
+    body = b'\x02' + bytes([len(r)]) + r + b'\x02' + bytes([len(sb)]) + sb
+    return b'\x30' + bytes([len(body)]) + body
 
 
 def make_regtest_roster(signer_nodes, k, extra_pubkeys=None):
@@ -175,18 +221,66 @@ def restart_with_yellowback(test, node_indices, genesis, extra=None, yellowback_
         connect_nodes_bi(test.nodes, a, b)
 
 
+def build_price_tx(node, price, refill=None, rotate_script=None):
+    """
+    Hand-build the unsigned PRICE transaction (or, with rotate_script, the ROTATION) that spends the
+    current anchor into a new anchor of the same script (or the new roster's P2SH) plus the OP_RETURN
+    price. The anchor is the index's, followed through the node's mempool when an earlier price is
+    still unconfirmed (C11); an optional confirmed refill 'txid:n' is absorbed whole (C6). Returns
+    {hex, anchor{txid, vout, valueZat, unconfirmed}, refillValueZat, newAnchorValueZat, feeZat}.
+    """
+    from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
+    from .script import CScript, OP_RETURN
+    from .util import bytes_to_hex_str, hex_str_to_bytes
+    a = node.yed_getinfo()['anchor']
+    assert a['valid'], 'anchor custody is broken'
+    txid, vout, value = a['txid'], a['vout'], a['valueZat']
+    spk = hex_str_to_bytes(node.validateaddress(a['address'])['scriptPubKey'])
+    unconfirmed = False
+    for _ in range(100):
+        spender = None
+        for mtxid in node.getrawmempool():
+            raw = node.getrawtransaction(mtxid, 1)
+            if any(v.get('txid') == txid and v.get('vout') == vout for v in raw['vin']):
+                spender = raw
+                break
+        if spender is None:
+            break
+        txid, vout, value = spender['txid'], 0, int(spender['vout'][0]['value'] * 100000000)
+        spk = hex_str_to_bytes(spender['vout'][0]['scriptPubKey']['hex'])
+        unconfirmed = True
+    tx = CTransaction()
+    tx.vin.append(CTxIn(COutPoint(int(txid, 16), vout)))
+    refill_value = 0
+    if refill:
+        rtxid, rn = refill.split(':')
+        out = node.gettxout(rtxid, int(rn))
+        assert out is not None, 'refill outpoint is not a confirmed unspent output'
+        refill_value = int(out['value'] * 100000000)
+        tx.vin.append(CTxIn(COutPoint(int(rtxid, 16), int(rn))))
+    new_value = value + refill_value - YELLOWBACK_FEE
+    assert new_value > 0, 'anchor value does not cover the fee'
+    if rotate_script is not None:
+        p2sh = node.decodescript(rotate_script)['p2sh']
+        spk = hex_str_to_bytes(node.validateaddress(p2sh)['scriptPubKey'])
+    tx.vout.append(CTxOut(new_value, CScript(spk)))
+    if rotate_script is None:
+        payload = bytes([0x59, 0x42, 0x01, 0x10]) + int(price).to_bytes(8, 'little')
+        tx.vout.append(CTxOut(0, CScript([OP_RETURN, payload])))
+    tx.nExpiryHeight = node.getblockcount() + 1 + MINT_WINDOW
+    return {'hex': bytes_to_hex_str(tx.serialize()),
+            'anchor': {'txid': txid, 'vout': vout, 'valueZat': value, 'unconfirmed': unconfirmed},
+            'refillValueZat': refill_value, 'newAnchorValueZat': new_value, 'feeZat': YELLOWBACK_FEE}
+
+
 def publish_price(builder, signers, price, refill=None, rotate_script=None, prevtxs=None):
     """
-    Build the PRICE (or ROTATION) transaction on `builder` with
-    yed_createpricetx, collect partial signatures from `signers` in parallel
-    style (each signs the unsigned hex), merge them with one
-    signrawtransaction call on the first signer, and broadcast. Returns the
-    txid. Does not mine or sync.
+    Build the PRICE (or ROTATION) transaction with build_price_tx, collect
+    partial signatures from `signers` in parallel style (each signs the
+    unsigned hex), merge them with one signrawtransaction call on the first
+    signer, and broadcast from `builder`. Returns the txid. Does not mine or sync.
     """
-    if rotate_script is not None:
-        built = builder.yed_createpricetx('rotate', refill or '', rotate_script)
-    else:
-        built = builder.yed_createpricetx(price, refill or '')
+    built = build_price_tx(builder, price, refill=refill, rotate_script=rotate_script)
     unsigned = built['hex']
     partials = []
     for s in signers:
@@ -216,7 +310,6 @@ def build_mint_tx(node, cents, tier, lock_height, eval_height, collateral_zat, o
     and the owner pubkey. Uses the node for every script derivation (no
     Python crypto, G2).
     """
-    from decimal import Decimal
     from .mininode import COutPoint, CTransaction, CTxIn, CTxOut
     from .script import CScript, OP_NOP2, OP_CHECKSIGVERIFY, OP_DROP, OP_RETURN
     OP_CHECKLOCKTIMEVERIFY = OP_NOP2
@@ -256,8 +349,38 @@ def build_mint_tx(node, cents, tier, lock_height, eval_height, collateral_zat, o
 
 
 def cosign_and_submit(owner_node, signer_nodes, redeem_hex):
-    """Pass the owner-signed hex through each signer's yed_cosignredeem, then yed_submitredeem on the owner."""
-    h = redeem_hex
+    """
+    Complete the owner-signed redemption from yed_redeem with the roster
+    signatures of `signer_nodes` (each node's roster key is read with
+    dumpprivkey and its signature made here, placed in roster order), then
+    broadcast it from the owner node. Returns the txid.
+    """
+    from io import BytesIO
+    from .key import CECKey
+    from .mininode import CTransaction
+    from .script import CScript, SIGHASH_ALL, SignatureHash
+    from .util import bytes_to_hex_str, hex_str_to_bytes
+    tx = CTransaction()
+    tx.deserialize(BytesIO(hex_str_to_bytes(redeem_hex)))
+    pushes = list(CScript(tx.vin[0].scriptSig))        # OP_0 <ownerSig> <vaultScript>; OP_0 iterates as b''
+    assert_equal(len(pushes), 3)
+    owner_sig, vault_script = pushes[1], pushes[2]
+    keys = [p for p in CScript(vault_script) if isinstance(p, bytes) and len(p) == 33]
+    roster_keys = keys[1:]                              # keys[0] is the owner
+    vault = owner_node.yed_getvault('%064x' % tx.vin[0].prevout.hash)
+    sighash = SignatureHash(CScript(vault_script), tx, 0, SIGHASH_ALL, vault['collateralZat'], YCASH_CANOPY_BRANCH_ID)[0]
+    sigs = {}
     for n in signer_nodes:
-        h = n.yed_cosignredeem(h)['hex']
-    return owner_node.yed_submitredeem(h)['txid']
+        for i, pub in enumerate(roster_keys):
+            addr = _PUBKEY_ADDR.get(bytes_to_hex_str(pub))
+            if addr is None or i in sigs or not n.validateaddress(addr)['ismine']:
+                continue
+            k = CECKey()
+            k.set_secretbytes(wif_to_secret(n.dumpprivkey(addr)))
+            k.set_compressed(True)
+            assert_equal(bytes_to_hex_str(k.get_pubkey()), bytes_to_hex_str(pub))
+            sigs[i] = _low_s(k.sign(sighash)) + bytes([SIGHASH_ALL])
+            break
+    assert sigs, 'no signer node holds a roster key of this vault'
+    tx.vin[0].scriptSig = CScript([b''] + [sigs[i] for i in sorted(sigs)] + [owner_sig, vault_script])
+    return owner_node.sendrawtransaction(bytes_to_hex_str(tx.serialize()))

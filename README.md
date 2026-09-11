@@ -2,29 +2,33 @@
 
 This is the Ycash node, **plus Ycash Yellowback (YED)**: a decentralized digital dollar on Ycash,
 built the way DigiByte's DigiDollar is built but adapted to what Ycash actually has. This branch
-(`feature/digidollar`) is a fork of upstream Ycash `v4.5.0` (the pristine baseline is the
-`ycash-legacy` branch; `git diff ycash-legacy...feature/digidollar` is the entire delta).
+(`feature/yellowback-sf`) is a fork of upstream Ycash `v4.5.0` (the pristine baseline is the
+`ycash-legacy` branch; `git diff ycash-legacy...feature/yellowback-sf` is the entire delta). The
+earlier federation prototype is kept on `feature/digidollar` as a record.
 
-**Yellowback is experimental and off by default.** A node that does not enable it behaves exactly
-like upstream Ycash v4.5.0: same consensus, same policy, same P2P, same RPC surface.
+**Yellowback is experimental and off by default.** A node that does not enable it runs upstream
+Ycash v4.5.0's code paths: same consensus, same policy, same P2P, same RPC surface.
 
 ## What Yellowback is
 
-Yellowback is a federated, over-collateralised US-dollar stablecoin **overlay**. YED is the unit
-(`1 YED = $1`). Nothing in consensus changed: no new opcodes, no soft fork, no network upgrade.
+Yellowback v2 is a miner-enforced, over-collateralised US-dollar stablecoin **overlay** — a soft
+fork in the P2SH/CLTV sense, enforced by the mining pools that run the module. YED is the unit
+(`1 YED = $1`). The design, the protocol and what it costs are in the workspace plan; the node
+guide is [doc/yellowback.md](doc/yellowback.md).
 
 - A YED balance is an ordinary transparent output whose dollar value is declared in the
   transaction's single `OP_RETURN` payload.
-- Collateral (YEC) sits in a P2SH vault of `CLTV + owner key + k-of-n federation keys`, so it can
-  leave only after the lock height, and only with the owner *and* a federation quorum signing.
-- The YEC/USD price is published by the federation spending a well-known anchor UTXO; the
-  federation's coordinator reads it from the exchanges that list YEC and from BTC/USD references.
+- Collateral (YEC) sits in a P2SH vault with an owner path (the minter's key, after the lock
+  height) and an anyone-can-claim path (after the grace period); enforcing miners reject a block
+  that releases collateral without the matching YED burn.
+- The YEC/USD price is the median of quotes that pools publish as a tag in their own coinbase.
 - Every node started with `-yellowback` computes the same Yellowback state from the same chain
   in a self-contained, rebuildable index under `<datadir>/yellowback/`, and exposes it through
   the `yed_*` RPCs.
 
-The trust statement (what a colluding federation quorum can and cannot do) is in
-[doc/yellowback.md](doc/yellowback.md).
+**This tree is in transition:** the code on this branch is still the federation prototype, being
+replaced phase by phase (see the status table in [doc/yellowback.md](doc/yellowback.md)). The
+trust statement there is the v2 one.
 
 ## Enabling Yellowback
 
@@ -42,9 +46,9 @@ other options, the `ycash-cli` walkthrough (mint, send, redeem), index rebuilds 
 |---|---|
 | [doc/yellowback.md](doc/yellowback.md) | Users and node operators: enabling, `ycash-cli` usage, trust statement, backups, build and test baseline |
 | [doc/yellowback-rpc.md](doc/yellowback-rpc.md) | Wallet and tool developers: the `yed_*` RPC contract |
-| [doc/yellowback-federation.md](doc/yellowback-federation.md) | Federation operators: host and key ceremony, coordinator configuration, price sources, redemption co-signing, incidents |
+| `doc/yellowback-spec.md` | The v2 protocol (§3 of the plan) and the trust statement (§8.1), published verbatim by the workspace's `make spec` |
 | [doc/yellowback-review.md](doc/yellowback-review.md) | Reviewers: the review package for the fork delta |
-| [contrib/yellowback/](contrib/yellowback/README.md) | The federation coordinator and the user-side redemption client (Python, run beside `ycashd`) |
+| [contrib/yellowback/](contrib/yellowback/README.md) | The price-feed layer of the prototype's coordinator (Phase 7 turns it into the quote agent) and the one-laptop devnet |
 
 The normative protocol, the decision record and the file-by-file crosswalk against DigiByte's
 DigiDollar live in the workspace that develops this fork (`yellowback-workspace`:
@@ -57,7 +61,7 @@ DigiDollar live in the workspace that develops this fork (`yellowback-workspace`
 | `src/yellowback/` | Protocol library and state machine: params, payload, scripts, address, index, state, policy checks, transaction builder |
 | `src/rpc/yellowback.cpp`, `src/rpc/yellowbackwallet.cpp` | Node and wallet `yed_*` RPCs |
 | `src/test/yellowback_*_tests.cpp` | Unit tests (`src/test/test_bitcoin --run_test='yellowback_*'`) |
-| `qa/rpc-tests/yellowback_*.py` | Functional tests on regtest, including a three-operator federation |
+| `qa/rpc-tests/yellowback_*.py` | Functional tests on regtest |
 | `contrib/yellowback/` | Coordinator, redemption client, source-layer unit tests, and `devnet/yellowback-devnet` (a private Yellowback network on one machine for trying the wallet) |
 | `.github/workflows/yellowback-tests.yml` | CI for all of the above |
 
@@ -103,8 +107,8 @@ Tests for the Yellowback code:
 
 ```
 src/test/test_bitcoin --run_test='yellowback_*'
-qa/pull-tester/rpc-tests.py yellowback_index yellowback_lifecycle yellowback_void_mint \
-    yellowback_wallet_restore yellowback_federation yellowback_protection yellowback_sapling
+qa/pull-tester/rpc-tests.py -j4 --nozmq yellowback_index yellowback_lifecycle yellowback_void_mint \
+    yellowback_wallet_restore yellowback_sapling
 python3 -m unittest contrib/yellowback/test_yellowback_fed.py
 ```
 
