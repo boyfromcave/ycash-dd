@@ -23,7 +23,7 @@
  * prototype's co-signer rule set was removed with the federation; v2's
  * RED-1..4 are block-validity rules and live in state.cpp.
  *
- * policy::TagScript is the one GetTime() call outside rpc/yellowback.cpp
+ * policy::TagScript is the one clock read outside rpc/yellowback.cpp
  * (M11, §3.10): it decides what *this* miner publishes and is read by no rule.
  * The template filter (FilterTemplate, TPL-1..3) is Phase 4.
  */
@@ -43,7 +43,7 @@ namespace policy {
  */
 CScript BuildTagScript(const YellowbackIndex& index, int64_t now);
 
-/** = BuildTagScript(index, GetTime()). Called by CreateNewBlock under cs_main. */
+/** = BuildTagScript(index, the wall clock). Called by CreateNewBlock under cs_main. */
 CScript TagScript(const YellowbackIndex& index);
 
 } // namespace policy

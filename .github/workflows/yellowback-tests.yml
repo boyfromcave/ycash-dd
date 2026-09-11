@@ -3,14 +3,14 @@ name: yellowback tests
 # Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
 # The same zcutil/build.sh a developer runs locally, so a green CI and a green laptop mean the
 # same thing. Layout per the workspace plan (docs/plans/yellowback-v2-development-plan.md, §6.0
-# item 6): `main`, `audit` and `python` block merges; `nightly` and `weekly-fuzz` open an issue.
-# `lockorder`, `sanitizers` and `coverage` arrive with Phase 3.
+# item 6): `main`, `audit` and `python` block merges; `nightly`, `weekly-fuzz` and the three
+# variant builds `lockorder`, `sanitizers` and `coverage` (Phase 3, P6) open an issue.
 #
 # Functional scripts are listed by name: rpc-tests.py does not glob. YELLOWBACK_SCRIPTS is the
-# current phase's list (Phase 2: yellowback_index only — the four wallet-flow scripts left at
-# Phase 2's first commit because the payload is version 2 and the state machine follows the v2
-# rules while the wallet RPCs still build v1 transactions until Phase 6, N26; yellowback_activation,
-# yellowback_mining and yellowback_enforcement join as Phases 3-5 land; the four return at Phase 6).
+# current phase's list (Phase 3: yellowback_index yellowback_activation yellowback_rpc_contract;
+# yellowback_mining and yellowback_enforcement join as Phases 4-5 land; the wallet-flow scripts
+# return at Phase 6, N26). SANITIZER_SCRIPTS is the subset the sanitizers job runs (§6.0 item 6:
+# yellowback_index yellowback_enforcement yellowback_mining once the latter two exist).
 # STOCK_BASELINE is the inherited Ycash suite that must keep passing against
 # the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
 # doc/yellowback.md "Build and test baseline".
@@ -28,7 +28,8 @@ on:
   workflow_dispatch:
 
 env:
-  YELLOWBACK_SCRIPTS: yellowback_index
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_rpc_contract
+  SANITIZER_SCRIPTS: yellowback_index
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
@@ -195,18 +196,39 @@ jobs:
           python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
 
       - name: v2 gates (blocking from Phase 3)
-        # Every yed_* the node registers is in the RPC contract, and every rule has a tagged test.
-        # Both are false on the Phase 0-2 tree by construction (the v1 RPCs are still registered,
-        # no test is tagged yet); they report until Phase 3 makes them block.
-        continue-on-error: true
+        # Every yed_* the node registers is in the RPC contract (P7); the Phase 3 acceptance
+        # checks; and the federation is gone from the module (the whole-directory roster grep, N26).
         run: |
           set -e
           registered=$(grep -oh '"yed_[a-z]*"' src/rpc/yellowback*.cpp | tr -d '"' | sort -u)
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
-          tagged=$(grep -ho '\(//\|#\) Rule: [A-Z0-9-]*' src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py | sed 's/.*Rule: //' | sort -u)
-          echo "rules with a tagged test:"; echo "$tagged"
+          ! git grep -in roster -- src/yellowback
+          test -f doc/yellowback-rpc.md && grep -q 'rpcversion.*2' doc/yellowback-rpc.md
+          python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
+          git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(' | { ! grep -v 'DoS(0'; }
+          # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
+          echo "main.cpp residual (lines not mentioning g_yellowback):"
+          git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep -v 'g_yellowback\|#include\|^+$\|^+++' || true
+
+      - name: Rule -> test tags (blocking from Phase 6, §7)
+        # Every identifier of §3.2 and §3.7-3.9 must appear on a `// Rule:` / `# Rule:` line of a
+        # unit case or a functional script. TPL-1..3 arrive with Phase 4 and MINTPOL-1 with Phase 6,
+        # so the loop reports until Phase 6's acceptance makes it block.
+        continue-on-error: true
+        run: |
+          set -e
+          tagged=$(grep -ho '^\(//\|#\) Rule: .*' src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py | sed 's/.*Rule: //' | tr ' ' '\n' | sort -u)
+          echo "rules with a tagged test:"; echo "$tagged" | tr '\n' ' '; echo
           test -n "$tagged"
+          rc=0
+          for id in TAG-1 TAG-2 TAG-3 TAG-4 TAG-5 PRICE-1 PRICE-2 SIGMA-1 FEE-0 FEE-1 FEE-2 FEE-W REG-1 REG-2 REG-3 REG-4 IN-1 IN-2 IN-3 TX-0 \
+                    MINT-1 MINT-2 MINT-3 MINT-4 MINT-5 MINT-6 MINT-7 MINT-8 XFER-1 XFER-2 XFER-3 RED-1 RED-2 RED-3 RED-4 \
+                    ACT-1 ACT-2 ACT-3 ACT-4 ACT-5 ACT-6 ACT-7 HALT-1 HALT-2 HALT-3 HALT-4 BLK-1 BLK-2 BLK-3 TPL-1 TPL-2 TPL-3 \
+                    MP-1 MINER-1 MINER-2 MINER-3 MINTPOL-1 SNAP UNDO; do
+            git grep -qE "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged: $id"; rc=1; }
+          done
+          exit $rc
 
   python:
     if: github.event_name != 'schedule'
@@ -320,6 +342,213 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed: run $GITHUB_RUN_ID" \
+            --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+
+  # The three variant builds of §6.0 item 6 (P6): a DEBUG_LOCKORDER build over the functional
+  # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
+  # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
+  lockorder:
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 600
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
+            automake libtinfo5
+      - name: Install Python test prerequisites
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - run: ./zcutil/fetch-params.sh
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - name: Build with --enable-debug (defines DEBUG_LOCKORDER, configure.ac:249)
+        run: |
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug
+          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+      - name: Functional suite under DEBUG_LOCKORDER (sync.cpp aborts on a potential deadlock)
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $YELLOWBACK_SCRIPTS $STOCK_BASELINE
+      - name: No potential deadlock in any debug.log
+        if: always()
+        run: |
+          ! grep -rl 'potential deadlock detected' "${{ runner.temp }}/yellowback-tests" 2>/dev/null | grep .
+      - name: Upload node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yellowback-lockorder-logs
+          path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+          if-no-files-found: ignore
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "lockorder failed: run $GITHUB_RUN_ID" \
+            --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+
+  sanitizers:
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 600
+    permissions:
+      contents: read
+      issues: write
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
+            automake libtinfo5 clang
+      - name: Install Python test prerequisites
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - run: ./zcutil/fetch-params.sh
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - name: address + undefined (configure.ac:211)
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=address,undefined CC=clang CXX=clang++
+          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+          src/test/test_bitcoin --run_test='yellowback_*'
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
+      - name: thread
+        run: |
+          make -C src clean
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread CC=clang CXX=clang++
+          make -C src -j$(nproc) test/test_bitcoin
+          src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
+      - name: Upload node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yellowback-sanitizer-logs
+          path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+          if-no-files-found: ignore
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "sanitizers failed: run $GITHUB_RUN_ID" \
+            --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
+
+  coverage:
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 600
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
+            automake libtinfo5 lcov
+      - name: Install Python test prerequisites
+        run: |
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - run: ./zcutil/fetch-params.sh
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - name: Build with --enable-lcov (configure.ac:167), unit and functional suites against the instrumented ycashd
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov
+          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+          make check || true
+          src/test/test_bitcoin
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
+      - name: lcov over src/yellowback and src/rpc/yellowback*, the floors of qa/yellowback-coverage-floor.sh
+        run: |
+          lcov --capture --directory src --output-file lcov-all.info --rc lcov_branch_coverage=0
+          lcov --extract lcov-all.info '*/src/yellowback/*' '*/src/rpc/yellowback*' --output-file lcov.info
+          lcov --list lcov.info
+          genhtml lcov.info --output-directory coverage-html
+          qa/yellowback-coverage-floor.sh lcov.info
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yellowback-coverage
+          path: |
+            lcov.info
+            coverage-html
+          if-no-files-found: ignore
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "coverage failed: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   weekly-fuzz:
