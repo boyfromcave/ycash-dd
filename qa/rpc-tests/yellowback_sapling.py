@@ -130,6 +130,15 @@ class YellowbackSaplingTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [100, 9800, 10000])
+        # H1 (Phase 8) selects an exact match before anything else, so a wallet holding a 10000-cent
+        # coin redeems a 10000-cent debt with no change at all — which would leave this script with
+        # two identical no-change shapes instead of the two the N39 note asks for. Consolidate into
+        # a single 19900 coin: no subset equals the debt, so the selector takes the one coin and
+        # must leave change, and the without-change shape below still arises from an exact match.
+        user.yed_send(user.yed_getnewaddress(), 19900)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal([c['cents'] for c in user.yed_listunspent()], [19900])
 
         print('wait for both vaults to unlock')
         lock = max(mint1['lockHeight'], mint2['lockHeight'])
@@ -150,7 +159,7 @@ class YellowbackSaplingTest(YellowbackTestFramework):
         assert_equal(len(rraw['vShieldedOutput']), 1)
         assert_equal(rraw['vShieldedSpend'], [])
         assert_equal(rraw['vin'][0]['txid'], vault1)
-        assert_equal(len(rraw['vin']), 4)                                  # the vault, 1 + 98 + 100 YED (smallest first)
+        assert_equal(len(rraw['vin']), 2)                                  # the vault and the one 199 YED coin (H1: fewest inputs)
         assert_equal(len(rraw['vout']), 3)                                 # YED change, payload, fee
         assert_equal(rraw['vout'][0]['valueZat'], TOKEN_VALUE)
         assert_equal(rraw['vout'][2]['scriptPubKey']['addresses'], [red1['payee']])
@@ -158,7 +167,7 @@ class YellowbackSaplingTest(YellowbackTestFramework):
         payload = user.yed_decodepayload(rraw['vout'][1]['scriptPubKey']['hex'][4:])
         assert_equal((payload['type'], payload['feeVout']), ('redeem', 2))
         assert_equal(payload['assignments'], [{'vout': 0, 'cents': 9900}])
-        collateral_out = 10 * COIN + 3 * TOKEN_VALUE - YELLOWBACK_FEE - red1['feeZat'] - TOKEN_VALUE
+        collateral_out = 10 * COIN + 1 * TOKEN_VALUE - YELLOWBACK_FEE - red1['feeZat'] - TOKEN_VALUE
         assert_equal(red1['collateralOut'], collateral_out)
         assert_equal(zat(rraw['valueBalance']), -collateral_out)
         assert_equal(rraw['locktime'], mint1['lockHeight'])
