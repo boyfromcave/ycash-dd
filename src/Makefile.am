@@ -215,6 +215,7 @@ BITCOIN_CORE_H = \
   yellowback/payload.h \
   yellowback/script.h \
   yellowback/state.h \
+  yellowback/tag.h \
   yellowback/txbuilder.h \
   yellowback/view.h \
   yellowback/wallet.h \
@@ -467,6 +468,7 @@ libbitcoin_common_a_SOURCES = \
   yellowback/payload.cpp \
   yellowback/script.cpp \
   yellowback/state.cpp \
+  yellowback/tag.cpp \
   yellowback/view.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)

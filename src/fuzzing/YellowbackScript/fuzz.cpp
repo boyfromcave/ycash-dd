@@ -2,9 +2,11 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-// Fuzz target for the Yellowback script parsers (plan C14, §6 Phase 6):
-// ParseRosterScript, ParseVaultScript, ParseVaultScriptSig and
-// ExtractRedeemScript over arbitrary bytes. They must never throw.
+// Fuzz target for the Yellowback script parsers (plan §3.4, §7 "Fuzzing"):
+// ParseVaultScript, ParseVaultSpendPath and ExtractRedeemScript over
+// arbitrary bytes. They must never throw; a parsed vault script rebuilds to
+// the input. Corpus: src/fuzzing/YellowbackScript/input
+// (src/test/gen_yellowback_corpus.py).
 
 #include "yellowback/script.h"
 
@@ -17,22 +19,25 @@
 int fuzz_YellowbackScript(const std::vector<unsigned char>& data)
 {
     CScript script(data.begin(), data.end());
-    yellowback::Roster roster;
-    if (yellowback::ParseRosterScript(script, roster)) {
-        if (yellowback::RosterScript(roster.k, roster.keys) != script) return -2;
-    }
-    uint32_t lock;
+    uint32_t lock, claim;
     CPubKey owner;
-    yellowback::Roster r2;
-    if (yellowback::ParseVaultScript(script, lock, owner, r2)) {
-        if (yellowback::VaultScript(lock, owner, r2) != script) return -3;
+    if (yellowback::ParseVaultScript(script, lock, owner, claim)) {
+        if (yellowback::VaultScript(lock, owner, claim) != script) return -2;
+        if (claim <= lock) return -3;
     }
-    std::vector<yellowback::valtype> sigs;
-    yellowback::valtype ownerSig;
-    CScript vault;
-    yellowback::ParseVaultScriptSig(script, sigs, ownerSig, vault);
+    std::optional<yellowback::VaultSpendPath> path = yellowback::ParseVaultSpendPath(script);
     CScript redeem;
-    yellowback::ExtractRedeemScript(script, redeem);
+    bool hasRedeem = yellowback::ExtractRedeemScript(script, redeem);
+    if (path.has_value()) {
+        if (!hasRedeem || path->vaultScript != redeem) return -4;
+        if (path->pushes < 2) return -5;
+    }
+    for (size_t n = 0; n < data.size(); n++) {
+        CScript prefix(data.begin(), data.begin() + n);
+        yellowback::ParseVaultScript(prefix, lock, owner, claim);
+        yellowback::ParseVaultSpendPath(prefix);
+        yellowback::ExtractRedeemScript(prefix, redeem);
+    }
     return 0;
 }
 

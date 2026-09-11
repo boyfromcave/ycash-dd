@@ -116,6 +116,7 @@ BITCOIN_TESTS =\
   test/yellowback_payload_tests.cpp \
   test/yellowback_script_tests.cpp \
   test/yellowback_state_tests.cpp \
+  test/yellowback_tag_tests.cpp \
   test/yellowback_fuzz_tests.cpp \
   test/yellowback_index_tests.cpp
 
