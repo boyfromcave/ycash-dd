@@ -150,9 +150,11 @@ jobs:
             echo "$p: $n changed lines (budget $b)"
             test "$n" -le "$b" || exit 1
           done
-          # Zero lines in the consensus set. src/wallet/rpcwallet.cpp and src/rpc/rawtransaction.cpp
-          # leave this set in Phase 8 (M7); until then src/wallet as a whole stays at zero.
-          test -z "$(git diff --stat ycash-legacy...HEAD -- src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet src/txdb.cpp src/txdb.h configure.ac)"
+          # Zero lines in the consensus set of plan §4.1. Phase 8's wallet-tier hardening (H5/H7/H8)
+          # landed 2026-09-11, so src/wallet/rpcwallet.cpp, src/wallet/rpcdump.cpp and
+          # src/rpc/rawtransaction.cpp have left this set (M7) and the wallet core is named
+          # explicitly: src/wallet/wallet.{h,cpp} stay at zero, the rest of src/wallet does not.
+          test -z "$(git diff --stat ycash-legacy...HEAD -- src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet/wallet.h src/wallet/wallet.cpp src/txdb.cpp src/txdb.h configure.ac)"
 
       - name: Determinism, no clock, no sockets, no bans (plan §3.10, §8.4 items 2 and 8)
         # The state machine and the pure modules may not read the clock, the mempool, the wallet
