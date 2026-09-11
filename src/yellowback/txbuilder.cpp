@@ -237,11 +237,71 @@ std::vector<YedCoin> SelectYed(const Context& ctx, int64_t needed, int64_t& chan
 
 BuiltTx BuildMint(YellowbackWallet& yw, int64_t cents, int lockBlocks, CReserveKey& reservekey, const std::string& from)
 {
-    // Phase 2 shim (plan §6 preamble, N26): the v1 mint builder read the prototype's tier tables,
-    // DCA snapshot fields and roster, all deleted with the v2 state machine. The v2 builder
-    // (vault script per §3.4, enforcement-fee output, class from lockBlocks, refHeight) is Phase 6.
-    (void)yw; (void)cents; (void)lockBlocks; (void)reservekey; (void)from;
-    throw std::runtime_error("yed_mint: the v2 mint builder lands in Phase 6 (the v1 builder was removed with the federation state machine)");
+    Context ctx(yw);
+    const Params& p = ctx.params;
+    if (cents < p.minMint || cents > p.maxMint) {
+        throw std::runtime_error(strprintf("bad-mint-amount: cents must be between %d and %d", p.minMint, p.maxMint));
+    }
+    const int termClass = p.ClassForLockBlocks(lockBlocks);
+    if (termClass < 0) throw std::runtime_error(strprintf("mint-bad-lock: lockBlocks %d is in no term class", lockBlocks));
+    const int64_t refHeight = (int64_t)ctx.indexHeight - g_yellowbackMintLag;
+    const int64_t lockHeight = refHeight + lockBlocks;
+    if (lockHeight <= refHeight || lockHeight + p.grace >= LOCKTIME_THRESHOLD) {
+        throw std::runtime_error("mint-bad-lock: lockHeight + GRACE exceeds LOCKTIME_THRESHOLD");
+    }
+    std::optional<Snapshot> snapshot = SnapshotAt(ctx.st, p, refHeight);
+    if (!snapshot.has_value() || !snapshot->activation.IsActive() || snapshot->haltMask != 0) {
+        throw std::runtime_error("mintpol-not-active: minting is not allowed at the reference snapshot");
+    }
+    std::optional<MicroUsd> pMint = snapshot->PMint();
+    if (!pMint.has_value()) throw std::runtime_error("mintpol-no-price: no mint price at the reference snapshot");
+    std::optional<CAmount> required = RequiredCollateralRounded((Cents)cents,
+        MinRatioBps(p.baseRatioBps[termClass], snapshot->sigmaMultBps), pMint.value());
+    if (!required.has_value()) throw std::runtime_error("mint-unsatisfiable: the required collateral exceeds MAX_MONEY");
+
+    AddressChoice funding = ParseAddressChoice(from, "from");
+    if (funding.kind == AddressChoice::SAPLING) throw std::runtime_error("from: Sapling funding is not supported by yed_mint");
+    const CPubKey owner = ctx.FreshKey("yellowback-vault");
+    std::vector<unsigned char> selector(owner.begin(), owner.end());
+    std::optional<CKeyID> payee = DefaultPayee(ctx.index.View(), p, (int)refHeight, selector, ctx.index.GetPayeePolicy());
+    const CAmount fee = payee.has_value() ? FeeZat(required.value(), p.feeMin, p.feeBps) : 0;
+
+    CMutableTransaction mtx = ctx.NewTx((uint32_t)(refHeight + p.refWindow));
+    const CScript vaultScript = VaultScript((uint32_t)lockHeight, owner, (uint32_t)(lockHeight + p.grace));
+    if (vaultScript.empty()) throw std::runtime_error("mint-bad-lock: cannot construct vault script");
+    mtx.vout.push_back(CTxOut(required.value(), P2SHScript(vaultScript)));
+    mtx.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
+    const uint8_t feeVout = payee.has_value() ? 3 : FEE_VOUT_NONE;
+    std::vector<unsigned char> payload = EncodePayload(Payload::Mint((uint8_t)termClass, (uint32_t)cents,
+        (uint32_t)lockHeight, (uint32_t)refHeight, owner, feeVout));
+    if (payload.empty()) throw std::runtime_error("cannot encode the mint payload");
+    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+    if (payee.has_value()) mtx.vout.push_back(CTxOut(fee, GetScriptForDestination(payee.value())));
+
+    std::vector<std::pair<CScript, CAmount>> prevs;
+    const CAmount needed = required.value() + TOKEN_VALUE + fee + g_yellowbackFee;
+    const CScript onlyScript = funding.kind == AddressChoice::TRANSPARENT ? GetScriptForDestination(funding.keyId) : CScript();
+    CAmount selected = ctx.SelectYec(needed, mtx, prevs, funding.kind == AddressChoice::TRANSPARENT ? &onlyScript : nullptr, funding.text);
+    const CAmount change = selected - needed;
+    if (change > 0) {
+        CPubKey changeKey;
+        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool ran out");
+        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+    }
+    ctx.SignInputs(mtx, prevs, 0);
+
+    BuiltTx out;
+    out.tx = mtx;
+    out.ownYedOutputs.push_back(COutPoint(CTransaction(out.tx).GetHash(), 1));
+    out.freshKey = owner;
+    out.fundedFrom = "transparent";
+    out.evalHeight = refHeight;
+    out.lockHeight = (uint32_t)lockHeight;
+    out.collateralZat = required.value();
+    out.termClass = termClass;
+    out.feeZat = fee;
+    out.payee = payee;
+    return out;
 }
 
 BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients, CReserveKey& reservekey)
@@ -314,11 +374,71 @@ BuiltTx BuildTransfer(YellowbackWallet& yw, const std::vector<std::pair<CScript,
 
 BuiltTx BuildRedeem(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to)
 {
-    // Phase 2 shim (plan §6 preamble, N26): the v1 redeem builder needed the roster and the ERR
-    // burn table, both deleted. The v2 builder (owner path, burn = debt, fee output, VOID release)
-    // is Phase 6.
-    (void)yw; (void)vaultTxid; (void)to;
-    throw std::runtime_error("yed_redeem: the v2 redeem builder lands in Phase 6 (the v1 builder was removed with the federation state machine)");
+    Context ctx(yw);
+    const COutPoint vaultOut(vaultTxid, 0);
+    std::optional<VaultRecord> vault = ctx.st.GetVault(vaultOut);
+    if (!vault.has_value()) throw std::runtime_error("vault-not-found: no vault at " + vaultTxid.GetHex() + ":0");
+    if (vault->Status() != VaultStatus::ACTIVE) throw std::runtime_error("vault-not-active: vault is not active");
+    if (!yw.IsMineVault(vault.value())) throw std::runtime_error("vault-not-owned: this wallet does not hold the vault owner key");
+    if (ctx.indexHeight < vault->lockHeight) throw std::runtime_error(strprintf("vault-locked: vault is locked until height %d", vault->lockHeight));
+
+    AddressChoice destination = ParseAddressChoice(to, "to");
+    if (destination.kind == AddressChoice::SAPLING) throw std::runtime_error("to: Sapling destinations are not supported by yed_redeem");
+    CScript collateralScript;
+    std::string collateralTo = to;
+    if (destination.kind == AddressChoice::TRANSPARENT) collateralScript = GetScriptForDestination(destination.keyId);
+    else {
+        CPubKey key = ctx.FreshKey("yellowback-redeem");
+        collateralScript = GetScriptForDestination(key.GetID());
+        collateralTo = KeyIO(::Params()).EncodeDestination(key.GetID());
+    }
+
+    int64_t changeCents = 0;
+    std::vector<YedCoin> yed = SelectYed(ctx, vault->mintedCents, changeCents);
+    const int64_t refHeight = ctx.indexHeight;
+    std::vector<unsigned char> selector(vaultTxid.begin(), vaultTxid.end());
+    selector.insert(selector.end(), 4, 0);
+    std::optional<CKeyID> payee = DefaultPayee(ctx.index.View(), ctx.params, (int)refHeight, selector, ctx.index.GetPayeePolicy());
+    const CAmount fee = payee.has_value() ? FeeZat(vault->collateralZat, ctx.params.feeMin, ctx.params.feeBps) : 0;
+    const CAmount yedChangeValue = changeCents > 0 ? TOKEN_VALUE : 0;
+    const CAmount collateralOut = vault->collateralZat + (CAmount)yed.size() * TOKEN_VALUE - g_yellowbackFee - fee - yedChangeValue;
+    if (collateralOut <= 0) throw std::runtime_error("redeem collateral is insufficient to pay fees");
+
+    CMutableTransaction mtx = ctx.NewTx((uint32_t)(refHeight + ctx.params.refWindow));
+    mtx.nLockTime = vault->lockHeight;
+    mtx.vin.push_back(CTxIn(vaultOut, CScript(), 0xfffffffe));
+    for (const YedCoin& c : yed) mtx.vin.push_back(CTxIn(c.outpoint));
+    mtx.vout.push_back(CTxOut(collateralOut, collateralScript));
+    const uint8_t feeVout = payee.has_value() ? 1 : FEE_VOUT_NONE;
+    if (payee.has_value()) mtx.vout.push_back(CTxOut(fee, GetScriptForDestination(payee.value())));
+    int changeVout = -1;
+    if (changeCents > 0) {
+        CPubKey changeKey = ctx.FreshKey("yellowback-change");
+        changeVout = mtx.vout.size();
+        mtx.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(changeKey.GetID())));
+    }
+    std::vector<unsigned char> payload = EncodePayload(Payload::Redeem((uint32_t)refHeight, feeVout, {}));
+    if (payload.empty()) throw std::runtime_error("cannot encode the redemption payload");
+    mtx.vout.push_back(CTxOut(0, PayloadScript(payload)));
+
+    BuiltTx out;
+    out.tx = mtx;
+    for (const YedCoin& c : yed) {
+        out.yedInputs.insert(c.outpoint);
+        out.yedPrevs.push_back(std::make_pair(c.token.scriptPubKey, c.token.nValue));
+    }
+    out.requiredBurn = vault->mintedCents;
+    out.burnCents = vault->mintedCents;
+    out.changeCents = changeCents;
+    out.changeVout = changeVout;
+    out.vaultScript = VaultScript(vault->lockHeight, vault->OwnerKey(), vault->claimHeight);
+    out.vaultValue = vault->collateralZat;
+    out.ownerPubKey = vault->OwnerKey();
+    out.feeZat = fee;
+    out.payee = payee;
+    out.collateralOut = collateralOut;
+    out.collateralTo = collateralTo;
+    return out;
 }
 
 void FinishSapling(BuiltTx& out)
@@ -344,7 +464,7 @@ void SignRedeem(BuiltTx& out, CWallet& wallet, uint32_t branchId)
     valtype ownerSig;
     if (!ownerKey.Sign(hash, ownerSig)) throw std::runtime_error("owner signature failed");
     ownerSig.push_back((unsigned char)SIGHASH_ALL);
-    out.tx.vin[0].scriptSig = BuildVaultScriptSig({}, ownerSig, out.vaultScript);
+    out.tx.vin[0].scriptSig = OwnerScriptSig(ownerSig, out.vaultScript);
     for (size_t i = 0; i < out.yedPrevs.size(); i++) {
         if (!SignSignature(wallet, out.yedPrevs[i].first, out.tx, i + 1, out.yedPrevs[i].second, SIGHASH_ALL, branchId)) {
             throw std::runtime_error(strprintf("failed to sign YED input %u", (unsigned)i));

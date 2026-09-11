@@ -43,7 +43,7 @@
  *   P                     ParamsRecord      (the four hashed regtest values, N18)
  *   U<blockhash>          Undo              (not part of the state hash)
  *
- * The federation prototype's A (anchor), Rc/R<u32> (roster), P<u32> (price
+ * The federation prototype's A (anchor), Rc/R<u32> (signer set), P<u32> (price
  * table) and O (volatility) keys are gone; SCHEMA_VERSION 2 makes a v1
  * database wipe itself on start (index.cpp).
  *

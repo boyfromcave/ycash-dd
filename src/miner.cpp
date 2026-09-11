@@ -33,6 +33,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "yellowback/policy.h"
 
 #include <librustzcash.h>
 
@@ -324,7 +325,7 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
             AddOutputsToCoinbaseTxAndSign(mtx, chainparams, nHeight, nFees),
             minerAddress);
 
-        mtx.vin[0].scriptSig = CScript() << nHeight << OP_0;
+        mtx.vin[0].scriptSig = (CScript() << nHeight << OP_0) + COINBASE_FLAGS;
         return mtx;
 }
 
@@ -366,6 +367,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
 
     {
         LOCK2(cs_main, mempool.cs);
+        COINBASE_FLAGS = yellowback::g_yellowback ? yellowback::policy::TagScript(*yellowback::g_yellowback) : CScript();
         CBlockIndex* pindexPrev = chainActive.Tip();
         const int nHeight = pindexPrev->nHeight + 1;
         uint32_t consensusBranchId = CurrentEpochBranchId(nHeight, chainparams.GetConsensus());
@@ -829,7 +831,10 @@ void static BitcoinMiner(const CChainParams& chainparams)
                 return;
             }
             CBlock *pblock = &pblocktemplate->block;
-            IncrementExtraNonce(pblock, pindexPrev, nExtraNonce);
+            {
+                LOCK(cs_main);
+                IncrementExtraNonce(pblock, pindexPrev, nExtraNonce);
+            }
 
             LogPrintf("Running ZcashMiner with %u transactions in block (%u bytes)\n", pblock->vtx.size(),
                 ::GetSerializeSize(*pblock, SER_NETWORK, PROTOCOL_VERSION));

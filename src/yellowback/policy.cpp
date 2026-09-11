@@ -11,11 +11,37 @@
 #include "script/interpreter.h"
 #include "script/script_error.h"
 #include "txmempool.h"
+#include "utiltime.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
 #include "yellowback/state.h"
+#include "yellowback/tag.h"
 
 namespace yellowback {
+
+namespace policy {
+
+CScript BuildTagScript(const YellowbackIndex& index, int64_t now)
+{
+    const MinerStatus s = index.GetMinerStatus(now);
+    if (s.kind == "none" || !s.payoutKey.has_value()) return CScript();
+    const QuoteHolder q = index.GetQuote();
+    CoinbaseTag tag;
+    tag.flags = s.signal ? 0x01 : 0x00;
+    tag.priceMicroUsd = s.kind == "quote" ? q.priceMicroUsd : TAG_PRICE_SIGNAL_ONLY;
+    tag.sourceMask = s.kind == "quote" ? q.sourceMask : 0;
+    tag.payoutKey = s.payoutKey.value();
+    if (!IsValidTag(tag)) return CScript();
+    return TagPush(tag);
+}
+
+CScript TagScript(const YellowbackIndex& index)
+{
+    // The miner's own clock, deciding what it publishes; read by no rule (M11).
+    return BuildTagScript(index, GetTime());
+}
+
+} // namespace policy
 
 void FetchInputs(const CTransaction& tx, CCoinsViewCache& view)
 {

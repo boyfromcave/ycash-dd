@@ -37,6 +37,7 @@ BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
     'yellowback_lifecycle.py',
+    'yellowback_wallet_lifecycle.py',
     'yellowback_void_mint.py',
     'yellowback_wallet_restore.py',
     # Scripts that are run by the travis build process

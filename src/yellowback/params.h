@@ -28,8 +28,8 @@
  * medians and volatility are the Ycash adaptation (mapping.md §13).
  *
  * The federation prototype's symbols (tier tables, health/volatility
- * thresholds, the genesis anchor and roster) were deleted in Phase 2; the
- * roster script helpers in script.h are the last v1 remnant (Phase 3).
+ * thresholds, the genesis anchor and the signer set) were deleted in Phases
+ * 2 and 3; nothing v1 remains.
  */
 namespace yellowback {
 
@@ -81,9 +81,6 @@ static const int NUM_CLASSES = 3;
 static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
 /** feeVout value meaning "no enforcement-fee output" (§3.3). */
 static const uint8_t FEE_VOUT_NONE = 0xFF;
-
-/** Roster bound of the prototype's k-of-n script helpers (script.h; deleted with them in Phase 3). */
-static const unsigned int ROSTER_MAX_N = 13;
 
 /**
  * Per-network parameters (§3.1, field list §4.2a). Built once per network.

@@ -191,21 +191,20 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 2 || params.size() > 3)
         throw std::runtime_error(
-            "yed_mint cents tier ( \"from\" )\n"
+            "yed_mint cents lockBlocks ( \"from\" )\n"
             "\nMint YED: locks the required YEC collateral in a vault for the tier's period and creates the YED.\n"
             "The collateral requirement is fixed at the evaluation height (index tip minus the mint lag) and known before signing.\n"
             "Back up wallet.dat afterwards: the vault owner key is a fresh keypool key.\n"
             "\nArguments:\n"
             "1. cents   (numeric, required) amount of YED to mint, in cents\n"
-            "2. tier    (numeric, required) lock tier\n"
-            "3. \"from\"  (string, optional) fund the collateral from this address: an s1... address (its confirmed\n"
-            "             outputs only) or a ys1... address (its Sapling notes, spent in the same transaction; the change\n"
-            "             returns to it). Default: any confirmed transparent output of the wallet.\n"
-            "\nResult: { \"txid\", \"vault\", \"lockHeight\", \"evalHeight\", \"expiryHeight\", \"collateralZat\", \"collateral\", \"fundedFrom\", \"from\", \"warning\" }\n");
+            "2. lockBlocks (numeric, required) vault lock duration; the term class is derived from it\n"
+            "3. \"from\"  (string, optional) fund the collateral from this transparent s1... address's confirmed\n"
+            "             outputs only. Default: any confirmed transparent output of the wallet.\n"
+            "\nResult: { \"txid\", \"vault\", \"termClass\", \"lockHeight\", \"evalHeight\", \"expiryHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\", \"from\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     int64_t cents = params[0].get_int64();
-    int tier = params[1].get_int();
+    int lockBlocks = params[1].get_int();
     const std::string from = params.size() > 2 ? params[2].get_str() : "";
     BuiltTx built;
     CReserveKey reservekey(pwalletMain);
@@ -217,7 +216,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
-                built = BuildMint(yw, cents, tier, reservekey, from);
+                built = BuildMint(yw, cents, lockBlocks, reservekey, from);
             } catch (const std::runtime_error& e) {
                 throw JSONRPCError(RPC_WALLET_ERROR, e.what());
             }
@@ -237,11 +236,14 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
     o.pushKV("vault", txid.GetHex() + ":0");
+    o.pushKV("termClass", built.termClass >= 0 ? std::string(1, (char)('A' + built.termClass)) : "");
     o.pushKV("lockHeight", (int64_t)built.lockHeight);
     o.pushKV("evalHeight", built.evalHeight);
     o.pushKV("expiryHeight", (int64_t)built.tx.nExpiryHeight);
     o.pushKV("collateralZat", built.collateralZat);
     o.pushKV("collateral", ValueFromAmount(built.collateralZat));
+    o.pushKV("feeZat", built.feeZat);
+    o.pushKV("payee", built.payee.has_value() ? UniValue(KeyIO(::Params()).EncodeDestination(built.payee.value())) : NullUniValue);
     o.pushKV("fundedFrom", built.fundedFrom);
     o.pushKV("from", from);
     o.pushKV("ownerKeyId", built.freshKey.GetID().GetHex());
@@ -301,14 +303,11 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 1 || params.size() > 2)
         throw std::runtime_error(
             "yed_redeem \"vaultTxid\" ( \"to\" )\n"
-            "\nBuild and owner-sign the redemption of a vault: burns the required YED and returns the collateral.\n"
-            "No network I/O and nothing is broadcast: the vault script of this prototype still needs the retired\n"
-            "federation's signatures, so the returned hex cannot be completed by this node (v2 replaces this command).\n"
+            "\nBuild, owner-sign, preflight, and commit a redemption: burns the vault debt and returns transparent collateral.\n"
             "\nArguments:\n"
             "1. \"vaultTxid\"  (string, required) the mint transaction id (the vault is its output 0)\n"
-            "2. \"to\"         (string, optional) where the collateral goes: an s1... address, or a ys1... address\n"
-            "                  (paid as a Sapling output). Default: a fresh transparent address of this wallet.\n"
-            "\nResult: { \"hex\", \"vault\", \"requiredBurnCents\", \"burnCents\", \"changeCents\", \"collateralTo\", \"shielded\", \"expiryHeight\" }\n");
+            "2. \"to\"         (string, optional) transparent s1... collateral destination. Default: a fresh wallet address.\n"
+            "\nResult: { \"txid\", \"vault\", \"burnedCents\", \"changeCents\", \"feeZat\", \"payee\", \"collateralOut\", \"to\", \"expiryHeight\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
@@ -334,31 +333,23 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
             }
         }
     }
-    if (built.NeedsProving()) {
-        // Sapling shape (I2): prove the collateral output with no lock held, then re-lock to sign
-        // the vault and YED inputs (scriptSigs are outside the ZIP-243 digest).
-        try {
-            FinishSapling(built);
-        } catch (const std::runtime_error& e) {
-            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
-        }
-        LOCK2(cs_main, pwalletMain->cs_wallet);
-        EnsureWalletIsUnlocked();
-        try {
-            SignRedeem(built, *pwalletMain, SignerBranchId());
-        } catch (const std::runtime_error& e) {
-            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
-        }
-    }
     const CTransaction ownerSignedTx(built.tx);
+    std::optional<std::string> preflight = index.MempoolCheckReason(ownerSignedTx);
+    if (preflight.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, "mempool-check-failed:" + preflight.value());
+    uint256 txid;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        txid = Commit(yw, built, nullptr);
+    }
     UniValue o(UniValue::VOBJ);
-    o.pushKV("hex", EncodeHexTx(ownerSignedTx));
+    o.pushKV("txid", txid.GetHex());
     o.pushKV("vault", vaultTxid.GetHex() + ":0");
-    o.pushKV("requiredBurnCents", built.requiredBurn);
-    o.pushKV("burnCents", built.burnCents);
+    o.pushKV("burnedCents", built.burnCents);
     o.pushKV("changeCents", built.changeCents);
-    o.pushKV("collateralTo", built.collateralTo);
-    o.pushKV("shielded", !ownerSignedTx.vShieldedOutput.empty());
+    o.pushKV("feeZat", built.feeZat);
+    o.pushKV("payee", built.payee.has_value() ? UniValue(KeyIO(::Params()).EncodeDestination(built.payee.value())) : NullUniValue);
+    o.pushKV("collateralOut", ValueFromAmount(built.collateralOut));
+    o.pushKV("to", built.collateralTo);
     o.pushKV("expiryHeight", (int64_t)built.tx.nExpiryHeight);
     return o;
 }
