@@ -236,6 +236,15 @@ bool YellowbackIndex::SyncToChain()
         Wipe("schema or network changed");
         tip = std::nullopt;
     }
+    if (tip.has_value()) {
+        // The four hashed regtest values (M13) are part of every state; a node restarted with a
+        // different set rebuilds rather than carrying rows computed under the old one.
+        std::optional<ParamsRecord> stored = State(*db).GetParamsRecord();
+        if (stored.has_value() && SerializeRecord(stored.value()) != SerializeRecord(ParamsRecord(params))) {
+            Wipe("parameters changed");
+            tip = std::nullopt;
+        }
+    }
 
     const CBlockIndex* chainTip = chainActive.Tip();
     if (!chainTip || chainTip->nHeight < params.startHeight) {
@@ -678,14 +687,9 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     if (IsAbandonedLocked()) return std::nullopt;       // L13: a sweep is an ordinary transaction under abandonment
     const int next = TipHeight() + 1;
     const Params& p = ParamsAt(next);
-    // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW.
-    std::optional<FoundPayload> fp = FindPayload(tx);
-    int64_t refHeight = -1;
-    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) refHeight = fp->payload.refHeight;
-    if (tx.nExpiryHeight == 0 || refHeight < 0 || (int64_t)tx.nExpiryHeight > refHeight + p.refWindow) {
-        return std::string("mempool-expiry");
-    }
-    // The two-transaction pseudo-block (§4.3): EvaluateBlock reads vtx[0] as the coinbase (TAG-1, TX-0).
+    // RED-1..4 at the next height over the two-transaction pseudo-block (§4.3): EvaluateBlock reads
+    // vtx[0] as the coinbase (TAG-1, TX-0). The RED verdict comes first so that a malformed spend is
+    // named by its rule (K7: mempool-check-failed:<verdict>), the expiry bound second.
     CMutableTransaction cb;
     cb.vin.resize(1);
     cb.vin[0].prevout.SetNull();
@@ -695,9 +699,19 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     pseudo.vtx.push_back(tx);
     OverlayStateView overlay(*db);
     BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0);
-    if (!ev.blockInvalid) return std::nullopt;
-    const std::string::size_type colon = ev.reason.find(':');
-    return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
+    if (ev.blockInvalid) {
+        const std::string::size_type colon = ev.reason.find(':');
+        return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
+    }
+    // The MP-1 expiry bound (N5): nExpiryHeight != 0 and <= refHeight + REF_WINDOW, so the spend
+    // expires from every mempool (stock nodes enforce expiry) before RED-1's window closes.
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    int64_t refHeight = -1;
+    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) refHeight = fp->payload.refHeight;
+    if (tx.nExpiryHeight == 0 || refHeight < 0 || (int64_t)tx.nExpiryHeight > refHeight + p.refWindow) {
+        return std::string("mempool-expiry");
+    }
+    return std::nullopt;
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckReason(const CTransaction& tx)
