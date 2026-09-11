@@ -30,7 +30,7 @@ from test_framework.yellowback_util import (
     MINT_WINDOW,
     assert_same_statehash,
     assert_yed_synced,
-    build_mint_tx,
+    build_mint_tx_v1 as build_mint_tx,
     cosign_and_submit,
     fund_genesis_anchor,
     make_regtest_roster,
