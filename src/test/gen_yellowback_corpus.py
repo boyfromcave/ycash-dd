@@ -30,6 +30,10 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                                "qa", "rpc-tests"))
+from test_framework.yellowback_model import ripemd160 as _yb_ripemd160   # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(HERE)
 FUZZ_DIR = os.path.join(SRC, "fuzzing")
@@ -341,9 +345,23 @@ def p2pkh(key_hash):
     return op(OP_DUP, 0xA9) + push(key_hash) + op(0x88, OP_CHECKSIG)
 
 
+def _ripemd160(b):
+    """RIPEMD-160, without depending on OpenSSL providing it.
+
+    OpenSSL 3 moved RIPEMD-160 into the legacy provider and most Linux
+    distributions ship it disabled, so hashlib.new("ripemd160") raises
+    UnsupportedDigestmodError on a stock CI runner while working on the
+    developer's macOS host — the corpus would then be generated but never
+    checkable in CI. The pure-Python implementation the functional-test model
+    already carries is single-sourced here so the two can never disagree about
+    a script hash; it is byte-identical to OpenSSL's (checked against the
+    algorithm's reference vectors in the model's own tests).
+    """
+    return _yb_ripemd160(b)
+
+
 def p2sh(redeem):
-    import hashlib as _h
-    h = _h.new("ripemd160", _h.sha256(redeem).digest()).digest()
+    h = _ripemd160(hashlib.sha256(redeem).digest())
     return op(0xA9) + push(h) + op(0x87)
 
 
