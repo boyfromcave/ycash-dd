@@ -253,6 +253,13 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
 - The runner (`rpc-tests.py`) execs each script through `#!/usr/bin/env python3`: put the
   workspace venv's `bin` first on `PATH` or the scripts start under the system interpreter and
   fail on `import simplejson`.
+- The same exec through `/usr/bin/env` (a SIP-protected binary) **drops `DYLD_LIBRARY_PATH`**, so
+  under the runner the Python signer (`build_vault_spend_raw`'s `CECKey`) loads the system
+  libcrypto and macOS aborts the script ("is loading libcrypto in an unsafe way"). On this host run
+  a script that signs vault spends directly (`../.venv/bin/python -u qa/rpc-tests/<script>.py
+  --srcdir=... --tmpdir=... --portseed=...`, as the Phase 4 record below does); the Linux CI runner
+  is unaffected. Verified: `/usr/bin/env python3 -c 'import os; print(os.environ.get("DYLD_LIBRARY_PATH"))'`
+  prints `None` with the variable exported.
 
 ### Recorded baseline (Phase 2, 2026-09-10, node side)
 

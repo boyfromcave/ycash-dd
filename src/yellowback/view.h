@@ -98,6 +98,10 @@ class OverlayStateView : public StateView
 {
 public:
     explicit OverlayStateView(StateView& base) : base(base) {}
+    // Never copyable: a copy shares the base and its Commit() would write past the overlay it was
+    // meant to nest in (OverlayStateView sub(other) would otherwise pick this over the base ctor).
+    OverlayStateView(const OverlayStateView&) = delete;
+    OverlayStateView& operator=(const OverlayStateView&) = delete;
     bool Read(const std::string& key, std::string& value) const override;
     void Write(const std::string& key, const std::string& value) override;
     void Erase(const std::string& key) override;

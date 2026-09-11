@@ -37,6 +37,7 @@ BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
     'yellowback_activation.py',
+    'yellowback_mining.py',
     'yellowback_rpc_contract.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',

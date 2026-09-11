@@ -10,6 +10,7 @@
 #include "consensus/validation.h"
 #include "dbwrapper.h"
 #include "hash.h"
+#include "key_io.h"
 #include "main.h"
 #include "pow.h"
 #include "txmempool.h"
@@ -19,6 +20,9 @@
 #include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
+#include "yellowback/tag.h"
+
+#include <univalue.h>
 
 #include <boost/algorithm/string.hpp>
 
@@ -795,6 +799,41 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
         }
     }
     return s;
+}
+
+UniValue YellowbackIndex::TemplateInfo(int64_t now) const
+{
+    AssertLockHeld(cs_main);
+    const MinerStatus ms = GetMinerStatus(now);
+    LOCK(cs_yellowback);
+    // The tag the template carries: COINBASE_FLAGS as CreateNewBlock set it (V5, one source of truth),
+    // decoded through the same scan a node applies to the mined block (TAG-1..5).
+    const int nextHeight = chainActive.Height() + 1;
+    const std::optional<CoinbaseTag> tag = COINBASE_FLAGS.empty() ? std::nullopt
+                                          : FindTag((CScript() << nextHeight << OP_0) + COINBASE_FLAGS, nextHeight);
+    KeyIO keyIO(::Params());
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("tag", HexStr(COINBASE_FLAGS.begin(), COINBASE_FLAGS.end()));
+    o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
+    o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
+    o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
+    o.pushKV("signal", tag.has_value() && tag->Signal());
+    std::optional<CKeyID> payout = tag.has_value() ? std::optional<CKeyID>(CKeyID(tag->payoutKey)) : ms.payoutKey;
+    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(CTxDestination(payout.value()))) : NullUniValue);
+    o.pushKV("registered", ms.registered);
+    o.pushKV("eligible", ms.eligible);
+    State st(*db);
+    const int tip = TipHeight();
+    const std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
+    const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
+    o.pushKV("activation", a.Status() == ActivationStatus::ACTIVE ? "active" : a.Status() == ActivationStatus::LOCKED_IN ? "locked_in" : "signaling");
+    o.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
+    o.pushKV("enforcing", miner.enforce && healthy && !valveTripped && !IsSunsetLocked());
+    o.pushKV("valveTripped", valveTripped);
+    o.pushKV("sunset", IsSunsetLocked());
+    o.pushKV("healthy", healthy);
+    o.pushKV("templatePolicy", miner.templatePolicy);
+    return o;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,9 +23,8 @@
  * prototype's co-signer rule set was removed with the federation; v2's
  * RED-1..4 are block-validity rules and live in state.cpp.
  *
- * policy::TagScript is the one clock read outside rpc/yellowback.cpp
+ * policy::TagScript is the one wall-clock read outside rpc/yellowback.cpp
  * (M11, §3.10): it decides what *this* miner publishes and is read by no rule.
- * The template filter (FilterTemplate, TPL-1..3) is Phase 4.
  */
 namespace yellowback {
 
@@ -43,8 +42,30 @@ namespace policy {
  */
 CScript BuildTagScript(const YellowbackIndex& index, int64_t now);
 
-/** = BuildTagScript(index, the wall clock). Called by CreateNewBlock under cs_main. */
+/** = BuildTagScript(index, now) with the wall clock. Called by CreateNewBlock under cs_main. */
 CScript TagScript(const YellowbackIndex& index);
+
+/**
+ * The template filter (TPL-1..3, §3.9, §4.4). Called by CreateNewBlock for
+ * every candidate, in selection order, immediately before UpdateCoins, on the
+ * TemplateView it holds inside LOCK2(cs_main, mempool.cs). Dry-runs ProcessTx
+ * on a nested overlay; true keeps the transaction and commits its effect to
+ * the template overlay so later candidates see it (in-block chaining and
+ * first-claim-wins exactly as ConnectBlock will evaluate them); false skips it.
+ *
+ * False for: a vault spend that fails RED-1..4 (TPL-1; any activation state)
+ * and, under -yellowbacktemplatepolicy=strict (the default, V14), a MINT that
+ * would register VOID, a TRANSFER that would burn, a claim-path spend of a
+ * VOID vault, a vault spend whose scriptSig is not exactly the wallet's
+ * `<sig> OP_1 <script>` / `OP_0 <script>`, and a vault spend without the MP-1
+ * expiry (TPL-2). While IsAbandoned() holds every vault spend passes (L13).
+ * Under `consensus` only TPL-1 applies. True (no dry run) for a transaction
+ * with no Tokens/Vaults input and no payload, and for everything while the
+ * index is unhealthy (BLK-3: an unhealthy node polices nothing).
+ * -yellowbacktestfault=template lets one failing vault spend through (TPL-3's
+ * companion: TestBlockValidity then throws).
+ */
+bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight);
 
 } // namespace policy
 
