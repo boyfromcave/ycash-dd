@@ -13,7 +13,8 @@ Written before the code it exercises (H12)."""
 import os
 from decimal import Decimal
 
-from test_framework.util import assert_equal, start_node, stop_node, bitcoind_processes
+from test_framework.util import (assert_equal, assert_start_raises_init_error, start_node,
+                                 stop_node, bitcoind_processes)
 from test_framework.yellowback_util import (
     MIN_OUTPUT,
     POOLS,
@@ -251,15 +252,19 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         datadir = os.path.join(self.options.tmpdir, 'node' + str(i))
         assert os.path.isdir(os.path.join(datadir, 'regtest', 'yellowback'))
 
-        # the six -nuparams the framework passes, minus -yellowback: init must refuse
+        # the six -nuparams the framework passes, minus -yellowback: init must refuse.
+        #
+        # assert_start_raises_init_error, not a bare start_node in a try/except, for two reasons.
+        # It captures the refused node's stderr into a temporary file: a bare start_node lets the
+        # refusal reach this script's stderr, and rpc-tests.py marks any script that writes to
+        # stderr as failed — so the case reported "Tests successful" and the suite still called it
+        # a failure, visible only under the suite runner and not when the script is run directly.
+        # And it asserts *why* init refused: checking only that startup failed would pass just as
+        # happily if the node had died of a port clash or a slow start under load.
         base = [a for a in self.node_args(i) if not a.startswith('-yellowback') and a != '-experimentalfeatures']
-        try:
-            node = start_node(i, self.options.tmpdir, base)
-        except Exception:
-            node = None
-        if node is not None:
-            stop_node(node, i)
-            raise AssertionError('the node started without -yellowback although the datadir holds an index')
+        assert_start_raises_init_error(
+            i, self.options.tmpdir, base,
+            'This datadir holds a Yellowback index, so this wallet may hold YED')
         if i in bitcoind_processes:
             del bitcoind_processes[i]
 
