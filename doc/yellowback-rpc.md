@@ -1104,6 +1104,22 @@ what `yellowback_rpc_contract.py` uses.
 | `quote-out-of-range` | `yed_setquote` | price outside `[PRICE_MIN, PRICE_MAX]` and not `0` |
 | `no-payout-address` | `yed_setquote` | the node has no payout key and so can emit no tag (no `-yellowbackpayoutaddress` and no P2PKH `-mineraddress`) |
 
+The wallet builder's own refusals (`src/yellowback/txbuilder.cpp`; Phase 6) carry identifiers
+the same way, so the GUI can match them too. They are not rule refusals: `RPC_INVALID_PARAMETER`
+for a bad argument, `RPC_WALLET_ERROR` otherwise.
+
+| Identifier | Raised by | When (provocation) |
+|---|---|---|
+| `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim`, `yed_sweep` (`to`) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `ye…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
+| `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
+| `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
+| `insufficient-yec` | `yed_mint` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes: `yed_mint … <an empty s1… address>` |
+| `wallet-locked` | every signing command | the wallet is encrypted and locked (`walletpassphrase` first); the stock `EnsureWalletIsUnlocked` message may precede it |
+| `keypool-empty` | `yed_mint`, `yed_send`, `yed_redeem`, `yed_claim` | no fresh key could be drawn (`keypoolrefill`) |
+| `too-many-inputs`, `too-many-notes` | `yed_send`, `yed_redeem`, `yed_claim` / `yed_mint` | more than 250 YED inputs / more than 20 Sapling notes would be spent: consolidate first |
+| `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
+| `vault-value-too-small` | `yed_redeem`, `yed_claim`, `yed_sweep` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
+
 ## `rpc/client.cpp` conversion rows (Phase 3)
 
 The CLI converts positional arguments by index, so every numeric argument is listed and every

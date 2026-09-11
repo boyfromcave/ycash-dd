@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
 
 env:
-  YELLOWBACK_SCRIPTS: yellowback_index
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_lifecycle yellowback_void_mint yellowback_wallet_restore yellowback_sapling yellowback_claim yellowback_pricefeed yellowback_rpc_contract
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
