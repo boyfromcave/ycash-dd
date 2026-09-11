@@ -44,6 +44,45 @@ import signal
 import time
 from decimal import Decimal
 
+
+def _point_ctypes_at_a_real_openssl():
+    """``test_framework/key.py`` resolves its library with
+    ``ctypes.util.find_library('ssl')``; on macOS that answers ``/usr/lib/libssl.dylib``, the
+    SIP-protected LibreSSL shim, whose ``ECDSA_sign`` aborts the interpreter (SIGABRT, exit
+    134).  Plan section 6.0 item 0 works around it with ``DYLD_LIBRARY_PATH``, but SIP *strips*
+    every ``DYLD_*`` variable from the environment of a protected binary, and
+    ``#!/usr/bin/env python3`` — the shebang ``qa/pull-tester/rpc-tests.py`` execs every script
+    through (``:353``) — is exactly such a binary.  So the variable reaches a script run as
+    ``python3 qa/rpc-tests/<script>.py`` and never one run through the suite runner.
+
+    Resolving the path here, before anything imports ``key``, makes both invocations work and
+    leaves the inherited ``key.py`` untouched.  No effect off Darwin or without a real OpenSSL."""
+    import ctypes.util
+    import glob
+    import platform
+    if platform.system() != 'Darwin':
+        return
+    search = [d for d in os.environ.get('DYLD_LIBRARY_PATH', '').split(':') if d]
+    search += ['/opt/homebrew/opt/openssl@3/lib', '/usr/local/opt/openssl@3/lib']
+    found = None
+    for directory in search:
+        matches = sorted(glob.glob(os.path.join(directory, 'libcrypto*.dylib')))
+        if matches:
+            found = matches[0]
+            break
+    if found is None:
+        return
+    original = ctypes.util.find_library
+
+    def find_library(name):
+        # key.py asks for 'ssl' but calls only libcrypto symbols (BN_*, EC_*, ECDSA_*).
+        return found if name in ('ssl', 'crypto') else original(name)
+
+    ctypes.util.find_library = find_library
+
+
+_point_ctypes_at_a_real_openssl()
+
 from .test_framework import BitcoinTestFramework
 from .util import (
     assert_equal,
