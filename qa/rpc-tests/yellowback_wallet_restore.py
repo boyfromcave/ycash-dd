@@ -18,7 +18,6 @@ from test_framework.util import assert_equal, assert_greater_than, bitcoind_proc
 from test_framework.yellowback_util import (
     POOLS,
     REF_LAG,
-    STOCK,
     YellowbackTestFramework,
     assert_same_statehash,
 )

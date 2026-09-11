@@ -27,7 +27,6 @@ from test_framework.util import (
 from test_framework.yellowback_util import (
     COIN,
     FEE_MIN,
-    MIN_OUTPUT,
     PAYEE_WINDOW,
     POOLS,
     REF_LAG,
@@ -37,7 +36,6 @@ from test_framework.yellowback_util import (
     YELLOWBACK_FEE,
     YellowbackTestFramework,
     assert_banscore_zero,
-    assert_same_statehash,
     build_vault_spend_raw,
     fee_zat,
     mine_block_raw,

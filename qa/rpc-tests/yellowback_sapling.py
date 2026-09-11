@@ -83,7 +83,7 @@ class YellowbackSaplingTest(YellowbackTestFramework):
         vault1 = mint1['txid']
         assert_equal(mint1['fundedFrom'], 'sapling')
         assert_equal(mint1['collateralZat'], 10 * COIN)
-        assert_greater_than(mint1['feeZat'], 0)
+        assert_equal(mint1['feeZat'], fee_zat(mint1['collateralZat']))
         raw = user.getrawtransaction(vault1, 1)
         assert_equal(raw['vin'], [])
         assert_greater_than(len(raw['vShieldedSpend']), 0)
