@@ -22,7 +22,7 @@ import json
 import os
 from decimal import Decimal
 
-from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str
+from test_framework.util import assert_equal, assert_greater_than
 from test_framework.yellowback_util import (
     ABANDON_BLOCKS,
     COIN,
@@ -60,8 +60,7 @@ NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'par
             'yed_estimatecollateral': {'requiredZat', 'pMint'},
             'yed_getstats': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps', 'supplyCapCents'},
             'yed_getprice': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim'},
-            'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'},
-            'yed_listclaimable': {'underwaterAt', 'pClaim'}}
+            'yed_gethistory': {'pFast', 'pMid', 'pSlow', 'pMint', 'pClaim', 'globalRatioBps'}}
 
 
 def assert_rpc_error(substr, fn, *args):
@@ -139,7 +138,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
 
     def run_test(self):
         nodes = self.nodes
-        user, stock, claimant = nodes[0], nodes[STOCK], nodes[5]
+        user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
         assert_equal(c.doc['rpcversion'], 2)
 
@@ -194,7 +193,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
         mint_a = c.check('yed_mint', user.yed_mint(10000, 48))
         mint_b = c.check('yed_mint', user.yed_mint(10000, 48))
-        mint_x = c.check('yed_mint', user.yed_mint(10000, 48))     # its YED funds the redemption of B
+        c.check('yed_mint', user.yed_mint(10000, 48))               # its YED funds the redemption of B
         r = user.yed_getinfo()['height'] - REF_LAG
         void_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
         void_txid = user.decoderawtransaction(void_hex)['txid']
