@@ -103,8 +103,22 @@ BOOST_AUTO_TEST_CASE(subsidy_limit_test)
     // Reducing the interval further to 1.25 minutes has a similar effect,
     // decreasing the total monetary supply by another 0.09240 ZEC.
     // BOOST_CHECK_EQUAL(nSum, 2099999990760000ULL);
-    // YCASH: Because Ycash has a permanant 5% subsidy, the numbers have to be adjusted    
-    BOOST_CHECK_EQUAL(nSum, 2099999990760000LL);
+    // 2099999990760000 is the total when Blossom never activates. Ycash mainnet
+    // activates Blossom at height 1100000 (chainparams.cpp), and GetBlockSubsidy()
+    // then returns (MaxBlockSubsidy / BLOSSOM_POW_TARGET_SPACING_RATIO) >> halving
+    // over a halving interval that is RATIO times longer. The halved value is
+    // truncated one binary place earlier, so flooring starts biting one halving
+    // era sooner. Summing GetBlockSubsidy() over the whole mainnet schedule gives
+    // 2099999981520000, which is 9240000 zatoshi (0.09240 YEC) below the
+    // no-Blossom total -- the same quantum the comment above describes for the
+    // previous spacing change. The value asserted here was simply never updated
+    // when Blossom was configured on mainnet.
+    //
+    // The YDF share does not enter this sum at all: it is a split of the block
+    // subsidy in miner.cpp (miner_reward / 20 below GetYdfMandateEndHeight(),
+    // and an optional nYdfFeePercentage above it), never an addition to it, so
+    // no Ycash-specific subsidy regime changes the total monetary supply.
+    BOOST_CHECK_EQUAL(nSum, 2099999981520000LL);
 }
 
 bool ReturnFalse() { return false; }
