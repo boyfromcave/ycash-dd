@@ -1278,6 +1278,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         injected = 0
         rejected_start = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks']
         stock_blocks = 0
+        unbacked_peak = 0
         for n in range(n_blocks):
             roll = rng.random()
             if n and n % 20 == 0:
@@ -1293,6 +1294,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                         continue
                     injected += 1
                     self.assert_rejected_everywhere(blockhash)
+                    # node 5 follows node 1 and records the unbacked vault -- measured here,
+                    # because the pools then out-mine the branch and the accounting is undone
+                    sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+                    unbacked_peak = max(unbacked_peak,
+                                        int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']))
                     self.pools_outmine(blockhash)
             elif roll < 0.10:
                 stock.generate(1)
@@ -1327,10 +1333,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert rejected >= injected, 'rejectedBlocks %d < injections %d' % (rejected, injected)
         if n_blocks > 20:
             assert_greater_than(injected, 0)
-            assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
+            assert_greater_than(unbacked_peak, 0)
         assert_banscore_zero(self.nodes)
         assert_same_statehash([self.nodes[i] for i in ENFORCING], 'extended')
-        print('  %d injected, %d rejected, %d stock blocks, ban count 0' % (injected, rejected, stock_blocks))
+        print('  %d injected, %d rejected, %d stock blocks, peak unbackedCents %d, ban count 0'
+              % (injected, rejected, stock_blocks, unbacked_peak))
 
     def extended_vault(self, rng):
         v = self.mint()
