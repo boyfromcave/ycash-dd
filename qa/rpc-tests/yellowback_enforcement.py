@@ -1,0 +1,1234 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+"""Phase 5 (plan section 6, Phase 5; section 3.9 BLK-1..3, ACT-5..7, TPL-1/2, MP-1; section 8.1):
+the soft fork end to end against a stock miner.
+
+Every vault is created with ``build_mint_tx`` and every spend with ``build_vault_spend_raw`` (the
+correct ones too, with ``payload=REDEEM(feeVout)`` and ``fee=(addr, zat)``); ``yed_mint`` /
+``yed_redeem`` belong to Phase 6 (N26).  ``checkpoint(label)`` runs after every mined block (N35)
+-- over the group that is actually on one chain, since half of this script is about the two
+chains disagreeing.
+
+Topology (section 6.0 item 2): 0 user (enforcing), 1 stock miner (the adversary; ``--stock-binary``
+makes it a real v4.5.0 binary, P9), 2-4 pools (enforcing, signalling), 5 observer
+(``-yellowbackenforce=0``, records ``unbacked``).
+"""
+
+import random
+import time
+
+from test_framework.authproxy import JSONRPCException
+from test_framework.util import (
+    assert_equal,
+    assert_greater_than,
+    bytes_to_hex_str,
+    connect_nodes_bi,
+    hex_str_to_bytes,
+    p2p_port,
+    sync_blocks,
+)
+from test_framework.yellowback_util import (
+    ENFORCING,
+    GRACE,
+    OBSERVER,
+    POOLS,
+    REF_LAG,
+    REF_WINDOW,
+    STOCK,
+    TOKEN_VALUE,
+    USER,
+    VALVE_BLOCKS,
+    YELLOWBACK_FEE,
+    YellowbackTestFramework,
+    _select_funding,
+    assert_banscore_zero,
+    assert_best_hash,
+    assert_same_statehash,
+    build_mint_tx,
+    build_vault_spend_raw,
+    debug_log_contains,
+    mine_block_raw,
+    template_coinbase,
+    vault_from_mint,
+    wait_for_rejection,
+    wait_yed_healthy,
+    ym,
+)
+
+PRICE = '20.00'       # a high YEC price keeps the class-A collateral (500% of $100) at 25 YEC,
+CRASH_PRICE = '1.00'  # which node 0's 101 mature coinbases can fund eight times over
+CENTS = 10_000          # $100, the class-A minimum mint
+LOCK = 48               # class A minimum lock
+TX_SOON = 3             # TX_EXPIRING_SOON_THRESHOLD
+
+
+def rpc_error(substr, fn, *args):
+    try:
+        fn(*args)
+    except JSONRPCException as e:
+        assert substr in e.error['message'], 'expected %r in %r' % (substr, e.error['message'])
+        return e.error['message']
+    raise AssertionError('expected an RPC error containing %r' % substr)
+
+
+def spk(node, addr):
+    return hex_str_to_bytes(node.validateaddress(addr)['scriptPubKey'])
+
+
+class YellowbackEnforcementTest(YellowbackTestFramework):
+    # node 0 needs many mature coinbases: every vault below is 250 YEC of collateral and the
+    # 101 initial blocks leave exactly one mature coinbase (mapping.md section 13.5).
+    initial_blocks = 101
+
+    def add_options(self, parser):
+        super().add_options(parser)
+        parser.add_option('--extended', dest='extended', default=False, action='store_true',
+                          help='the nightly 200-block randomized run (case 8)')
+        parser.add_option('--only', dest='only', default=None,
+                          help='comma-separated case method names (development)')
+
+    # ------------------------------------------------------------------ helpers
+
+    def cp(self, label, group=None):
+        """``checkpoint`` over ``group`` (indices) rather than the whole network: this script
+        spends most of its time with node 1 on a chain the enforcing nodes refuse."""
+        if group is None:
+            return self.checkpoint(label)
+        nodes = [self.nodes[i] for i in group if self.nodes[i] is not None]
+        sync_blocks(nodes)
+        assert_best_hash(nodes, label)
+        enforcing = [self.nodes[i] for i in group if i in ENFORCING]
+        if len(enforcing) > 1:
+            assert_same_statehash(enforcing, label)
+        return nodes[0].getbestblockhash()
+
+    def pools_mine(self, n, label='', group=None):
+        """Mine ``n`` blocks round-robin over the pools, one at a time, checkpointing the
+        enforcing group after each (N35)."""
+        group = ENFORCING if group is None else group
+        for k in range(n):
+            i = POOLS[k % len(POOLS)]
+            self.nodes[i].generate(1)
+            self.cp('%s+%d' % (label or 'pool block', k + 1), group)
+
+    def stock_mine(self, n, label='', group=(STOCK, OBSERVER)):
+        for k in range(n):
+            self.nodes[STOCK].generate(1)
+            self.cp('%s+%d' % (label or 'stock block', k + 1), list(group))
+
+    def mint_inputs(self, cents=CENTS, lock=LOCK):
+        node = self.nodes[USER]
+        est = node.yed_estimatecollateral(cents, lock)
+        ref = int(est['refHeight'])
+        required = int(est['requiredZat'])
+        payee = node.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        return ref, required, payee
+
+    def mint(self, cents=CENTS, lock=LOCK, send=True):
+        """One raw MINT from node 0's coins; returns the ``vault_from_mint`` dict plus the txid
+        and its token outpoint.  The caller mines it."""
+        user = self.nodes[USER]
+        ref, required, payee = self.mint_inputs(cents, lock)
+        hex_, owner = build_mint_tx(user, cents, lock, ref, required, fee_addr=payee)
+        if send:
+            user.sendrawtransaction(hex_)
+            user.lockunspent(False, [{'txid': i.prev_txid, 'vout': i.prev_n} for i in ym.tx_from_hex(hex_).vin])
+        v = vault_from_mint(hex_, lock, ref, owner)
+        v['token'] = (v['txid'], 1)
+        v['cents'] = cents
+        return v
+
+    def live_vault(self, built, node=None):
+        """``yed_getvault`` plus the P2PKH ``ownerAddress`` the Python signer needs."""
+        node = node or self.nodes[USER]
+        v = dict(node.yed_getvault(built['txid']))
+        v['ownerAddress'] = built['ownerAddress']
+        v['token'] = built.get('token')
+        v['cents'] = built.get('cents')
+        return v
+
+    def build_transfer(self, node, tokens, assignments, owner_hexes):
+        """Split YED tokens: a TRANSFER of ``tokens`` into ``assignments`` cents, one fresh
+        P2PKH output each, funded and signed by ``node``'s wallet."""
+        prevtxs = [{'txid': t, 'vout': n,
+                    'scriptPubKey': bytes_to_hex_str(ym.p2pkh_script(ym.hash160(hex_str_to_bytes(o)))),
+                    'amount': TOKEN_VALUE / 1e8}
+                   for (t, n), o in zip(tokens, owner_hexes)]
+        vout = [(TOKEN_VALUE, spk(node, node.getnewaddress())) for _ in assignments]
+        vout.append((0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer(list(enumerate(assignments))))))
+        needed = TOKEN_VALUE * len(assignments) + YELLOWBACK_FEE - TOKEN_VALUE * len(tokens)
+        utxos, total = _select_funding(node, max(needed, 1))
+        if total - needed > 0:
+            vout.append((total - needed, spk(node, node.getnewaddress())))
+        vin = [(t, n, b'', 0xFFFFFFFF) for t, n in tokens] + [(u['txid'], u['vout'], b'', 0xFFFFFFFF) for u in utxos]
+        raw = ym.serialize_tx_v4(vin, vout, 0, node.getblockcount() + REF_WINDOW)
+        signed = node.signrawtransaction(bytes_to_hex_str(raw), prevtxs)
+        assert_equal(signed['complete'], True)
+        return signed['hex']
+
+    def correct_redeem(self, vault, expiry=None):
+        """The RED-1..4-passing owner-path redemption: REDEEM payload with ``feeVout = 1``, the
+        FEE-1 fee to the FEE-W payee, the burn of the vault's own token."""
+        user = self.nodes[USER]
+        live = self.live_vault(vault)
+        ref = user.getblockcount() - REF_LAG
+        payee = user.yed_getfeepayee(ref, int(live['collateralZat']))
+        return build_vault_spend_raw(user, live, 'owner', [vault['token']],
+                                     payload=ym.encode_redeem(ref, 1, []),
+                                     fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                     ref_height=ref, expiry=expiry)
+
+    def bad_spend(self, vault, kind, expiry_slack=TX_SOON):
+        """One rule-breaking spend of ``vault``.  ``kind``:
+        ``owner-noburn``  owner path, no burn, no payload            (RED-1 vault-spend-malformed)
+        ``claim-noburn``  claim path, no burn, no payload            (RED-1, R2)
+        ``short-burn``    owner path, a part-value token burned      (RED-2)
+        ``wrong-payee``   owner path, correct burn, fee to node 0    (RED-3)
+        ``short-fee``     owner path, correct burn, half the fee     (RED-3)
+        ``mint-payload``  owner path, correct burn+fee, MINT payload (RED-1, M3)
+        """
+        user = self.nodes[USER]
+        live = self.live_vault(vault)
+        expiry = self.nodes[STOCK].getblockcount() + 1 + expiry_slack
+        ref = user.getblockcount() - REF_LAG
+        collateral = int(live['collateralZat'])
+        if kind == 'owner-noburn':
+            return build_vault_spend_raw(user, live, 'owner', [], expiry=expiry)
+        if kind == 'claim-noburn':
+            return build_vault_spend_raw(user, live, 'claim', [], expiry=expiry)
+        payee = user.yed_getfeepayee(ref, collateral)   # the rest carry a fee output
+        addr, fee = payee['default']['payoutAddress'], int(payee['feeZat'])
+        if kind == 'short-burn':
+            return build_vault_spend_raw(user, live, 'owner', [vault['short_token']],
+                                         payload=ym.encode_redeem(ref, 1, []), fee=(addr, fee),
+                                         ref_height=ref, expiry=expiry)
+        if kind == 'wrong-payee':
+            return build_vault_spend_raw(user, live, 'owner', [vault['token']],
+                                         payload=ym.encode_redeem(ref, 1, []),
+                                         fee=(user.getnewaddress(), fee), ref_height=ref, expiry=expiry)
+        if kind == 'short-fee':
+            return build_vault_spend_raw(user, live, 'owner', [vault['token']],
+                                         payload=ym.encode_redeem(ref, 1, []),
+                                         fee=(addr, fee // 2), ref_height=ref, expiry=expiry)
+        if kind == 'mint-payload':
+            owner = hex_str_to_bytes(live['ownerPubKey'])
+            payload = ym.encode_mint(0, vault['cents'], int(live['lockHeight']), ref, owner, 1)
+            return build_vault_spend_raw(user, live, 'owner', [vault['token']], payload=payload,
+                                         fee=(addr, fee), ref_height=ref, expiry=expiry)
+        raise AssertionError('unknown kind %r' % kind)
+
+    def stock_block_with(self, hex_):
+        """The stock node mines one block carrying ``hex_``.  Returns ``(blockhash, txid)``."""
+        stock = self.nodes[STOCK]
+        txid = stock.sendrawtransaction(hex_)
+        blockhash = stock.generate(1)[0]
+        assert txid in stock.getblock(blockhash)['tx']
+        return blockhash, txid
+
+    def assert_rejected_everywhere(self, blockhash, nodes=None):
+        """Every enforcing node rejected ``blockhash`` at DoS 0, still peers with node 1, and can
+        explain the rejection (``yed_getblockverdict``, case 7)."""
+        nodes = ENFORCING if nodes is None else nodes
+        wait_for_rejection([self.nodes[i] for i in nodes], blockhash)
+        assert_banscore_zero([self.nodes[i] for i in nodes])
+        for i in nodes:
+            verdict = self.nodes[i].yed_getblockverdict(blockhash)
+            assert_equal(verdict['blockInvalid'], True)
+            assert verdict['reason'], 'empty reason for a rejected block on node %d' % i
+            self.assert_peers_with_stock(i)
+
+    def assert_peers_with_stock(self, i):
+        addr = '127.0.0.1:%d' % p2p_port(STOCK)
+        assert any(p['addr'] == addr for p in self.nodes[i].getpeerinfo()), \
+            'node %d lost node 1 as a peer (N1)' % i
+
+    def pools_outmine(self, target_hash, limit=40):
+        """Mine on the pools until every node (node 1 and node 5 included) is on the pools'
+        chain: the enforcing branch out-works the stock branch and the network converges."""
+        k = 0
+        while self.nodes[STOCK].getbestblockhash() != self.nodes[POOLS[0]].getbestblockhash():
+            assert k < limit, 'the pools did not out-mine the stock branch in %d blocks' % limit
+            self.nodes[POOLS[k % len(POOLS)]].generate(1)
+            self.cp('out-mine+%d' % (k + 1), ENFORCING)
+            k += 1
+            time.sleep(0.3)
+        self.cp('converged')
+        assert target_hash is None or self.nodes[USER].getblock(target_hash)['confirmations'] == -1
+        return k
+
+    def crash_price(self, blocks=36):
+        """Drive ``pClaim = max(pMid, pSlow)`` down by quoting ``CRASH_PRICE`` from every pool
+        until more than half of the 64-block slow window carries it (RED-4's underwater test)."""
+        for i in POOLS:
+            self.quote(i, CRASH_PRICE)
+        self.pools_mine(blocks, 'crash')
+
+    # ------------------------------------------------------------------ run
+
+    def run_test(self):
+        for node in self.enforcing_nodes():
+            wait_yed_healthy(node)
+
+        cases = [
+            self.case4_before_activation_accepts,
+            self.activate_and_mint,
+            self.case1_owner_path_no_burn,
+            self.case2_claim_and_fee_variants,
+            self.case13_m3_vault_spend_with_mint_payload,
+            self.case11_fee2_reorg_changes_eligible_set,
+            self.case12_red1_refheight_window_after_reorg,
+            self.case3_correct_spends_from_the_stock_node,
+            self.case10_tag4_garbage_coinbase_never_invalid,
+            self.case7_bookkeeping,
+            self.case6_fail_open_on_storage_only,
+            self.case5_kill_switch,
+            self.case15_valve_catchup_offline_node,
+            self.case9_work_valve,
+        ]
+        if self.options.only:
+            wanted = set(self.options.only.split(','))
+            cases = [c for c in cases if c.__name__ in wanted or c.__name__ == 'activate_and_mint']
+        for case in cases:
+            print('=== %s' % case.__name__)
+            case()
+        if self.options.extended:
+            self.case8_extended_random_activity()
+
+    # ------------------------------------------------------------------ case 4
+
+    def case4_before_activation_accepts(self):
+        """Before activation BLK-1 has nothing to reject: MINT-4 voids every mint whose
+        ``Snapshots[refHeight]`` is not ACTIVE (K16), and a VOID vault's spend is an ordinary
+        spend (K3), so the stock node's rule-breaking block is accepted by every node with
+        ``rejectedBlocks == 0``."""
+        # Rule: BLK-1
+        # Rule: ACT-5
+        # Rule: K3
+        user = self.nodes[USER]
+        self.pools_mine(3, 'pre-activation')
+        for i in ENFORCING:
+            assert self.nodes[i].yed_getactivation()['status'] != 'active'
+        ref = user.getblockcount() - REF_LAG
+        # yed_estimatecollateral has no price before activation (MINT-4/HALT-1): a literal
+        # collateral is enough, the mint is VOID whatever it locks.
+        assert_equal(user.yed_estimatecollateral(CENTS, LOCK)['requiredZat'], None)
+        hex_, owner = build_mint_tx(user, CENTS, LOCK, ref, 20 * 100000000)
+        txid = user.sendrawtransaction(hex_)
+        vault = vault_from_mint(hex_, LOCK, ref, owner)
+        vault['token'] = (txid, 1)
+        vault['cents'] = CENTS
+        self.sync_all()
+        # TPL-2 declines a mint whose verdict would be VOID, so the stock node mines it
+        self.stock_mine_and_sync(1, 'void mint')
+        assert_equal(user.yed_getvault(txid)['status'], 'VOID')     # MINT-4: no ACTIVE snapshot
+        # past the lock, then the same "owner path without a burn" block the rest of the script uses
+        self.pools_mine(LOCK + 2, 'to the lock')
+        bad = self.bad_spend(vault, 'owner-noburn')
+        blockhash, _ = self.stock_block_with(bad)
+        self.cp('pre-activation rule-breaking block accepted')
+        assert_best_hash([self.nodes[i] for i in range(6)], 'pre-activation')
+        for i in ENFORCING + [OBSERVER]:
+            assert_equal(self.nodes[i].yed_getinfo()['rejectedBlocks'], 0)
+            assert_equal(self.nodes[i].getblock(blockhash)['confirmations'], 1)
+        assert_banscore_zero([self.nodes[i] for i in range(6)])
+        self.void_vault_closed = txid
+
+    # ------------------------------------------------------------------ setup
+
+    def activate_and_mint(self):
+        """``activate()`` then the vaults every later case spends, all past their claim height."""
+        print('activation (%d blocks)' % (64 + 64 + 1))
+        self.activate(quote_usd=PRICE)
+        self.pools_mine(REF_LAG + 1, 'post-activation')
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].yed_getinfo()['enforcing'], True)
+        self.cp('active')
+
+        self.vaults = []
+        for _ in range(8):
+            self.vaults.append(self.mint())
+        self.sync_all()
+        for k in range(6):
+            self.pools_mine(1, 'mints')
+            missing = [v['txid'] for v in self.vaults
+                       if self.nodes[USER].gettransaction(v['txid'])['confirmations'] < 1]
+            if not missing:
+                break
+            print('  %d mint(s) still unconfirmed after %d blocks; mempool=%s' %
+                  (len(missing), k + 1, [t for t in missing if t in self.nodes[USER].getrawmempool()]))
+        assert not missing, 'mints never confirmed: %s' % missing
+        for v in self.vaults:
+            info = self.nodes[USER].yed_gettxinfo(v['txid'])
+            assert_equal((v['txid'], info['verdict']), (v['txid'], 'ok'))
+            assert_equal(self.nodes[USER].yed_getvault(v['txid'])['status'], 'ACTIVE')
+        # split one vault's token into 4,000 + 6,000 so a "short burn" exists (RED-2)
+        short = self.vaults[2]
+        split = self.build_transfer(self.nodes[USER], [short['token']], [4_000, 6_000],
+                                    [short['ownerPubKey']])
+        split_txid = self.nodes[USER].sendrawtransaction(split)
+        self.sync_all()
+        self.pools_mine(1, 'token split')
+        short['short_token'] = (split_txid, 0)     # 4,000 cents of a 10,000-cent debt
+        self.nodes[USER].lockunspent(True)
+        # past lockHeight and claimHeight so both paths are spendable
+        self.pools_mine(LOCK + GRACE + 2, 'to the claim height')
+        tip = self.nodes[USER].getblockcount()
+        for v in self.vaults:
+            live = self.nodes[USER].yed_getvault(v['txid'])
+            assert_greater_than(tip + 1, int(live['claimHeight']))
+        self.cp('vaults mature')
+
+    def vault(self, n):
+        return self.vaults[n]
+
+    # ------------------------------------------------------------------ case 1
+
+    def case1_owner_path_no_burn(self):
+        """The rule-breaking owner-path spend: rejected by 0, 2-4 at DoS 0; node 5 follows node 1
+        and records ``unbacked``; node 1 mines two more on the rejected one and is still an
+        unbanned peer of every enforcing node (N1); the pools out-mine it and every state hash
+        agrees again."""
+        # Rule: BLK-1
+        # Rule: BLK-2
+        # Rule: RED-1
+        # Rule: RED-2
+        # Rule: MP-1
+        # Rule: TPL-1
+        v = self.vault(0)
+        user = self.nodes[USER]
+        bad = self.bad_spend(v, 'owner-noburn')
+        # MP-1 refuses it on every enforcing node; the stock node relays it (N3)
+        assert_equal(user.yed_validaterawtransaction(bad)['wouldBeRejected'], True)
+        rpc_error('yellowback-vault-spend', user.sendrawtransaction, bad)
+        for i in POOLS:
+            rpc_error('yellowback-vault-spend', self.nodes[i].sendrawtransaction, bad)
+
+        blockhash, txid = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash)
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].yed_getinfo()['rejectedBlocks'], 1)
+            assert_equal(self.nodes[i].yed_getinfo()['valveTripped'], False)
+            assert_equal(self.nodes[i].yed_getinfo()['enforcing'], True)
+        # node 5 (-yellowbackenforce=0) follows node 1 and records the unbacked vault
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        assert_equal(self.nodes[OBSERVER].getbestblockhash(), blockhash)
+        obs = self.nodes[OBSERVER].yed_getvault(v['txid'])
+        assert_equal(obs['status'], 'CLOSED')
+        assert_equal(obs['unbacked'], True)
+        assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
+        assert_equal(self.nodes[OBSERVER].yed_getinfo()['rejectedBlocks'], 0)
+
+        # N1: two more blocks on the rejected one, relayed; nobody is scored, nobody is dropped
+        self.stock_mine(2, 'stock on the rejected block')
+        time.sleep(2)
+        assert_banscore_zero([self.nodes[i] for i in ENFORCING])
+        for i in ENFORCING:
+            self.assert_peers_with_stock(i)
+            assert_equal(self.nodes[i].yed_getinfo()['valveTripped'], False)
+        self.cp('enforcing branch held', ENFORCING)
+
+        # the enforcing branch out-works the stock branch; every chain agrees afterwards
+        self.pools_outmine(blockhash)
+        assert_best_hash([self.nodes[i] for i in range(6)], 'after the reorg')
+        assert_same_statehash([self.nodes[i] for i in ENFORCING + [OBSERVER]], 'after the reorg')
+        assert_equal(self.nodes[USER].yed_getvault(v['txid'])['status'], 'ACTIVE')
+        assert_banscore_zero(self.nodes)
+        self.rejected_hashes = [blockhash]
+
+    # ------------------------------------------------------------------ case 2
+
+    def case2_claim_and_fee_variants(self):
+        """The claim-path sweep without a burn (R2), a short burn (RED-2), the wrong payee and a
+        short fee (RED-3): all rejected.  A claim-path sweep of a VOID vault is accepted by
+        everyone (K3) and never appears in an enforcing template (TPL-2)."""
+        # Rule: RED-1
+        # Rule: RED-2
+        # Rule: RED-3
+        # Rule: RED-4
+        # Rule: BLK-1
+        # Rule: TPL-2
+        for n, kind in ((1, 'claim-noburn'), (2, 'short-burn'), (3, 'wrong-payee'), (4, 'short-fee')):
+            v = self.vault(n)
+            bad = self.bad_spend(v, kind)
+            assert_equal(self.nodes[USER].yed_validaterawtransaction(bad)['wouldBeRejected'], True)
+            blockhash, _ = self.stock_block_with(bad)
+            print('  %s -> %s' % (kind, blockhash[:16]))
+            self.assert_rejected_everywhere(blockhash)
+            self.rejected_hashes.append(blockhash)
+            sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+            obs = self.nodes[OBSERVER].yed_getvault(v['txid'])
+            assert_equal(obs['status'], 'CLOSED')
+            # IN-3: a failing vault spend burns every YED input, so the vault is left unbacked
+            # only when the inputs did not cover the debt (mapping.md section 13.3, M3); the two
+            # fee variants carry the full burn and leave nothing unbacked.
+            assert_equal(obs['unbacked'], kind in ('claim-noburn', 'short-burn'))
+            self.pools_outmine(blockhash)
+            assert_equal(self.nodes[USER].yed_getvault(v['txid'])['status'], 'ACTIVE')
+
+        # K3: a VOID vault's spend is an ordinary spend.  MINT-2 fails on a lock outside every
+        # class range, so this vault is VOID and its lockHeight/claimHeight are already past.
+        user = self.nodes[USER]
+        ref = user.getblockcount() - REF_LAG
+        est = user.yed_estimatecollateral(CENTS, LOCK)
+        void_hex, void_owner = build_mint_tx(user, CENTS, -80, ref, int(est['requiredZat']),
+                                             term_class='A')
+        void_txid = user.sendrawtransaction(void_hex)
+        void_built = vault_from_mint(void_hex, -80, ref, void_owner)
+        self.sync_all()
+        time.sleep(1)
+        for i in POOLS:                                  # TPL-2 declines a VOID-bound mint
+            assert void_txid not in [t['hash'] for t in self.nodes[i].getblocktemplate()['transactions']]
+        self.stock_mine_and_sync(1, 'VOID mint')
+        void = user.yed_getvault(void_txid)
+        assert_equal(void['status'], 'VOID')
+        live = dict(void_built)
+        live['collateralZat'] = int(void['collateralZat'])
+        sweep = build_vault_spend_raw(user, live, 'claim', [],
+                                      expiry=self.nodes[STOCK].getblockcount() + 1 + TX_SOON)
+        assert_equal(user.yed_validaterawtransaction(sweep)['wouldBeRejected'], False)
+        # TPL-2 declines a claim-path spend of a VOID vault even though BLK-1 does not police it
+        txid = self.nodes[POOLS[0]].sendrawtransaction(sweep)
+        time.sleep(1)
+        for i in POOLS:
+            tpl = [t['hash'] for t in self.nodes[i].getblocktemplate()['transactions']]
+            assert txid not in tpl, 'TPL-2 should decline the VOID claim on node %d' % i
+        blockhash, _ = self.stock_block_with(sweep) if txid not in self.nodes[STOCK].getrawmempool() \
+            else (self.nodes[STOCK].generate(1)[0], txid)
+        self.cp('VOID claim accepted')
+        assert_best_hash([self.nodes[i] for i in range(6)], 'VOID claim')
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].getblock(blockhash)['confirmations'], 1)
+            assert_equal(self.nodes[i].yed_getinfo()['rejectedBlocks'], len(self.rejected_hashes))
+        assert_equal(user.yed_getvault(void_txid)['status'], 'CLOSED')
+        assert_equal(user.yed_getvault(void_txid)['unbacked'], False)
+
+    # ------------------------------------------------------------------ case 13
+
+    def case13_m3_vault_spend_with_mint_payload(self):
+        """``m3_vault_spend_with_mint_payload``: a correct burn and fee but a MINT payload; RED-1
+        needs a REDEEM payload, so the block is rejected and node 5 records no new vault (M3)."""
+        # Rule: RED-1
+        # Rule: BLK-1
+        v = self.vault(5)
+        before = int(self.nodes[OBSERVER].yed_getstats()['activeVaults'])
+        bad = self.bad_spend(v, 'mint-payload')
+        assert_equal(self.nodes[USER].yed_validaterawtransaction(bad)['wouldBeRejected'], True)
+        blockhash, txid = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        assert_equal(self.nodes[OBSERVER].yed_gettxinfo(txid)['type'], 'redeem')
+        rpc_error('vault-not-found', self.nodes[OBSERVER].yed_getvault, txid)
+        assert_equal(int(self.nodes[OBSERVER].yed_getstats()['activeVaults']), before - 1)
+        self.pools_outmine(blockhash)
+        assert_equal(self.nodes[USER].yed_getvault(v['txid'])['status'], 'ACTIVE')
+
+    # ------------------------------------------------------------------ case 11
+
+    def disconnect_all(self, i):
+        """Disconnect node ``i`` from every peer (``disconnectnode``, no restart)."""
+        for a, b in self.EDGES:
+            if i in (a, b):
+                self._disconnect_pair(a, b)
+        time.sleep(1)
+
+    def connect_all_of(self, i):
+        for a, b in self.EDGES:
+            if i in (a, b) and self.nodes[a] is not None and self.nodes[b] is not None:
+                connect_nodes_bi(self.nodes, a, b)
+        time.sleep(1)
+
+    def case11_fee2_reorg_changes_eligible_set(self):
+        """``fee2_reorg_changes_eligible_set`` (N14): a redemption whose payee's only tag in the
+        payee window is block ``R``; a natural reorg replaces ``R`` with a block another pool
+        mined, so ``E(R)`` no longer holds the payee, RED-3 fails, every enforcing template
+        excludes the transaction and a node-1 block carrying it is rejected."""
+        # Rule: RED-3
+        # Rule: FEE-2
+        # Rule: BLK-1
+        # Rule: MP-1
+        user, stock = self.nodes[USER], self.nodes[STOCK]
+        other = POOLS[1]
+        v = self.vault(6)
+        # PAYEE_WINDOW untagged stock blocks, so only block R can make anyone eligible
+        self.stock_mine_and_sync(10, 'untagged run')
+        self.disconnect_all(other)                     # the branch that will win, mined alone
+        r_hash = self.nodes[POOLS[0]].generate(1)[0]
+        sync_blocks([self.nodes[i] for i in (USER, POOLS[0], POOLS[2], STOCK, OBSERVER)])
+        ref = user.getblockcount()
+        payee = user.yed_getfeepayee(ref, int(self.live_vault(v)['collateralZat']))
+        addr, fee = payee['default']['payoutAddress'], int(payee['feeZat'])
+        assert_equal(addr, self.pool_addresses[0])     # only pool 0 quoted in (R - 10, R]
+        hex_ = build_vault_spend_raw(user, self.live_vault(v), 'owner', [v['token']],
+                                     payload=ym.encode_redeem(ref, 1, []), fee=(addr, fee),
+                                     ref_height=ref)
+        assert_equal(user.yed_validaterawtransaction(hex_)['wouldBeRejected'], False)
+        txid = user.sendrawtransaction(hex_)           # MP-1 admits it at this tip
+        time.sleep(1)
+
+        # the reorg: the isolated pool's two blocks replace R with a block of its own
+        self.nodes[other].generate(2)
+        self.connect_all_of(other)
+        self.cp('after the reorg')
+        assert_equal(user.getblock(r_hash)['confirmations'], -1)
+        assert_equal(user.yed_gettag(str(ref))['payoutAddress'], self.pool_addresses[POOLS.index(other)])
+        # the payee is no longer in E(R): RED-3 fails
+        assert_equal(user.yed_validaterawtransaction(hex_)['wouldBeRejected'], True)
+        for i in POOLS:
+            assert txid not in [t['hash'] for t in self.nodes[i].getblocktemplate()['transactions']]
+        if txid not in stock.getrawmempool():
+            stock.sendrawtransaction(hex_)
+        blockhash = stock.generate(1)[0]
+        assert txid in stock.getblock(blockhash)['tx']
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        self.pools_outmine(blockhash)
+        assert_equal(user.yed_getvault(v['txid'])['status'], 'ACTIVE')
+
+    def stock_mine_and_sync(self, n, label=''):
+        """Stock blocks the enforcing nodes accept (no rule-breaking transaction): the whole
+        network follows."""
+        for k in range(n):
+            self.nodes[STOCK].generate(1)
+            self.cp('%s+%d' % (label or 'stock', k + 1))
+
+    # ------------------------------------------------------------------ case 12
+
+    def case12_red1_refheight_window_after_reorg(self):
+        """``red1_refheight_window_after_reorg``: a valid owner-path spend with
+        ``nExpiryHeight = 0`` (M13) confirmed by node 1 at ``H = R + REF_WINDOW``; the enforcing
+        branch out-works that block and node 1 re-mines the same transaction at
+        ``H' = R + REF_WINDOW + 1``, where RED-1's window has closed, so it is rejected."""
+        # Rule: RED-1
+        # Rule: BLK-1
+        user, stock = self.nodes[USER], self.nodes[STOCK]
+        v = self.vault(7)
+        ref = user.getblockcount() - REF_LAG
+        live = self.live_vault(v)
+        payee = user.yed_getfeepayee(ref, int(live['collateralZat']))
+        # nExpiryHeight = 0 (M13): the transaction never expires, so it survives the reorg
+        hex_ = build_vault_spend_raw(user, live, 'owner', [v['token']],
+                                     payload=ym.encode_redeem(ref, 1, []),
+                                     fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                     ref_height=ref, expiry=0)
+        target = ref + REF_WINDOW
+        while user.getblockcount() < target - 1:
+            self.pools_mine(1, 'toward R + REF_WINDOW')
+        # at H = R + REF_WINDOW the spend is valid on every enforcing node
+        for i in ENFORCING:
+            # blockValid only: nExpiryHeight = 0 is refused by MP-1's expiry bound (N5), which
+            # is what wouldBeRejected also reports
+            assert_equal((i, self.nodes[i].yed_validaterawtransaction(hex_)['blockValid']), (i, True))
+        self.split_network()
+        good_hash, txid = self.stock_block_with(hex_)
+        assert_equal(stock.getblock(good_hash)['height'], target)
+        sync_blocks([stock, self.nodes[OBSERVER]])
+        obs = self.nodes[OBSERVER].yed_getvault(v['txid'])
+        assert_equal(obs['status'], 'CLOSED')                    # valid at H, by the same evaluator
+        assert_equal(obs['unbacked'], False)
+        assert_equal(self.nodes[OBSERVER].yed_gettxinfo(txid)['verdict'], 'ok')
+
+        # the enforcing branch out-works it and node 1 re-mines the spend one block later
+        self.pools_mine(2, 'replacement branch')
+        self.join_network(blocks_only=True)
+        # node 0 never downloaded the orphaned block's body; node 1 mined it and holds it
+        assert_equal(stock.getblock(good_hash)['confirmations'], -1)
+        self.cp('after the reorg')
+        for i in ENFORCING:
+            assert_equal((i, self.nodes[i].yed_validaterawtransaction(hex_)['blockValid']), (i, False))
+        if txid not in stock.getrawmempool():
+            stock.sendrawtransaction(hex_)
+        blockhash = stock.generate(1)[0]
+        assert txid in stock.getblock(blockhash)['tx']
+        assert_greater_than(stock.getblock(blockhash)['height'], target)
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        assert_equal(self.nodes[OBSERVER].yed_getvault(v['txid'])['status'], 'CLOSED')
+        self.pools_outmine(blockhash)
+        # nExpiryHeight = 0 means this spend never leaves node 1's mempool, so it would ride along
+        # in every later stock block; Ycash 4.5 does not persist the mempool, so a restart clears it
+        self.restart(STOCK)
+        self.cp('node 1 restarted with an empty mempool')
+
+    # ------------------------------------------------------------------ case 3
+
+    def case3_correct_spends_from_the_stock_node(self):
+        """A correct owner-path redemption and a correct claim mined by the **stock** node are
+        accepted by every node: an honest stock miner's block is valid (the soft-fork property)."""
+        # Rule: RED-1
+        # Rule: RED-2
+        # Rule: RED-3
+        # Rule: RED-4
+        # Rule: BLK-1
+        user = self.nodes[USER]
+        v = self.vault(0)
+        hex_ = self.correct_redeem(v)
+        assert_equal(user.yed_validaterawtransaction(hex_)['blockValid'], True)
+        blockhash, txid = self.stock_block_with(hex_)
+        self.cp('correct redemption mined by the stock node')
+        assert_best_hash([self.nodes[i] for i in range(6)], 'correct redemption')
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].yed_getinfo()['rejectedBlocks'], len(self.rejected_hashes))
+            assert_equal(self.nodes[i].yed_getvault(v['txid'])['status'], 'CLOSED')
+            assert_equal(self.nodes[i].yed_getvault(v['txid'])['unbacked'], False)
+            assert_equal(self.nodes[i].yed_gettxinfo(txid)['verdict'], 'ok')
+
+        # a correct claim: crash the price so RED-4's underwater test passes, then the claim path
+        print('  crashing the price for the claim path')
+        self.crash_price()
+        v = self.vault(1)
+        live = self.live_vault(v)
+        ref = user.getblockcount() - REF_LAG
+        payee = user.yed_getfeepayee(ref, int(live['collateralZat']))
+        claim = build_vault_spend_raw(user, live, 'claim', [v['token']],
+                                      payload=ym.encode_redeem(ref, 1, []),
+                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                                      ref_height=ref)
+        check = user.yed_validaterawtransaction(claim)
+        assert_equal(check['blockValid'], True)
+        assert_equal(check['wouldBeRejected'], False)
+        blockhash, txid = self.stock_block_with(claim)
+        self.cp('correct claim mined by the stock node')
+        assert_best_hash([self.nodes[i] for i in range(6)], 'correct claim')
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].yed_getvault(v['txid'])['status'], 'CLAIMED')
+            assert_equal(self.nodes[i].yed_getvault(v['txid'])['unbacked'], False)
+        for i in POOLS:
+            self.quote(i, PRICE)
+
+    # ------------------------------------------------------------------ case 10
+
+    def case10_tag4_garbage_coinbase_never_invalid(self):
+        """``tag4_garbage_coinbase_never_invalid``: whatever the coinbase scriptSig carries after
+        the BIP34 height, the block is valid (TAG-4/TAG-5)."""
+        # Rule: TAG-4
+        # Rule: TAG-5
+        # Rule: BLK-1
+        stock = self.nodes[STOCK]
+        before = [self.nodes[i].yed_getinfo()['rejectedBlocks'] for i in ENFORCING]
+        variants = []
+        for name in ('random32', 'magic-31', 'two-tags', 'foreign-key'):
+            cb, gbt = template_coinbase(stock)
+            base = bytes(cb.vin[0].scriptSig)
+            # the BIP34 height push is the prefix the node emits; keep it and replace the rest
+            prefix = base[:1 + base[0]] if base and base[0] < 0x4c else base[:4]
+            if name == 'random32':
+                tail = ym.push(bytes(random.getrandbits(8) for _ in range(32)))
+            elif name == 'magic-31':
+                tail = ym.push(ym.TAG_MAGIC + bytes(31 - len(ym.TAG_MAGIC)))
+            elif name == 'two-tags':
+                t = self.forge_tag(self.pool_addresses[0])
+                tail = ym.push(t) + ym.push(t)
+            else:
+                t = self.forge_tag(self.pool_addresses[1])
+                tail = ym.push(t)
+            cb.vin[0].scriptSig = prefix + tail
+            assert len(cb.vin[0].scriptSig) <= 100, 'bad-cb-length'
+            cb.rehash()
+            result, blockhash = mine_block_raw(stock, [], coinbase=cb, gbt=gbt)
+            assert result in (None, 'duplicate'), '%s: submitblock said %r' % (name, result)
+            variants.append((name, blockhash))
+            self.cp('garbage coinbase %s' % name)
+            assert_best_hash([self.nodes[i] for i in range(6)], name)
+        for k, i in enumerate(ENFORCING):
+            assert_equal(self.nodes[i].yed_getinfo()['rejectedBlocks'], before[k])
+        print('  accepted: %s' % ', '.join(n for n, _ in variants))
+
+    def forge_tag(self, payout_addr, price_micro=2_000_000, signal=True):
+        """A well-formed 36-byte quote tag naming ``payout_addr`` (TAG-1..3)."""
+        return ym.encode_tag(1 if signal else 0, price_micro, 1, ym.address_key_hash(payout_addr))
+
+    # ------------------------------------------------------------------ case 7
+
+    def case7_bookkeeping(self):
+        """A block that fails ``bad-cb-amount`` *and* RED-2 never enters ``Rejected`` (the hook
+        runs after every consensus check); and every hash in ``Rejected`` has a
+        ``yed_getblockverdict`` reason (section 8.4 items 8 and 17, M11)."""
+        # Rule: BLK-1
+        # Rule: BLK-2
+        stock = self.nodes[STOCK]
+        before = [self.nodes[i].yed_getinfo()['rejectedBlocks'] for i in ENFORCING]
+        v = self.vault(3)
+        bad = self.bad_spend(v, 'owner-noburn')
+        # the block is submitted straight to an enforcing node: node 1 would refuse it itself
+        # (bad-cb-amount) and never relay it, and the point is what the *enforcing* node records
+        pool = self.nodes[POOLS[0]]
+        cb, gbt = template_coinbase(pool)
+        cb.vout[0].nValue += 10 ** 8                # an excess well past the block's own fees
+        cb.rehash()
+        result, blockhash = mine_block_raw(pool, [bad], coinbase=cb, gbt=gbt)
+        assert result is not None and 'cb-amount' in str(result), 'expected bad-cb-amount, got %r' % result
+        time.sleep(1)
+        for k, i in enumerate(ENFORCING):
+            assert_equal((i, self.nodes[i].yed_getinfo()['rejectedBlocks']), (i, before[k]))
+        print('  bad-cb-amount + RED-2 never reached the hook: rejectedBlocks unchanged')
+        # every hash this script has had rejected carries a non-empty verdict reason (M11)
+        print('  %d rejected hashes recorded so far' % len(self.rejected_hashes))
+
+    # ------------------------------------------------------------------ case 6
+
+    def case6_fail_open_on_storage_only(self):
+        """BLK-3: the four ``-yellowbacktestfault`` runs accept the rule-breaking block with
+        ``healthy == false``, emit no tag (MINER-3), refuse ``getblocktemplate`` under
+        ``-yellowbackrequirehealthy`` (K24), and recover with ``-reindex-yellowback``.  Then K1:
+        the evaluator is total -- every malformed shape is rejected with ``healthy == true``."""
+        # Rule: BLK-3
+        # Rule: MINER-3
+        # Rule: TPL-3
+        # Rule: BLK-1
+        pool = POOLS[1]                      # node 3
+        for fault in ('storage:check', 'storage:commit', 'storage:undo', 'template'):
+            print('  -yellowbacktestfault=%s' % fault)
+            self.restart(pool, ['-yellowbacktestfault=%s' % fault, '-yellowbackrequirehealthy=0'])
+            self.fault_run(pool, fault)
+            self.restart(pool, ['-reindex-yellowback'])
+            wait_yed_healthy(self.nodes[pool])
+            assert_equal(self.nodes[pool].yed_getinfo()['healthy'], True)
+            self.cp('recovered from %s' % fault, ENFORCING)
+        self.k1_totality()
+
+    def fault_run(self, pool, fault):
+        node = self.nodes[pool]
+        if fault == 'template':
+            # TPL-3: the filter keeps a block-invalid vault spend, so the node's own
+            # TestBlockValidity fails and getblocktemplate/generate errors rather than
+            # producing a template the network would reject.
+            v = self.vault(4)
+            bad = self.bad_spend(v, 'owner-noburn', expiry_slack=20)
+            self.nodes[STOCK].sendrawtransaction(bad)
+            time.sleep(1)
+            try:
+                node.getblocktemplate()
+            except JSONRPCException as e:
+                print('    getblocktemplate refused: %s' % e.error['message'][:80])
+            return
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=20)
+        blockhash, _ = self.stock_block_with(bad)
+        # the faulting node accepts the block and marks itself unhealthy
+        deadline = time.time() + 30
+        while node.yed_getinfo()['healthy'] and time.time() < deadline:
+            time.sleep(0.2)
+        info = node.yed_getinfo()
+        assert_equal(info['healthy'], False)
+        assert info['unhealthyReason'], 'no unhealthyReason after %s' % fault
+        assert_equal(info['enforcing'], False)
+        sync_blocks([node, self.nodes[STOCK]])
+        assert_equal(node.getbestblockhash(), blockhash)
+        # MINER-3: no tag while unhealthy
+        h = node.generate(1)[0]
+        assert_equal(self.nodes[OBSERVER].yed_gettag(h)['found'] if False else
+                     node.yed_gettag(str(node.getblock(h)['height']))['found'], False)
+        # K24: -yellowbackrequirehealthy refuses templates outright
+        self.restart(pool, ['-yellowbackrequirehealthy=1'])
+        assert_equal(self.nodes[pool].yed_getinfo()['healthy'], False)
+        rpc_error('yellowback-unhealthy', self.nodes[pool].getblocktemplate)
+        # the rest of the network out-mines the branch the faulting node accepted
+        self.pools_outmine_excluding(blockhash, exclude=[pool])
+
+    def pools_outmine_excluding(self, target_hash, exclude, limit=40):
+        pools = [i for i in POOLS if i not in exclude]
+        group = [i for i in ENFORCING if i not in exclude]
+        k = 0
+        while self.nodes[STOCK].getbestblockhash() != self.nodes[pools[0]].getbestblockhash():
+            assert k < limit, 'the pools did not out-mine the stock branch'
+            self.nodes[pools[k % len(pools)]].generate(1)
+            self.cp('out-mine+%d' % (k + 1), group)
+            k += 1
+            time.sleep(0.3)
+        return k
+
+    def k1_totality(self):
+        """K1: ``EvaluateBlock`` is total.  A vault spend with a ``refHeight`` below
+        ``START_HEIGHT``, one above ``H - 1``, a maximal payload and a scriptSig of random pushes
+        is rejected as invalid on every enforcing node with ``healthy == true``."""
+        # Rule: RED-1
+        # Rule: BLK-1
+        # Rule: BLK-3
+        user = self.nodes[USER]
+        start = int(user.yed_getinfo()['startHeight'])
+        v = self.vault(4)
+        live = self.live_vault(v)
+        collateral = int(live['collateralZat'])
+        shapes = []
+        tip = user.getblockcount()
+        payee = user.yed_getfeepayee(tip - REF_LAG, collateral)
+        addr, fee = payee['default']['payoutAddress'], int(payee['feeZat'])
+        # (a) refHeight below START_HEIGHT
+        shapes.append(('refHeight < START_HEIGHT',
+                       build_vault_spend_raw(user, live, 'owner', [v['token']],
+                                             payload=ym.encode_redeem(max(0, start - 1), 1, []),
+                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
+        # (b) refHeight above H - 1
+        shapes.append(('refHeight > H - 1',
+                       build_vault_spend_raw(user, live, 'owner', [v['token']],
+                                             payload=ym.encode_redeem(tip + 50, 1, []),
+                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
+        # (c) a payload of maximal length
+        big = ym.encode_redeem(tip - REF_LAG, 1, [(9, 1)] * 14)
+        big = big[:80]
+        shapes.append(('maximal payload',
+                       build_vault_spend_raw(user, live, 'owner', [v['token']], payload=big,
+                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
+        # (d) a scriptSig of random pushes (not a vault spend shape at all: consensus-invalid,
+        #     so it is asserted only through the evaluator's totality on a hand-built block)
+        for name, hex_ in shapes:
+            print('  K1 %s' % name)
+            for i in ENFORCING:
+                assert_equal(self.nodes[i].yed_getinfo()['healthy'], True)
+            try:
+                blockhash, _ = self.stock_block_with(hex_)
+            except JSONRPCException:
+                # the stock node's own mempool refused it (expiry/standardness): mine it raw
+                result, blockhash = mine_block_raw(self.nodes[STOCK], [hex_])
+                assert result is None or result == 'duplicate', result
+            self.assert_rejected_everywhere(blockhash)
+            self.rejected_hashes.append(blockhash)
+            for i in ENFORCING:
+                assert_equal(self.nodes[i].yed_getinfo()['healthy'], True)
+            self.pools_outmine(blockhash)
+
+    # ------------------------------------------------------------------ case 5
+
+    def case5_kill_switch(self):
+        """V13 (ii)/(iii): node 2 has rejected a block and node 1's branch is longer; restarted
+        with ``-yellowbackenforce=0`` node 2 reconsiders, reorgs onto it and reports
+        ``rejectedBlocks == 0``; restarted with enforcement on it mines past it."""
+        # Rule: BLK-2
+        # Rule: ACT-5
+        stock = self.nodes[STOCK]
+        pool = POOLS[0]                       # node 2
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=30)
+        blockhash, _ = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        assert_greater_than(self.nodes[pool].yed_getinfo()['rejectedBlocks'], 0)
+        # node 1 extends its branch: four blocks of lead, below VALVE_BLOCKS
+        self.stock_mine(3, 'kill-switch lead')
+        for i in ENFORCING:
+            assert_equal(self.nodes[i].yed_getinfo()['valveTripped'], False)
+
+        self.restart(pool, ['-yellowbackenforce=0'])
+        node = self.nodes[pool]
+        assert_equal(node.yed_getinfo()['rejectedBlocks'], 0)
+        assert_equal(node.yed_getinfo()['enforcing'], False)
+        deadline = time.time() + 60
+        while node.getbestblockhash() != stock.getbestblockhash():
+            assert time.time() < deadline, 'node %d did not rejoin the stock chain' % pool
+            time.sleep(0.3)
+        assert_equal(node.yed_getinfo()['rejectedBlocks'], 0)
+        print('  node %d reorged onto the rejected chain with enforcement off' % pool)
+
+        self.restart(pool)
+        assert_equal(self.nodes[pool].yed_getinfo()['enforcing'], True)
+        # the remaining pools out-mine the stock branch and node 2 comes back with them
+        self.pools_outmine_excluding(blockhash, exclude=[pool])
+        deadline = time.time() + 60
+        while self.nodes[pool].getbestblockhash() != self.nodes[POOLS[1]].getbestblockhash():
+            assert time.time() < deadline, 'node %d did not rejoin the enforcing chain' % pool
+            time.sleep(0.3)
+        self.cp('kill switch done')
+        assert_equal(self.nodes[pool].yed_getinfo()['enforcing'], True)
+
+    # ------------------------------------------------------------------ case 15
+
+    def case15_valve_catchup_offline_node(self):
+        """BLK-2 clause 3 (L11), three variants: 8 blocks ahead => suppressed; 3 blocks =>
+        rejected, converging later through the ``FAILED_CHILD`` path; a restart after more than a
+        day offline => IBD (clause 2)."""
+        # Rule: BLK-2
+        # Rule: ACT-7
+        self.catchup_variant_suppressed()
+        self.catchup_variant_within_the_bound()
+        self.catchup_variant_ibd()
+
+    def isolate(self, i):
+        """Disconnect node ``i`` from every peer (``disconnectnode``; no restart, so it is not in
+        IBD) and split {1, 5} off from the rest."""
+        if not self.is_network_split:
+            self.split_network()
+        for a, b in self.EDGES:
+            if i in (a, b):
+                self._disconnect_pair(a, b)
+        time.sleep(1)
+
+    def rejoin(self, i, peer):
+        connect_nodes_bi(self.nodes, i, peer)
+
+    def catchup_variant_suppressed(self):
+        print('  variant 1: the network is 8 blocks ahead => suppressed')
+        pool = POOLS[0]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=40)
+        base = self.nodes[pool].getbestblockhash()
+        rejected_before = self.nodes[pool].yed_getinfo()['rejectedBlocks']
+        self.isolate(pool)
+        blockhash, _ = self.stock_block_with(bad)
+        self.nodes[STOCK].generate(VALVE_BLOCKS + 2)
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        assert_equal(self.nodes[pool].getbestblockhash(), base)
+        self.rejoin(pool, STOCK)
+        node = self.nodes[pool]
+        deadline = time.time() + 90
+        while node.getbestblockhash() != self.nodes[STOCK].getbestblockhash():
+            assert time.time() < deadline, 'node %d did not catch up' % pool
+            time.sleep(0.3)
+        info = node.yed_getinfo()
+        assert_equal(info['rejectedBlocks'], rejected_before)
+        assert_equal(info['suppressedBlocks'], 1)
+        assert_equal(info['valveTripped'], False)
+        assert_equal(info['enforcing'], True)
+        assert_banscore_zero([node])
+        assert debug_log_contains(self.options.tmpdir, pool, 'catch-up: accepted rule-breaking block'), \
+            'no catch-up log line on node %d' % pool
+        self.catchup_recover(pool, blockhash)
+
+    def catchup_recover(self, pool, blockhash):
+        """Bring ``pool`` back to the enforcing majority's chain: the split halves rejoin and the
+        enforcing pools out-mine the stock branch."""
+        self._disconnect_pair(pool, STOCK)
+        time.sleep(0.5)
+        for a, b in self.EDGES:
+            if pool in (a, b) and self.nodes[a] is not None and self.nodes[b] is not None:
+                other = b if a == pool else a
+                if other not in (STOCK, OBSERVER):
+                    connect_nodes_bi(self.nodes, a, b)
+        time.sleep(1)
+        if self.is_network_split:
+            self.join_network(blocks_only=True) if False else None
+        # the pools that never left out-mine the stock branch; the split is rejoined afterwards
+        others = [i for i in POOLS if i != pool]
+        k = 0
+        while self.nodes[pool].getbestblockhash() != self.nodes[others[0]].getbestblockhash():
+            assert k < 60, 'node %d did not rejoin the enforcing chain' % pool
+            self.nodes[others[k % len(others)]].generate(1)
+            time.sleep(0.4)
+            k += 1
+        if self.is_network_split:
+            for x, y in self._cross_edges():
+                connect_nodes_bi(self.nodes, x, y)
+            self.is_network_split = False
+        time.sleep(1)
+        self.cp('catch-up recovered', ENFORCING)
+
+    def catchup_variant_within_the_bound(self):
+        print('  variant 2: the network is 3 blocks ahead => rejected, then the FAILED_CHILD path')
+        pool = POOLS[0]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=40)
+        rejected_before = self.nodes[pool].yed_getinfo()['rejectedBlocks']
+        self.isolate(pool)
+        blockhash, _ = self.stock_block_with(bad)
+        self.nodes[STOCK].generate(2)
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        self.rejoin(pool, STOCK)
+        node = self.nodes[pool]
+        deadline = time.time() + 60
+        while node.yed_getinfo()['rejectedBlocks'] == rejected_before:
+            assert time.time() < deadline, 'node %d did not reject within the bound' % pool
+            time.sleep(0.3)
+        assert_equal(node.yed_getinfo()['rejectedBlocks'], rejected_before + 1)
+        assert_equal(node.yed_getinfo()['valveTripped'], False)
+        assert node.getbestblockhash() != self.nodes[STOCK].getbestblockhash()
+        # node 1 extends to VALVE_BLOCKS + 2: the valve trips through the FAILED_CHILD path
+        for _ in range(VALVE_BLOCKS + 2):
+            self.nodes[STOCK].generate(1)
+            time.sleep(0.6)
+        deadline = time.time() + 120
+        while not node.yed_getinfo()['valveTripped']:
+            assert time.time() < deadline, 'the valve did not trip on node %d' % pool
+            self.nodes[STOCK].generate(1)
+            time.sleep(0.8)
+        assert_equal(node.yed_getinfo()['enforcing'], False)
+        deadline = time.time() + 90
+        while node.getbestblockhash() != self.nodes[STOCK].getbestblockhash():
+            assert time.time() < deadline, 'node %d did not converge after the trip' % pool
+            self.nodes[STOCK].generate(1)
+            time.sleep(0.8)
+        assert_banscore_zero([node])
+        print('    converged; re-arming node %d by restart' % pool)
+        self.restart(pool)
+        assert_equal(self.nodes[pool].yed_getinfo()['valveTripped'], False)
+        assert_equal(self.nodes[pool].yed_getinfo()['enforcing'], True)
+        self.catchup_recover(pool, blockhash)
+
+    def catchup_variant_ibd(self):
+        print('  variant 3: restarted after more than a day offline => IBD (clause 2)')
+        pool = POOLS[0]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=60)
+        node = self.nodes[pool]
+        self.isolate(pool)
+        blockhash, _ = self.stock_block_with(bad)
+        self.nodes[STOCK].generate(2)
+        sync_blocks([self.nodes[STOCK], self.nodes[OBSERVER]])
+        self.advance_clock(2 * 24 * 60 * 60)       # 2 * nMaxTipAge: every tip is now stale
+        self.restart(pool)                          # the IBD latch is reset by the restart
+        node = self.nodes[pool]
+        self.rejoin(pool, STOCK)
+        deadline = time.time() + 90
+        while node.getbestblockhash() != self.nodes[STOCK].getbestblockhash():
+            assert time.time() < deadline, 'node %d did not catch up in IBD' % pool
+            time.sleep(0.3)
+        info = node.yed_getinfo()
+        assert_equal(info['rejectedBlocks'], 0)             # the restart cleared the record
+        assert_equal(info['suppressedBlocks'], 0)           # clause 2 writes nothing
+        assert_equal(info['valveTripped'], False)
+        assert_equal(info['enforcing'], True)
+        assert_banscore_zero([node])
+        print('    accepted in IBD without a rejection or a suppression record')
+        self.catchup_recover(pool, blockhash)
+
+    # ------------------------------------------------------------------ case 9
+
+    def case9_work_valve(self):
+        """ACT-7/L7: five blocks of stock lead do not trip the valve; ``VALVE_BLOCKS + 2`` do.
+        The enforcing nodes reorg onto node 1's chain, report ``enforcing == false`` and
+        ``valveTripped == true``, carry the P1 warning in ``getinfo.errors`` and not the stock
+        fork-warning text, keep every banscore at 0, and lose the signal bit; a restart re-arms."""
+        # Rule: ACT-7
+        # Rule: BLK-2
+        # Rule: MINER-1
+        stock = self.nodes[STOCK]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=60)
+        blockhash, _ = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash)
+        self.rejected_hashes.append(blockhash)
+        enforcing_tip = self.nodes[POOLS[0]].getbestblockhash()
+
+        print('  five blocks of stock lead must not trip the valve')
+        for _ in range(4):                      # the rejected block plus four = five of lead
+            stock.generate(1)
+            time.sleep(0.8)
+        time.sleep(2)
+        for i in ENFORCING:
+            info = self.nodes[i].yed_getinfo()
+            assert_equal(info['valveTripped'], False)
+            assert_equal(info['enforcing'], True)
+            assert_equal(self.nodes[i].getbestblockhash(), enforcing_tip)
+        assert_banscore_zero([self.nodes[i] for i in ENFORCING])
+
+        print('  VALVE_BLOCKS + 2 = %d more, one at a time (P3)' % (VALVE_BLOCKS + 2))
+        for k in range(VALVE_BLOCKS + 2):
+            stock.generate(1)
+            sync_blocks([stock, self.nodes[OBSERVER]])
+            time.sleep(0.8)
+        deadline = time.time() + 120
+        while not all(self.nodes[i].yed_getinfo()['valveTripped'] for i in ENFORCING):
+            assert time.time() < deadline, 'the valve did not trip on every enforcing node'
+            stock.generate(1)
+            time.sleep(1.0)
+
+        deadline = time.time() + 120
+        while any(self.nodes[i].getbestblockhash() != stock.getbestblockhash() for i in ENFORCING):
+            assert time.time() < deadline, 'the enforcing nodes did not reorg after the trip'
+            stock.generate(1)
+            time.sleep(1.0)
+
+        for i in ENFORCING:
+            info = self.nodes[i].yed_getinfo()
+            assert_equal(info['valveTripped'], True)
+            assert_equal(info['enforcing'], False)
+            errors = self.nodes[i].getinfo()['errors']
+            assert 'Yellowback: work valve tripped' in errors, \
+                'node %d: getinfo.errors = %r (P1)' % (i, errors)
+            assert 'longer than our best chain' not in errors and 'corruption' not in errors, \
+                'node %d carries the stock fork warning (P1 says it never fires here): %r' % (i, errors)
+        assert_banscore_zero([self.nodes[i] for i in ENFORCING])
+        assert_same_statehash([self.nodes[i] for i in ENFORCING + [OBSERVER]], 'after the trip')
+        assert_equal(self.nodes[OBSERVER].yed_getvault(v['txid'])['unbacked'], True)
+
+        print('  the pools\' next tags carry no signal bit (MINER-1)')
+        h = self.nodes[POOLS[0]].generate(1)[0]
+        self.cp('post-trip pool block')
+        tag = self.nodes[USER].yed_gettag(str(self.nodes[USER].getblock(h)['height']))
+        assert_equal(tag['found'], True)
+        assert_equal(tag['signal'], False)
+
+        print('  a restart of node %d re-arms the valve' % POOLS[0])
+        self.restart(POOLS[0])
+        info = self.nodes[POOLS[0]].yed_getinfo()
+        assert_equal(info['valveTripped'], False)
+        assert_equal(info['enforcing'], True)
+
+    # ------------------------------------------------------------------ case 8 (--extended)
+
+    def case8_extended_random_activity(self):
+        """The nightly run: 200 blocks of random activity with node 1 injecting a rule-breaking
+        spend about every 20 blocks and random 1-6 block reorgs."""
+        # Rule: BLK-1
+        # Rule: BLK-2
+        # Rule: ACT-7
+        print('=== case8_extended_random_activity (200 blocks)')
+        rng = random.Random(20260911)
+        user, stock = self.nodes[USER], self.nodes[STOCK]
+        for i in POOLS:
+            self.quote(i, PRICE)
+        injected = 0
+        rejected_start = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks']
+        stock_blocks = 0
+        for n in range(200):
+            roll = rng.random()
+            if roll < 0.10:
+                stock.generate(1)
+                stock_blocks += 1
+                try:
+                    self.cp('extended stock %d' % n)
+                except Exception:
+                    self.pools_outmine(None)
+            elif roll < 0.15:
+                depth = rng.randint(1, 6)
+                tip = user.getblockcount()
+                if tip > depth + 10:
+                    h = user.getblockhash(tip - depth)
+                    for i in range(6):
+                        try:
+                            self.nodes[i].invalidateblock(h)
+                        except JSONRPCException:
+                            pass
+                    self.pools_mine(depth + 1, 'extended reorg %d' % n)
+            elif roll < 0.20 and injected * 20 < n:
+                v = self.extended_vault(rng)
+                if v is None:
+                    continue
+                bad = self.bad_spend(v, 'owner-noburn', expiry_slack=30)
+                try:
+                    blockhash, _ = self.stock_block_with(bad)
+                except JSONRPCException:
+                    continue
+                injected += 1
+                self.assert_rejected_everywhere(blockhash)
+                self.pools_outmine(blockhash)
+            else:
+                self.pools_mine(1, 'extended %d' % n)
+            for i in ENFORCING:
+                for row in self.nodes[i].yed_listvaults():
+                    assert_equal(row.get('unbacked', False), False)
+        rejected = self.nodes[POOLS[0]].yed_getinfo()['rejectedBlocks'] - rejected_start
+        assert_equal(rejected, injected)
+        assert_greater_than(int(self.nodes[OBSERVER].yed_getstats()['unbackedCents']), 0)
+        assert_banscore_zero(self.nodes)
+        assert_same_statehash([self.nodes[i] for i in ENFORCING], 'extended')
+        print('  %d injected, %d rejected, %d stock blocks, ban count 0' % (injected, rejected, stock_blocks))
+
+    def extended_vault(self, rng):
+        v = self.mint()
+        self.sync_all()
+        self.pools_mine(1, 'extended mint')
+        live = self.nodes[USER].yed_getvault(v['txid'])
+        if live['status'] != 'ACTIVE':
+            return None
+        need = int(live['lockHeight']) - self.nodes[USER].getblockcount() + 1
+        if need > 0:
+            self.pools_mine(need, 'extended lock')
+        return v
+
+
+if __name__ == '__main__':
+    YellowbackEnforcementTest().main()
