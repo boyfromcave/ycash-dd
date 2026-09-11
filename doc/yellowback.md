@@ -229,9 +229,13 @@ Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Yca
   outruns its own by six blocks — stops enforcing for the session, rejoins the network's chain,
   raises an alert and waits for its operator; it is never stranded for more than six blocks, and
   it never bans the peers that relayed the other chain, neither for the rejected block nor for
-  its descendants. A node that catches up after an outage never rejects a block the network has
-  already built six blocks on; it accepts it, records that it did, and keeps enforcing.
-  Enforcement means "majority in fact", not "majority by count".
+  its descendants. A node that catches up after an outage *usually* does not reject a block the
+  network has already built six blocks on: when the network's headers reach it before the block
+  does — the ordinary case, since headers lead blocks — it accepts the block, records that it
+  did, and keeps enforcing. When the block arrives first it can still reject it, and the work
+  valve above is then what bounds the consequence: the node rejoins within six blocks. The valve,
+  not catch-up suppression, is the guarantee. Enforcement means "majority in fact", not "majority
+  by count".
 - Every release enforces only until a sunset height about a year past its start; past it the
   node keeps publishing quotes and accounting but rejects nothing until upgraded, so two
   releases with different rules can never both be enforcing.
