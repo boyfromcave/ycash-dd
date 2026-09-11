@@ -282,7 +282,13 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         assert_equal(user.yed_getvault(mint_y['txid'])['status'], 'ACTIVE')
         assert mint_x['txid'] in user.getrawmempool()
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
-        self.mine(POOLS[1])
+        # On the joined chain X is over the cap, so its verdict is VOID and TPL-2 (strict) keeps
+        # it out of every template — including the one that would confirm the race.  Its block is
+        # assembled in Python, and the stock half never held X so its mempool is not synced here
+        # (plan 6.0 item 4, docs/mapping.md section 13.5).
+        result, _ = mine_block_raw(nodes[POOLS[1]], [user.getrawtransaction(mint_x['txid'])])
+        assert result is None, result
+        self.sync_all(blocks_only=True)
         self.expect_void(mint_x['txid'], 'mint-supply-cap')
         assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 1)
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000 + m)

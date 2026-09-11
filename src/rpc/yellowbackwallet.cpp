@@ -6,7 +6,10 @@
  * Yellowback wallet-context RPCs (plan §4.5, §4.6; doc/yellowback-rpc.md is
  * the contract): addresses, balances, mint, send, redeem (incl. the VOID
  * release, L14), claim, sweep (L10), positions, history, lock maintenance.
- * Lock order: cs_main -> cs_wallet -> cs_yellowback (§4.3).
+ * Lock order: cs_main -> cs_wallet -> mempool.cs -> cs_yellowback (§4.3, N25).
+ * No RPC here may take mempool.cs after cs_yellowback: CreateNewBlock takes
+ * them in that order (TemplateView inside LOCK2(cs_main, mempool.cs)) and so
+ * does RemoveInvalidVaultSpends on the ConnectTip path.
  *
  * Every refusal carries a stable identifier as the first token of its
  * message (M8): the builders throw std::runtime_error("<identifier>: …") and
