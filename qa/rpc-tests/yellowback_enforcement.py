@@ -823,11 +823,14 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         node = self.nodes[pool]
         assert_equal(node.yed_getinfo()['healthy'], True)
         if fault.endswith('undo'):
-            other = POOLS[2]
-            self.disconnect_all(other)
-            self.pools_mine(1, 'pre-undo', group=[i for i in ENFORCING if i != other])
-            self.nodes[other].generate(2)
-            self.connect_all_of(other)
+            # a purely local one-block reorg: invalidateblock runs DisconnectBlock on this node
+            # only, so the UNDO hook faults without any block being announced anywhere.  (Forcing
+            # the reorg by isolating a pool and reconnecting it works too, but a peer that then
+            # fetches the branch tip before its headers hits Ycash's own "prev block not found"
+            # at DoS 10, and banscore never decays -- which poisons every later case's
+            # assert_banscore_zero.  See docs/mapping.md 13.8.)
+            h = self.nodes[pool].getbestblockhash()
+            self.nodes[pool].invalidateblock(h)
         else:
             self.nodes[POOLS[0]].generate(1)
         deadline = time.time() + 30
@@ -837,6 +840,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_equal(info['healthy'], False)
         assert info['unhealthyReason'], 'no unhealthyReason after %s' % fault
         assert_equal(info['enforcing'], False)
+        if fault.endswith('undo'):
+            node.reconsiderblock(h)      # back on the network's chain; the index stays unhealthy
+            time.sleep(1)
 
         # BLK-3 fail open: the rule-breaking block is accepted by the unhealthy node while every
         # healthy enforcing node rejects it
