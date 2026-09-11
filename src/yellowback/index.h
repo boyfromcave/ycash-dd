@@ -74,6 +74,18 @@ public:
     /** Mark unhealthy (also used by unit tests to exercise the RPC refusal). */
     void SetUnhealthy(const std::string& reason);
 
+    // ---- Phase 3 provides this; transitional stub (Phase 6 worktree only, replaced at merge) ----
+    /**
+     * MP-1 predicate (§3.9, §4.2a; K7): true unless the transaction spends an ACTIVE vault and
+     * fails RED-1..4 at tip + 1 (EvaluateBlock over a one-transaction pseudo-block) — and always
+     * true while IsAbandoned() holds (L13). O(inputs) Vaults lookups when no ACTIVE vault is
+     * spent. Takes cs_yellowback inside; the caller holds cs_main.
+     */
+    bool MempoolCheck(const CTransaction& tx);
+    /** The §4.6 abandonment predicate (L10, L12): Snapshots[tip].haltMask.ENFORCEMENT set for ≥ abandonBlocks, from Snapshots alone. cs_yellowback inside. */
+    bool IsAbandoned() const;
+    // ---- end transitional stub ----
+
     /**
      * Wallet hooks (plan §4.5, stages ii and iii of coin locking), set by the
      * wallet layer when there is one. Called on the notifier thread without

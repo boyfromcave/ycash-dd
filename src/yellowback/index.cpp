@@ -276,6 +276,47 @@ void YellowbackIndex::SyncTransaction(const CTransaction& tx, const CBlock* pblo
     }
 }
 
+// ---- Phase 3 provides this; transitional stub (Phase 6 worktree only, replaced at merge) ----
+bool YellowbackIndex::IsAbandoned() const
+{
+    LOCK(cs_yellowback);
+    State st(*db);
+    std::optional<TipRecord> tip = st.GetTip();
+    if (!tip.has_value()) return false;
+    if (params.abandonBlocks <= 0) return false;
+    for (int h = tip->height; h > tip->height - params.abandonBlocks; h--) {
+        if (h < params.startHeight) return false;
+        std::optional<Snapshot> s = st.GetSnapshot((uint32_t)h);
+        if (!s.has_value() || !(s->haltMask & HALT_ENFORCEMENT)) return false;
+    }
+    return true;
+}
+
+bool YellowbackIndex::MempoolCheck(const CTransaction& tx)
+{
+    LOCK(cs_yellowback);
+    if (!healthy) return true;
+    State st(*db);
+    std::optional<TipRecord> tip = st.GetTip();
+    if (!tip.has_value()) return true;
+    bool spendsActive = false;
+    for (const CTxIn& in : tx.vin) {
+        std::optional<VaultRecord> v = st.GetVault(in.prevout);
+        if (v.has_value() && v->Status() == VaultStatus::ACTIVE) { spendsActive = true; break; }
+    }
+    if (!spendsActive) return true;
+    if (IsAbandoned()) return true;   // L13: MP-1 stands down under abandonment
+    CMutableTransaction coinbase;
+    coinbase.vin.push_back(CTxIn());
+    CBlock block;
+    block.vtx.push_back(CTransaction(coinbase));
+    block.vtx.push_back(tx);
+    OverlayStateView overlay(*db);
+    BlockEvaluation ev = EvaluateBlock(overlay, params, block, tip->height + 1, uint256(), 0);
+    return !ev.blockInvalid;
+}
+// ---- end transitional stub ----
+
 void YellowbackIndex::TestChainTip(const CBlockIndex* pindex, const CBlock* pblock, bool connect)
 {
     std::optional<std::pair<SproutMerkleTree, SaplingMerkleTree>> added;
