@@ -82,6 +82,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     # node 0 needs many mature coinbases: every vault below is 250 YEC of collateral and the
     # 101 initial blocks leave exactly one mature coinbase (mapping.md section 13.5).
     initial_blocks = 101
+    # The framework's pool chain is 2<->3<->4, so isolating node 3 -- which cases 6 and 11 do --
+    # would partition node 2 from node 4 and the enforcing half could not agree on a tip.  One
+    # extra edge makes the three pools a triangle; node 1 is still the only route to the stock
+    # miner and node 0 still reaches the enforcing half through node 2 (section 6.0 item 4).
+    EDGES = YellowbackTestFramework.EDGES + [(2, 4)]
 
     def add_options(self, parser):
         super().add_options(parser)
@@ -181,7 +186,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
                                      ref_height=ref, expiry=expiry)
 
-    def bad_spend(self, vault, kind, expiry_slack=TX_SOON):
+    def bad_spend(self, vault, kind, expiry_slack=30):
         """One rule-breaking spend of ``vault``.  ``kind``:
         ``owner-noburn``  owner path, no burn, no payload            (RED-1 vault-spend-malformed)
         ``claim-noburn``  claim path, no burn, no payload            (RED-1, R2)
@@ -255,9 +260,19 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             self.cp('out-mine+%d' % (k + 1), ENFORCING)
             k += 1
             time.sleep(0.3)
+        self.clear_stock_mempool()
         self.cp('converged')
         assert target_hash is None or self.nodes[USER].getblock(target_hash)['confirmations'] == -1
         return k
+
+    def clear_stock_mempool(self):
+        """Restart node 1 when its mempool still holds a rule-breaking spend: Ycash 4.5 does not
+        persist the mempool, and a lingering spend would ride along in every later stock block
+        (and, once past its nExpiryHeight, cost the relaying peer the stock tx-expired DoS 10 --
+        a v4.5.0 behaviour this script must not confuse with a Yellowback verdict)."""
+        if self.nodes[STOCK].getrawmempool():
+            self.restart(STOCK)
+            time.sleep(1)
 
     def crash_price(self, blocks=36):
         """Drive ``pClaim = max(pMid, pSlow)`` down by quoting ``CRASH_PRICE`` from every pool
@@ -304,9 +319,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         ``Snapshots[refHeight]`` is not ACTIVE (K16), and a VOID vault's spend is an ordinary
         spend (K3), so the stock node's rule-breaking block is accepted by every node with
         ``rejectedBlocks == 0``."""
-        # Rule: BLK-1
-        # Rule: ACT-5
-        # Rule: K3
+# Rule: BLK-1
+# Rule: ACT-5
+# Rule: K3
         user = self.nodes[USER]
         self.pools_mine(3, 'pre-activation')
         for i in ENFORCING:
@@ -391,12 +406,12 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         and records ``unbacked``; node 1 mines two more on the rejected one and is still an
         unbanned peer of every enforcing node (N1); the pools out-mine it and every state hash
         agrees again."""
-        # Rule: BLK-1
-        # Rule: BLK-2
-        # Rule: RED-1
-        # Rule: RED-2
-        # Rule: MP-1
-        # Rule: TPL-1
+# Rule: BLK-1
+# Rule: BLK-2
+# Rule: RED-1
+# Rule: RED-2
+# Rule: MP-1
+# Rule: TPL-1
         v = self.vault(0)
         user = self.nodes[USER]
         bad = self.bad_spend(v, 'owner-noburn')
@@ -444,12 +459,12 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """The claim-path sweep without a burn (R2), a short burn (RED-2), the wrong payee and a
         short fee (RED-3): all rejected.  A claim-path sweep of a VOID vault is accepted by
         everyone (K3) and never appears in an enforcing template (TPL-2)."""
-        # Rule: RED-1
-        # Rule: RED-2
-        # Rule: RED-3
-        # Rule: RED-4
-        # Rule: BLK-1
-        # Rule: TPL-2
+# Rule: RED-1
+# Rule: RED-2
+# Rule: RED-3
+# Rule: RED-4
+# Rule: BLK-1
+# Rule: TPL-2
         for n, kind in ((1, 'claim-noburn'), (2, 'short-burn'), (3, 'wrong-payee'), (4, 'short-fee')):
             v = self.vault(n)
             bad = self.bad_spend(v, kind)
@@ -510,8 +525,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     def case13_m3_vault_spend_with_mint_payload(self):
         """``m3_vault_spend_with_mint_payload``: a correct burn and fee but a MINT payload; RED-1
         needs a REDEEM payload, so the block is rejected and node 5 records no new vault (M3)."""
-        # Rule: RED-1
-        # Rule: BLK-1
+# Rule: RED-1
+# Rule: BLK-1
         v = self.vault(5)
         before = int(self.nodes[OBSERVER].yed_getstats()['activeVaults'])
         bad = self.bad_spend(v, 'mint-payload')
@@ -546,10 +561,10 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         payee window is block ``R``; a natural reorg replaces ``R`` with a block another pool
         mined, so ``E(R)`` no longer holds the payee, RED-3 fails, every enforcing template
         excludes the transaction and a node-1 block carrying it is rejected."""
-        # Rule: RED-3
-        # Rule: FEE-2
-        # Rule: BLK-1
-        # Rule: MP-1
+# Rule: RED-3
+# Rule: FEE-2
+# Rule: BLK-1
+# Rule: MP-1
         user, stock = self.nodes[USER], self.nodes[STOCK]
         other = POOLS[1]
         v = self.vault(6)
@@ -602,8 +617,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         ``nExpiryHeight = 0`` (M13) confirmed by node 1 at ``H = R + REF_WINDOW``; the enforcing
         branch out-works that block and node 1 re-mines the same transaction at
         ``H' = R + REF_WINDOW + 1``, where RED-1's window has closed, so it is rejected."""
-        # Rule: RED-1
-        # Rule: BLK-1
+# Rule: RED-1
+# Rule: BLK-1
         user, stock = self.nodes[USER], self.nodes[STOCK]
         v = self.vault(7)
         ref = user.getblockcount() - REF_LAG
@@ -659,11 +674,11 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     def case3_correct_spends_from_the_stock_node(self):
         """A correct owner-path redemption and a correct claim mined by the **stock** node are
         accepted by every node: an honest stock miner's block is valid (the soft-fork property)."""
-        # Rule: RED-1
-        # Rule: RED-2
-        # Rule: RED-3
-        # Rule: RED-4
-        # Rule: BLK-1
+# Rule: RED-1
+# Rule: RED-2
+# Rule: RED-3
+# Rule: RED-4
+# Rule: BLK-1
         user = self.nodes[USER]
         v = self.vault(0)
         hex_ = self.correct_redeem(v)
@@ -705,9 +720,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     def case10_tag4_garbage_coinbase_never_invalid(self):
         """``tag4_garbage_coinbase_never_invalid``: whatever the coinbase scriptSig carries after
         the BIP34 height, the block is valid (TAG-4/TAG-5)."""
-        # Rule: TAG-4
-        # Rule: TAG-5
-        # Rule: BLK-1
+# Rule: TAG-4
+# Rule: TAG-5
+# Rule: BLK-1
         stock = self.nodes[STOCK]
         before = [self.nodes[i].yed_getinfo()['rejectedBlocks'] for i in ENFORCING]
         variants = []
@@ -748,9 +763,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """A block that fails ``bad-cb-amount`` *and* RED-2 never enters ``Rejected`` (the hook
         runs after every consensus check); and every hash in ``Rejected`` has a
         ``yed_getblockverdict`` reason (section 8.4 items 8 and 17, M11)."""
-        # Rule: BLK-1
-        # Rule: BLK-2
-        stock = self.nodes[STOCK]
+# Rule: BLK-1
+# Rule: BLK-2
         before = [self.nodes[i].yed_getinfo()['rejectedBlocks'] for i in ENFORCING]
         v = self.vault(3)
         bad = self.bad_spend(v, 'owner-noburn')
@@ -772,44 +786,36 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     # ------------------------------------------------------------------ case 6
 
     def case6_fail_open_on_storage_only(self):
-        """BLK-3: the four ``-yellowbacktestfault`` runs accept the rule-breaking block with
-        ``healthy == false``, emit no tag (MINER-3), refuse ``getblocktemplate`` under
-        ``-yellowbackrequirehealthy`` (K24), and recover with ``-reindex-yellowback``.  Then K1:
-        the evaluator is total -- every malformed shape is rejected with ``healthy == true``."""
-        # Rule: BLK-3
-        # Rule: MINER-3
-        # Rule: TPL-3
-        # Rule: BLK-1
-        pool = POOLS[1]                      # node 3
-        for fault in ('storage:check', 'storage:commit', 'storage:undo', 'template'):
+        """BLK-3: the four ``-yellowbacktestfault`` runs.  A storage fault at any of the three
+        hooks marks the index unhealthy, turns enforcement off (so the rule-breaking block is
+        accepted -- fail open), stops the tag (MINER-3) and makes ``getblocktemplate`` refuse
+        under ``-yellowbackrequirehealthy`` (K24); ``-reindex-yellowback`` restores it.  The
+        fourth run is the ``template`` fault, TPL-3.  Then K1: the evaluator is total."""
+# Rule: BLK-3
+# Rule: MINER-3
+# Rule: BLK-1
+        for fault in ('storage:check', 'storage:commit', 'storage:undo'):
             print('  -yellowbacktestfault=%s' % fault)
-            self.restart(pool, ['-yellowbacktestfault=%s' % fault, '-yellowbackrequirehealthy=0'])
-            self.fault_run(pool, fault)
-            self.restart(pool, ['-reindex-yellowback'])
-            wait_yed_healthy(self.nodes[pool])
-            assert_equal(self.nodes[pool].yed_getinfo()['healthy'], True)
-            self.cp('recovered from %s' % fault, ENFORCING)
+            self.storage_fault_run(POOLS[1], fault)
+        self.tpl3_template_fault_disagrees(POOLS[1])
         self.k1_totality()
 
-    def fault_run(self, pool, fault):
+    def storage_fault_run(self, pool, fault):
+        tip = self.nodes[pool].getblockcount()
+        # arm the hook at the exact height it must fire at; the undo hook fires on the first
+        # DisconnectBlock, which the isolated-pool reorg below produces
+        spec = fault if fault.endswith('undo') else '%s:%d' % (fault, tip + 1)
+        self.restart(pool, ['-yellowbacktestfault=%s' % spec, '-yellowbackrequirehealthy=1'])
         node = self.nodes[pool]
-        if fault == 'template':
-            # TPL-3: the filter keeps a block-invalid vault spend, so the node's own
-            # TestBlockValidity fails and getblocktemplate/generate errors rather than
-            # producing a template the network would reject.
-            v = self.vault(4)
-            bad = self.bad_spend(v, 'owner-noburn', expiry_slack=20)
-            self.nodes[STOCK].sendrawtransaction(bad)
-            time.sleep(1)
-            try:
-                node.getblocktemplate()
-            except JSONRPCException as e:
-                print('    getblocktemplate refused: %s' % e.error['message'][:80])
-            return
-        v = self.vault(4)
-        bad = self.bad_spend(v, 'owner-noburn', expiry_slack=20)
-        blockhash, _ = self.stock_block_with(bad)
-        # the faulting node accepts the block and marks itself unhealthy
+        assert_equal(node.yed_getinfo()['healthy'], True)
+        if fault.endswith('undo'):
+            other = POOLS[2]
+            self.disconnect_all(other)
+            self.pools_mine(1, 'pre-undo', group=[i for i in ENFORCING if i != other])
+            self.nodes[other].generate(2)
+            self.connect_all_of(other)
+        else:
+            self.nodes[POOLS[0]].generate(1)
         deadline = time.time() + 30
         while node.yed_getinfo()['healthy'] and time.time() < deadline:
             time.sleep(0.2)
@@ -817,80 +823,117 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_equal(info['healthy'], False)
         assert info['unhealthyReason'], 'no unhealthyReason after %s' % fault
         assert_equal(info['enforcing'], False)
-        sync_blocks([node, self.nodes[STOCK]])
-        assert_equal(node.getbestblockhash(), blockhash)
-        # MINER-3: no tag while unhealthy
-        h = node.generate(1)[0]
-        assert_equal(self.nodes[OBSERVER].yed_gettag(h)['found'] if False else
-                     node.yed_gettag(str(node.getblock(h)['height']))['found'], False)
-        # K24: -yellowbackrequirehealthy refuses templates outright
-        self.restart(pool, ['-yellowbackrequirehealthy=1'])
-        assert_equal(self.nodes[pool].yed_getinfo()['healthy'], False)
-        rpc_error('yellowback-unhealthy', self.nodes[pool].getblocktemplate)
-        # the rest of the network out-mines the branch the faulting node accepted
-        self.pools_outmine_excluding(blockhash, exclude=[pool])
 
-    def pools_outmine_excluding(self, target_hash, exclude, limit=40):
-        pools = [i for i in POOLS if i not in exclude]
-        group = [i for i in ENFORCING if i not in exclude]
-        k = 0
-        while self.nodes[STOCK].getbestblockhash() != self.nodes[pools[0]].getbestblockhash():
-            assert k < limit, 'the pools did not out-mine the stock branch'
-            self.nodes[pools[k % len(pools)]].generate(1)
-            self.cp('out-mine+%d' % (k + 1), group)
-            k += 1
+        # BLK-3 fail open: the rule-breaking block is accepted by the unhealthy node while every
+        # healthy enforcing node rejects it
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn')
+        rejected_before = node.yed_getinfo()['rejectedBlocks']
+        healthy = [i for i in ENFORCING if i != pool]
+        self.cp('before the fail-open block', healthy)
+        blockhash, _ = self.stock_block_with(bad)
+        self.assert_rejected_everywhere(blockhash, nodes=healthy)
+        self.rejected_hashes.append(blockhash)
+        deadline = time.time() + 60
+        while node.getbestblockhash() != blockhash:
+            assert time.time() < deadline, 'the unhealthy node did not accept the block'
             time.sleep(0.3)
-        return k
+        assert_equal(node.yed_getinfo()['rejectedBlocks'], rejected_before)
+
+        # MINER-3: no tag while unhealthy (generate does not go through getblocktemplate)
+        h = node.generate(1)[0]
+        assert_equal(node.yed_gettag(str(node.getblock(h)['height']))['found'], False)
+        # K24: -yellowbackrequirehealthy refuses templates outright
+        rpc_error('yellowback-unhealthy', node.getblocktemplate)
+
+        self.restart(pool, ['-reindex-yellowback'])
+        wait_yed_healthy(self.nodes[pool])
+        assert_equal(self.nodes[pool].yed_getinfo()['healthy'], True)
+        self.pools_outmine_excluding(blockhash, exclude=[pool])
+        deadline = time.time() + 90
+        while self.nodes[pool].getbestblockhash() != self.nodes[POOLS[0]].getbestblockhash():
+            assert time.time() < deadline, 'node %d did not rejoin after the reindex' % pool
+            time.sleep(0.3)
+        self.cp('recovered from %s' % fault, ENFORCING)
+
+    def tpl3_template_fault_disagrees(self, pool):
+        """TPL-3, ``-yellowbacktestfault=template``: the filter keeps the first block-invalid
+        vault spend it would otherwise skip, so the node's own ``TestBlockValidity`` fails and it
+        gets no template at all rather than a block the network would reject.
+
+        The lever is the template policy, not the mempool: MP-1 refuses a block-invalid vault
+        spend on an enforcing node, so the only way such a transaction reaches ``FilterTemplate``
+        is with ``-yellowbacktemplatepolicy=consensus`` on the *mempool* side -- which does not
+        exist -- or with the spend admitted before it became invalid.  The functional half
+        therefore asserts that MP-1 keeps such a transaction out of this node's mempool at
+        all; the byte-level disagreement the fault itself produces is pinned by the unit case
+        ``tpl3_template_fault_keeps_block_invalid_spend`` in
+        ``src/test/yellowback_index_tests.cpp``."""
+        print('  -yellowbacktestfault=template')
+        self.restart(pool, ['-yellowbacktestfault=template'])
+        node = self.nodes[pool]
+        v = self.vault(4)
+        bad = self.bad_spend(v, 'owner-noburn')
+        rpc_error('yellowback-vault-spend', node.sendrawtransaction, bad)   # MP-1 holds the line
+        self.nodes[STOCK].sendrawtransaction(bad)
+        time.sleep(2)
+        bad_txid = ym.tx_from_hex(bad).txid
+        assert bad_txid not in node.getrawmempool(), 'MP-1 let a block-invalid vault spend in'
+        # the template is therefore clean and the fault is never consumed on a live enforcing
+        # node; the node keeps producing templates
+        assert bad_txid not in [t['hash'] for t in node.getblocktemplate()['transactions']]
+        self.restart(pool)
+        self.clear_stock_mempool()
+        self.cp('template fault run done', ENFORCING)
 
     def k1_totality(self):
         """K1: ``EvaluateBlock`` is total.  A vault spend with a ``refHeight`` below
-        ``START_HEIGHT``, one above ``H - 1``, a maximal payload and a scriptSig of random pushes
-        is rejected as invalid on every enforcing node with ``healthy == true``."""
-        # Rule: RED-1
-        # Rule: BLK-1
-        # Rule: BLK-3
+        ``START_HEIGHT``, one above ``H - 1``, a payload of maximal length and a scriptSig of
+        random pushes is a verdict, never a throw and never a fail-open: every enforcing node
+        rejects the block with ``healthy == true``."""
+# Rule: RED-1
+# Rule: BLK-3
         user = self.nodes[USER]
         start = int(user.yed_getinfo()['startHeight'])
         v = self.vault(4)
-        live = self.live_vault(v)
-        collateral = int(live['collateralZat'])
-        shapes = []
-        tip = user.getblockcount()
-        payee = user.yed_getfeepayee(tip - REF_LAG, collateral)
-        addr, fee = payee['default']['payoutAddress'], int(payee['feeZat'])
-        # (a) refHeight below START_HEIGHT
-        shapes.append(('refHeight < START_HEIGHT',
-                       build_vault_spend_raw(user, live, 'owner', [v['token']],
-                                             payload=ym.encode_redeem(max(0, start - 1), 1, []),
-                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
-        # (b) refHeight above H - 1
-        shapes.append(('refHeight > H - 1',
-                       build_vault_spend_raw(user, live, 'owner', [v['token']],
-                                             payload=ym.encode_redeem(tip + 50, 1, []),
-                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
-        # (c) a payload of maximal length
-        big = ym.encode_redeem(tip - REF_LAG, 1, [(9, 1)] * 14)
-        big = big[:80]
-        shapes.append(('maximal payload',
-                       build_vault_spend_raw(user, live, 'owner', [v['token']], payload=big,
-                                             fee=(addr, fee), expiry=tip + 1 + TX_SOON)))
-        # (d) a scriptSig of random pushes (not a vault spend shape at all: consensus-invalid,
-        #     so it is asserted only through the evaluator's totality on a hand-built block)
-        for name, hex_ in shapes:
+
+        def shape(name, ref, assignments=None):
+            live = self.live_vault(v)
+            tip = user.getblockcount()
+            payee = user.yed_getfeepayee(tip - REF_LAG, int(live['collateralZat']))
+            return name, build_vault_spend_raw(
+                user, live, 'owner', [v['token']],
+                payload=ym.encode_redeem(ref, 1, assignments or []),
+                fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
+                ref_height=tip - REF_LAG, expiry=tip + 1 + 20)
+
+        for build in (lambda: shape('refHeight < START_HEIGHT', max(0, start - 1)),
+                      lambda: shape('refHeight > H - 1', user.getblockcount() + 50),
+                      lambda: shape('maximal payload', user.getblockcount() - REF_LAG,
+                                    assignments=[(9, 1)] * 14)):
+            name, hex_ = build()
             print('  K1 %s' % name)
             for i in ENFORCING:
-                assert_equal(self.nodes[i].yed_getinfo()['healthy'], True)
-            try:
-                blockhash, _ = self.stock_block_with(hex_)
-            except JSONRPCException:
-                # the stock node's own mempool refused it (expiry/standardness): mine it raw
-                result, blockhash = mine_block_raw(self.nodes[STOCK], [hex_])
-                assert result is None or result == 'duplicate', result
+                assert_equal((i, self.nodes[i].yed_getinfo()['healthy']), (i, True))
+            blockhash, _ = self.stock_block_with(hex_)
             self.assert_rejected_everywhere(blockhash)
             self.rejected_hashes.append(blockhash)
             for i in ENFORCING:
-                assert_equal(self.nodes[i].yed_getinfo()['healthy'], True)
+                assert_equal((i, self.nodes[i].yed_getinfo()['healthy']), (i, True))
             self.pools_outmine(blockhash)
+            assert_equal(user.yed_getvault(v['txid'])['status'], 'ACTIVE')
+
+        # a scriptSig of random pushes: consensus refuses the P2SH redemption long before the
+        # hook, so the evaluator is exercised through yed_validaterawtransaction, which runs the
+        # same EvaluateBlock over a pseudo-block (K7)
+        print('  K1 random scriptSig pushes')
+        live = self.live_vault(v)
+        tip = user.getblockcount()
+        garbage = build_vault_spend_raw(user, live, 'owner', [], expiry=tip + 1 + 20,
+                                        selector=ym.push(bytes(random.getrandbits(8) for _ in range(20))))
+        for i in ENFORCING:
+            assert_equal((i, self.nodes[i].yed_validaterawtransaction(garbage)['blockValid']), (i, False))
+            assert_equal((i, self.nodes[i].yed_getinfo()['healthy']), (i, True))
 
     # ------------------------------------------------------------------ case 5
 
@@ -898,8 +941,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """V13 (ii)/(iii): node 2 has rejected a block and node 1's branch is longer; restarted
         with ``-yellowbackenforce=0`` node 2 reconsiders, reorgs onto it and reports
         ``rejectedBlocks == 0``; restarted with enforcement on it mines past it."""
-        # Rule: BLK-2
-        # Rule: ACT-5
+# Rule: BLK-2
+# Rule: ACT-5
         stock = self.nodes[STOCK]
         pool = POOLS[0]                       # node 2
         v = self.vault(4)
@@ -941,8 +984,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """BLK-2 clause 3 (L11), three variants: 8 blocks ahead => suppressed; 3 blocks =>
         rejected, converging later through the ``FAILED_CHILD`` path; a restart after more than a
         day offline => IBD (clause 2)."""
-        # Rule: BLK-2
-        # Rule: ACT-7
+# Rule: BLK-2
+# Rule: ACT-7
         self.catchup_variant_suppressed()
         self.catchup_variant_within_the_bound()
         self.catchup_variant_ibd()
@@ -1091,9 +1134,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         The enforcing nodes reorg onto node 1's chain, report ``enforcing == false`` and
         ``valveTripped == true``, carry the P1 warning in ``getinfo.errors`` and not the stock
         fork-warning text, keep every banscore at 0, and lose the signal bit; a restart re-arms."""
-        # Rule: ACT-7
-        # Rule: BLK-2
-        # Rule: MINER-1
+# Rule: ACT-7
+# Rule: BLK-2
+# Rule: MINER-1
         stock = self.nodes[STOCK]
         v = self.vault(4)
         bad = self.bad_spend(v, 'owner-noburn', expiry_slack=60)
@@ -1162,9 +1205,9 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
     def case8_extended_random_activity(self):
         """The nightly run: 200 blocks of random activity with node 1 injecting a rule-breaking
         spend about every 20 blocks and random 1-6 block reorgs."""
-        # Rule: BLK-1
-        # Rule: BLK-2
-        # Rule: ACT-7
+# Rule: BLK-1
+# Rule: BLK-2
+# Rule: ACT-7
         print('=== case8_extended_random_activity (200 blocks)')
         rng = random.Random(20260911)
         user, stock = self.nodes[USER], self.nodes[STOCK]

@@ -1164,4 +1164,40 @@ BOOST_FIXTURE_TEST_CASE(params_change_wipes_on_start, TestChain100Setup)
     }
 }
 
+// Rule: TPL-1
+// Rule: TPL-3
+BOOST_AUTO_TEST_CASE(tpl3_template_fault_keeps_block_invalid_spend)
+{
+    // TPL-1 skips a candidate that would fail BLK-1; -yellowbacktestfault=template keeps exactly
+    // one such candidate instead, so the template disagrees with EvaluateBlock -- which is what
+    // makes CreateNewBlock's own TestBlockValidity fail (TPL-3: a discrepancy is a bug and throws).
+    // A live node cannot reach this state, because MP-1 keeps a block-invalid vault spend out of
+    // the mempool, which is why the fault flag exists.
+    Live live(pathTemp / "yb-tpl3");
+    live.Activate();
+    live.MintActive();
+    const int h = live.Tip() + 1;
+    CMutableTransaction s = live.b->SpendTx(live.vault, h - 2, false);
+    const CTransaction tx(s);
+
+    {   // TPL-1: skipped, and the overlay is not advanced
+        yellowback::TemplateView view = live.index->TemplateView();
+        BOOST_CHECK(!policy::FilterTemplate(view, tx, h));
+    }
+    BOOST_REQUIRE(!live.index->SetTestFault("template").has_value());
+    {   // the fault keeps it
+        yellowback::TemplateView view = live.index->TemplateView();
+        BOOST_CHECK(policy::FilterTemplate(view, tx, h));
+    }
+    {   // one shot only: the next candidate is skipped again
+        yellowback::TemplateView view = live.index->TemplateView();
+        BOOST_CHECK(!policy::FilterTemplate(view, tx, h));
+    }
+    // and the block that template would have produced is exactly what the hook rejects
+    Chain::Node& bad = live.chain.Add(Builder::Block(h, std::nullopt, { s }), live.tip);
+    std::optional<std::string> verdict = Connect(*live.index, bad, true);
+    BOOST_REQUIRE(verdict.has_value());
+    BOOST_CHECK(verdict->find("vault-spend") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
