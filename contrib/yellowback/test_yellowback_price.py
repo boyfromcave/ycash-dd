@@ -4,27 +4,26 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-Unit tests for the coordinator's price-source layer (plan §5 step 1, D22).
+Unit tests for the price-source layer and the coinbase-tag codec (plan §5, §3.2).
 
 No node, no network: every HTTP fetch is replaced by a table of canned
 replies. The CoinGecko and Nonkyc fixtures are trimmed copies of real
 replies captured on 2026-09-05, the SafeTrade (Peatio) fixture likewise.
 
-Run:  python3 -m unittest contrib/yellowback/test_yellowback_fed.py
+Run:  python3 -m unittest contrib/yellowback/test_yellowback_price.py
 """
 
 import copy
 import importlib.util
 import os
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("yellowback_fed", os.path.join(HERE, "yellowback_fed.py"))
-fed = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(fed)
+_spec = importlib.util.spec_from_file_location("yellowback_price", os.path.join(HERE, "yellowback_price.py"))
+yp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(yp)
 
-MICRO = fed.MICRO
+MICRO = yp.MICRO
 NOW = 1_788_673_100.0
 
 CG_SIMPLE = {"ycash": {"usd": 0.432007, "btc": 5.41e-06, "last_updated_at": 1788673030}}
@@ -77,6 +76,18 @@ BTC_TABLE = {
     "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_BTC": NONKYC_BTC,
 }
 
+THREE = [
+    {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
+    {"name": "safetrade", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "max_age": 3600},
+    {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 500},
+]
+TABLE = {
+    "https://api.coingecko.com/api/v3/simple/price?ids=ycash": CG_SIMPLE,
+    "https://api.coingecko.com/api/v3/coins/ycash/tickers": CG_TICKERS,
+    "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT": NONKYC,
+}
+NONKYC_URL = "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"
+
 
 class FakeHTTP:
     """Maps URL -> JSON object or bytes or Exception."""
@@ -93,12 +104,12 @@ class FakeHTTP:
                     raise reply
                 if isinstance(reply, bytes):
                     return reply
-                return fed.json.dumps(reply).encode()
+                return yp.json.dumps(reply).encode()
         raise OSError("no fixture for %s" % url)
 
 
 def make_feed(sources, table, btc_sources=None, **settings):
-    feed = fed.PriceFeed(sources, None, dict(fed.FEED_DEFAULTS, **settings), btc_sources)
+    feed = yp.PriceFeed(sources, None, dict(yp.FEED_DEFAULTS, **settings), btc_sources)
     http = FakeHTTP(table)
     feed._http_get = http
     feed.http = http
@@ -107,74 +118,74 @@ def make_feed(sources, table, btc_sources=None, **settings):
 
 class ExtractTests(unittest.TestCase):
     def test_dotted_and_index(self):
-        self.assertEqual(fed.extract(CG_SIMPLE, "ycash.usd"), 0.432007)
-        self.assertEqual(fed.extract(CG_TICKERS, "tickers.1.target"), "USDT")
+        self.assertEqual(yp.extract(CG_SIMPLE, "ycash.usd"), 0.432007)
+        self.assertEqual(yp.extract(CG_TICKERS, "tickers.1.target"), "USDT")
 
     def test_selector_is_order_independent(self):
         path = "tickers.[market.identifier=nonkyc_io,target=USDT].converted_last.usd"
-        self.assertEqual(fed.extract(CG_TICKERS, path), 0.437398)
+        self.assertEqual(yp.extract(CG_TICKERS, path), 0.437398)
         reordered = copy.deepcopy(CG_TICKERS)
         reordered["tickers"].reverse()
-        self.assertEqual(fed.extract(reordered, path), 0.437398)
-        # the BTC pair of the same venue is a different element
-        self.assertEqual(fed.extract(reordered, "tickers.[market.identifier=nonkyc_io,target=BTC].last"), 5.356e-06)
+        self.assertEqual(yp.extract(reordered, path), 0.437398)
+        self.assertEqual(yp.extract(reordered, "tickers.[market.identifier=nonkyc_io,target=BTC].last"), 5.356e-06)
 
     def test_shape_errors(self):
-        with self.assertRaises(fed.ShapeError):
-            fed.extract(CG_SIMPLE, "ycash.eur")
-        with self.assertRaises(fed.ShapeError):
-            fed.extract(CG_TICKERS, "tickers.[market.identifier=binance,target=USDT].last")
-        with self.assertRaises(fed.ShapeError):
-            fed.extract(CG_TICKERS, "tickers.[market.identifier=nonkyc_io].converted_last.usd.deeper")
-        with self.assertRaises(fed.ShapeError):
-            fed.extract_number(CG_TICKERS, "tickers.0.market.name")
+        with self.assertRaises(yp.ShapeError):
+            yp.extract(CG_SIMPLE, "ycash.eur")
+        with self.assertRaises(yp.ShapeError):
+            yp.extract(CG_TICKERS, "tickers.[market.identifier=binance,target=USDT].last")
+        with self.assertRaises(yp.ShapeError):
+            yp.extract(CG_TICKERS, "tickers.[market.identifier=nonkyc_io].converted_last.usd.deeper")
+        with self.assertRaises(yp.ShapeError):
+            yp.extract_number(CG_TICKERS, "tickers.0.market.name")
 
     def test_timestamps(self):
-        self.assertEqual(fed.extract_timestamp(CG_SIMPLE, "ycash.last_updated_at", "s"), 1788673030)
-        self.assertAlmostEqual(fed.extract_timestamp(NONKYC, "lastTradeAt", "ms"), 1788673068.806, places=3)
-        iso_plus = fed.extract_timestamp(CG_TICKERS, "tickers.0.last_traded_at", "iso")
-        iso_z = fed.extract_timestamp(CG_TICKERS, "tickers.1.last_traded_at", "iso")
+        self.assertEqual(yp.extract_timestamp(CG_SIMPLE, "ycash.last_updated_at", "s"), 1788673030)
+        self.assertAlmostEqual(yp.extract_timestamp(NONKYC, "lastTradeAt", "ms"), 1788673068.806, places=3)
+        iso_plus = yp.extract_timestamp(CG_TICKERS, "tickers.0.last_traded_at", "iso")
+        iso_z = yp.extract_timestamp(CG_TICKERS, "tickers.1.last_traded_at", "iso")
         self.assertEqual(iso_z - iso_plus, 84)
-        self.assertAlmostEqual(fed.extract_timestamp(COINBASE, "time", "iso") % 1, 0.841478, places=5)
+        self.assertAlmostEqual(yp.extract_timestamp(COINBASE, "time", "iso") % 1, 0.841478, places=5)
 
     def test_spread(self):
         sel = "tickers.[market.identifier=safe_trade,target=USDT]"
-        src = fed.normalize_source({"name": "x", "url": "u", "path": "p", "spread_path": sel + ".bid_ask_spread_percentage"})
-        self.assertAlmostEqual(fed.spread_bps(CG_TICKERS, src), 1489.18, places=1)
-        src = fed.normalize_source({"name": "x", "url": "u", "path": "p", "bid_path": "bestBidNumber", "ask_path": "bestAskNumber"})
-        self.assertAlmostEqual(fed.spread_bps(NONKYC, src), 92.2, places=0)
-        src = fed.normalize_source({"name": "x", "url": "u", "path": "p"})
-        self.assertIsNone(fed.spread_bps(NONKYC, src))
+        src = yp.normalize_source({"name": "x", "url": "u", "path": "p", "spread_path": sel + ".bid_ask_spread_percentage"})
+        self.assertAlmostEqual(yp.spread_bps(CG_TICKERS, src), 1489.18, places=1)
+        src = yp.normalize_source({"name": "x", "url": "u", "path": "p", "bid_path": "bestBidNumber", "ask_path": "bestAskNumber"})
+        self.assertAlmostEqual(yp.spread_bps(NONKYC, src), 92.2, places=0)
+        src = yp.normalize_source({"name": "x", "url": "u", "path": "p"})
+        self.assertIsNone(yp.spread_bps(NONKYC, src))
 
 
 class ConfigTests(unittest.TestCase):
     def test_presets_expand_and_override(self):
-        s = fed.normalize_source({"name": "cg", "kind": "coingecko_simple"})
+        s = yp.normalize_source({"name": "cg", "kind": "coingecko_simple"})
         self.assertIn("ids=ycash&vs_currencies=usd", s["url"])
         self.assertEqual((s["path"], s["timestamp_path"], s["venue"], s["quote"]), ("ycash.usd", "ycash.last_updated_at", "coingecko", "USD"))
-        s = fed.normalize_source({"name": "cg-btc", "kind": "coingecko_simple", "vs": "btc"})
+        s = yp.normalize_source({"name": "cg-btc", "kind": "coingecko_simple", "vs": "btc"})
         self.assertEqual((s["path"], s["quote"]), ("ycash.btc", "BTC"))
-        s = fed.normalize_source({"name": "st", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "api_key": "k"})
+        s = yp.normalize_source({"name": "st", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "api_key": "k"})
         self.assertEqual(s["path"], "tickers.[market.identifier=safe_trade,target=USDT].converted_last.usd")
         self.assertEqual(s["venue"], "safe_trade")
         self.assertEqual(s["headers"], {"x-cg-demo-api-key": "k"})
         self.assertEqual(len(s["reject_paths"]), 2)
-        s = fed.normalize_source({"name": "st-btc", "kind": "coingecko_ticker", "market": "safe_trade", "target": "BTC"})
+        self.assertEqual(s["volume_path"], "tickers.[market.identifier=safe_trade,target=USDT].volume")
+        s = yp.normalize_source({"name": "st-btc", "kind": "coingecko_ticker", "market": "safe_trade", "target": "BTC"})
         self.assertEqual((s["path"], s["quote"]), ("tickers.[market.identifier=safe_trade,target=BTC].last", "BTC"))
-        s = fed.normalize_source({"name": "kr", "kind": "kraken_ticker"})
+        s = yp.normalize_source({"name": "kr", "kind": "kraken_ticker"})
         self.assertEqual((s["url"], s["path"], s["bid_path"], s["venue"]), ("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", "result.XXBTZUSD.c.0", "result.XXBTZUSD.b.0", "kraken"))
-        s = fed.normalize_source({"name": "cb", "kind": "coinbase_ticker"})
+        s = yp.normalize_source({"name": "cb", "kind": "coinbase_ticker"})
         self.assertEqual((s["path"], s["timestamp_path"], s["timestamp_unit"]), ("price", "time", "iso"))
         with self.assertRaises(ValueError):                       # a BTC/USD reference must be USD-quoted
-            fed.normalize_btc_sources([{"name": "x", "kind": "nonkyc_market", "symbol": "YEC_BTC"}])
-        s = fed.normalize_source({"name": "nk", "kind": "nonkyc_market", "symbol": "YEC_BTC", "path": "bestBidNumber"})
-        self.assertEqual((s["quote"], s["path"], s["timestamp_unit"]), ("BTC", "bestBidNumber", "ms"))
-        s = fed.normalize_source({"name": "st", "kind": "peatio_ticker", "base_url": "https://mirror.example"})
+            yp.normalize_btc_sources([{"name": "x", "kind": "nonkyc_market", "symbol": "YEC_BTC"}])
+        s = yp.normalize_source({"name": "nk", "kind": "nonkyc_market", "symbol": "YEC_BTC", "path": "bestBidNumber"})
+        self.assertEqual((s["quote"], s["path"], s["timestamp_unit"], s["volume_path"]), ("BTC", "bestBidNumber", "ms", "volumeNumber"))
+        s = yp.normalize_source({"name": "st", "kind": "peatio_ticker", "base_url": "https://mirror.example"})
         self.assertEqual(s["url"], "https://mirror.example/api/v2/trade/public/tickers/yecusdt")
         self.assertEqual((s["path"], s["quote"], s.get("timestamp_path")), ("last", "USD", None))
         with self.assertRaises(ValueError):                       # no timestamp in this API: max_age is refused
-            fed.normalize_source({"name": "st", "kind": "peatio_ticker", "max_age": 60})
-        s = fed.normalize_source({"name": "g", "url": "https://x", "path": "a.b", "venue": "v"})
+            yp.normalize_source({"name": "st", "kind": "peatio_ticker", "max_age": 60})
+        s = yp.normalize_source({"name": "g", "url": "https://x", "path": "a.b", "venue": "v"})
         self.assertEqual((s["kind"], s["venue"], s["scale"]), ("generic", "v", 1))
 
     def test_rejects(self):
@@ -186,40 +197,54 @@ class ConfigTests(unittest.TestCase):
             {"name": "a", "url": "u", "path": "p", "max_age": 60},             # needs timestamp_path
             {"name": "a", "url": "u", "path": "p", "max_spread_bps": 10},      # needs spread or bid/ask
             {"name": "a", "url": "u", "path": "p", "typo": 1},
+            {"name": "a", "url": "u", "path": "p", "mask_bit": 16},            # registry is 16 bits
+            {"name": "a", "url": "u", "path": "p", "mask_bit": "3"},
             {"url": "u", "path": "p"},                                         # no name
         ]
         for b in bad:
             with self.assertRaises(ValueError, msg=repr(b)):
-                fed.normalize_source(b)
+                yp.normalize_source(b)
         with self.assertRaises(ValueError):
-            fed.normalize_sources([{"name": "a", "url": "u", "path": "p"}, {"name": "a", "url": "v", "path": "p"}])
+            yp.normalize_sources([{"name": "a", "url": "u", "path": "p"}, {"name": "a", "url": "v", "path": "p"}])
 
     def test_feed_settings(self):
-        st = fed.feed_settings({"min_sources": "2", "poll_seconds": 5})
-        self.assertEqual((st["min_sources"], st["poll_seconds"], st["min_venues"]), (2, 5, 2))
+        st = yp.feed_settings({"min_sources": "2", "poll_seconds": 5})
+        self.assertEqual((st["min_sources"], st["poll_seconds"], st["min_venues"], st["twap_seconds"]), (2, 5, 2, 900))
         with self.assertRaises(ValueError):
-            fed.feed_settings({"min_venues": 0})
+            yp.feed_settings({"min_venues": 0})
+        with self.assertRaises(ValueError):
+            yp.feed_settings({"twap_seconds": 0})
 
 
-THREE = [
-    {"name": "coingecko", "kind": "coingecko_simple", "max_age": 900},
-    {"name": "safetrade", "kind": "coingecko_ticker", "market": "safe_trade", "target": "USDT", "max_age": 3600},
-    {"name": "nonkyc", "kind": "nonkyc_market", "max_age": 3600, "max_spread_bps": 500},
-]
-TABLE = {
-    "https://api.coingecko.com/api/v3/simple/price?ids=ycash": CG_SIMPLE,
-    "https://api.coingecko.com/api/v3/coins/ycash/tickers": CG_TICKERS,
-    "https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT": NONKYC,
-}
+class MaskTests(unittest.TestCase):
+    # Rule: §5 source-mask bit registry
+    def test_registry(self):
+        self.assertEqual(yp.MASK_BITS, {"safe_trade": 0, "coingecko": 1, "coinmarketcap": 2, "nonkyc_io": 3})
+        srcs = yp.normalize_sources(THREE)
+        self.assertEqual([yp.mask_bit_for(s) for s in srcs], [1, 0, 3])
+        self.assertEqual(yp.source_mask(srcs), 0b1011)
+
+    def test_override_and_unregistered(self):
+        g = yp.normalize_source({"name": "g", "url": "u", "path": "p"})
+        self.assertIsNone(yp.mask_bit_for(g))                     # an unknown venue sets no bit
+        self.assertEqual(yp.source_mask([g]), 0)
+        g = yp.normalize_source({"name": "g", "url": "u", "path": "p", "mask_bit": 7})
+        self.assertEqual(yp.source_mask([g]), 1 << 7)
+        nk = yp.normalize_source({"name": "nk", "kind": "nonkyc_market", "mask_bit": 5})   # override beats the preset
+        self.assertEqual(yp.mask_bit_for(nk), 5)
+        # the same venue read twice (CoinGecko's Nonkyc ticker and Nonkyc's API) sets one bit
+        both = yp.normalize_sources([{"name": "a", "kind": "nonkyc_market"},
+                                     {"name": "b", "kind": "coingecko_ticker", "market": "nonkyc_io"}])
+        self.assertEqual(yp.source_mask(both), 1 << 3)
 
 
 class FeedTests(unittest.TestCase):
     def setUp(self):
-        self._time = fed.time.time
-        fed.time.time = lambda: NOW
+        self._time = yp.time.time
+        yp.time.time = lambda: NOW
 
     def tearDown(self):
-        fed.time.time = self._time
+        yp.time.time = self._time
 
     def test_three_sources_two_venues(self):
         feed = make_feed(THREE, TABLE)
@@ -229,6 +254,8 @@ class FeedTests(unittest.TestCase):
         self.assertEqual((r["live_sources"], r["live_venues"]), (3, 3))
         expected = sorted([432007, 429996, 442600])[1]
         self.assertEqual(feed.median_micro_usd(), expected)
+        self.assertEqual(feed.aggregate(), (expected, 0b1011, ["coingecko", "safetrade", "nonkyc"]))
+        self.assertEqual((r["median_micro_usd"], r["source_mask"]), (expected, 0b1011))
         self.assertAlmostEqual(r["sources"]["nonkyc"]["last_spread_bps"], 92.2, places=0)
         self.assertEqual(r["sources"]["coingecko"]["last_age_seconds"], NOW - 1788673030)
 
@@ -253,7 +280,7 @@ class FeedTests(unittest.TestCase):
         table = dict(TABLE)
         old = copy.deepcopy(NONKYC)
         old["lastTradeAt"] = int((NOW - 2 * 3600) * 1000)
-        table["https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"] = old
+        table[NONKYC_URL] = old
         feed = make_feed(THREE, table)
         feed.poll(force=True)
         r = feed.report()
@@ -263,6 +290,7 @@ class FeedTests(unittest.TestCase):
         feed2 = make_feed(THREE, table, min_sources=2)
         feed2.poll(force=True)
         self.assertEqual(feed2.median_micro_usd(), (432007 + 429996) // 2 + ((432007 + 429996) % 2))
+        self.assertEqual(feed2.aggregate()[1], 0b0011)           # the mask names only the contributors
 
     def test_spread_guard(self):
         srcs = copy.deepcopy(THREE)
@@ -284,7 +312,7 @@ class FeedTests(unittest.TestCase):
 
     def test_shape_change_is_classified(self):
         table = dict(TABLE)
-        table["https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"] = {"symbol": "YEC/USDT", "last": "0.44"}
+        table[NONKYC_URL] = {"symbol": "YEC/USDT", "last": "0.44"}
         table["https://api.coingecko.com/api/v3/simple/price?ids=ycash"] = b"<!DOCTYPE html><title>Attention Required! | Cloudflare</title>"
         feed = make_feed(THREE, table)
         feed.poll(force=True)
@@ -297,7 +325,7 @@ class FeedTests(unittest.TestCase):
 
     def test_fetch_failure_and_recovery(self):
         table = dict(TABLE)
-        table["https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"] = OSError("connection refused")
+        table[NONKYC_URL] = OSError("connection refused")
         feed = make_feed(THREE, table)
         feed.poll(force=True)
         self.assertEqual(feed.report()["sources"]["nonkyc"]["state"], "fetch")
@@ -307,7 +335,6 @@ class FeedTests(unittest.TestCase):
         self.assertEqual((h["state"], h["ok"], h["failed"]), ("ok", 1, 1))
 
     def test_min_venues(self):
-        # three sources that all name the same venue: enough sources, not enough venues
         srcs = [dict(s, venue="one") for s in THREE]
         feed = make_feed(srcs, TABLE)
         feed.poll(force=True)
@@ -321,12 +348,12 @@ class FeedTests(unittest.TestCase):
         table = dict(TABLE)
         wild = copy.deepcopy(NONKYC)
         wild["lastPriceNumber"] = 0.60                              # +39 % against the others
-        table["https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"] = wild
+        table[NONKYC_URL] = wild
         srcs = copy.deepcopy(THREE)
         srcs[2].pop("max_spread_bps")
         feed = make_feed(srcs, table, min_sources=2)
         feed.poll(force=True)
-        self.assertEqual(feed.median_micro_usd(), (432007 + 429996 + 1) // 2)
+        self.assertEqual(feed.aggregate(), ((432007 + 429996 + 1) // 2, 0b0011, ["coingecko", "safetrade"]))
 
     def test_safetrade_direct(self):
         srcs = THREE + [{"name": "safetrade-direct", "kind": "peatio_ticker", "market": "yecusdt"}]
@@ -384,35 +411,163 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(feed.http.calls), 3)
         self.assertEqual(feed.report()["btc_usd"]["live"], 0)
 
+    def _nonkyc_at(self, feed, t, price, volume=None):
+        later = copy.deepcopy(NONKYC)
+        later["lastPriceNumber"] = price
+        later["lastTradeAt"] = int(t * 1000)
+        if volume is not None:
+            later["volumeNumber"] = volume
+        feed.http.table = dict(TABLE, **{NONKYC_URL: later})
+        yp.time.time = lambda: t
+        feed.poll(force=True)
+
     def test_twap_and_silence(self):
         feed = make_feed(THREE, TABLE, poll_seconds=0)
         feed.poll(force=True)
-        fed.time.time = lambda: NOW + 100
-        table = dict(TABLE)
-        later = copy.deepcopy(NONKYC)
-        later["lastPriceNumber"] = 0.4626
-        later["lastTradeAt"] = int((NOW + 100) * 1000)
-        feed.http.table = table
-        table["https://api.nonkyc.io/api/v2/market/getbysymbol/YEC_USDT"] = later
-        feed.poll(force=True)
+        self._nonkyc_at(feed, NOW + 100, 0.4626)                         # no volume in the fixture: time-weighted
         self.assertEqual(feed.report()["sources"]["nonkyc"]["twap_micro_usd"], (442600 + 462600) // 2)
-        fed.time.time = lambda: NOW + 100 + fed.SOURCE_SILENCE_SECONDS + 1
+        yp.time.time = lambda: NOW + 100 + yp.SOURCE_SILENCE_SECONDS + 1
         self.assertEqual(feed.report()["live_sources"], 0)
 
-    def test_mock_mode_unchanged(self):
+    def test_window_is_fifteen_minutes(self):
+        feed = make_feed(THREE, TABLE, poll_seconds=0)
+        feed.poll(force=True)
+        self._nonkyc_at(feed, NOW + 800, 0.4626)
+        self.assertEqual(feed.report()["sources"]["nonkyc"]["twap_micro_usd"], (442600 + 462600) // 2)
+        self._nonkyc_at(feed, NOW + 901, 0.4626)                         # the first sample has left the window
+        self.assertEqual(feed.report()["sources"]["nonkyc"]["twap_micro_usd"], 462600)
+
+    def test_vwap_where_volume_is_reported(self):
+        # Rule: §10.1 volume-weighted where the venue reports trade volume
+        feed = make_feed(THREE, TABLE, poll_seconds=0)
+        self._nonkyc_at(feed, NOW, 0.40, volume=1000.0)                    # first sample: no delta yet
+        self._nonkyc_at(feed, NOW + 30, 0.50, volume=1001.0)               # 1 YEC traded at 0.50
+        self._nonkyc_at(feed, NOW + 60, 0.40, volume=1004.0)               # 3 YEC traded at 0.40
+        self.assertEqual(feed.report()["sources"]["nonkyc"]["twap_micro_usd"], int(round((500000 * 1 + 400000 * 3) / 4)))
+        # a non-positive delta (24 h roll-off) turns the whole window time-weighted, never a wild weight
+        self._nonkyc_at(feed, NOW + 90, 0.60, volume=900.0)
+        self.assertEqual(feed.report()["sources"]["nonkyc"]["twap_micro_usd"], (400000 + 500000 + 400000 + 600000) // 4)
+
+    def test_mock_mode(self):
         path = os.path.join(HERE, ".test-mock-price")
         try:
             with open(path, "w") as f:
                 f.write("50")
-            feed = fed.PriceFeed([], path, dict(fed.FEED_DEFAULTS))
+            feed = yp.PriceFeed([], path, dict(yp.FEED_DEFAULTS))
             feed.poll()
-            self.assertEqual(feed.median_micro_usd(), 50 * MICRO)
+            self.assertEqual(feed.aggregate(), (50 * MICRO, 0, ["mock"]))
             with open(path, "w") as f:
                 f.write("75")
             feed.poll()
             self.assertEqual(feed.median_micro_usd(), 75 * MICRO)
+            with open(path, "w") as f:
+                f.write("not a price")
+            feed.poll()
+            self.assertIsNone(feed.aggregate())                            # unreadable mock = failed aggregate
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Coinbase tag codec (§3.2)
+
+KEY = bytes(range(20))
+
+
+def tag(price=432007, mask=0b1011, signal=True, version=1, key=KEY):
+    return yp.encode_tag_push(price, mask, key, signal=signal, version=version)
+
+
+class TagTests(unittest.TestCase):
+    def test_height_push_matches_cscript(self):
+        # Rule: TAG-1
+        self.assertEqual(yp.height_push(0), b"\x00")
+        self.assertEqual(yp.height_push(1), b"\x51")
+        self.assertEqual(yp.height_push(16), b"\x60")
+        self.assertEqual(yp.height_push(17), b"\x01\x11")
+        self.assertEqual(yp.height_push(128), b"\x02\x80\x00")             # sign bit needs a padding byte
+        self.assertEqual(yp.height_push(600000), b"\x03\xc0\x27\x09")
+        self.assertEqual(yp.height_push(1_000_000), b"\x03\x40\x42\x0f")
+        for h in (0, 1, 16, 17, 128, 600000):
+            self.assertEqual(yp.skip_height_push(yp.height_push(h) + b"xyz"), len(yp.height_push(h)))
+        self.assertIsNone(yp.skip_height_push(b""))
+        self.assertIsNone(yp.skip_height_push(b"\x05\x01"))                # truncated push
+        self.assertIsNone(yp.skip_height_push(b"\xac"))                    # not a push
+
+    def test_tag_right_after_height(self):
+        # Rule: TAG-1
+        ss = yp.height_push(600000) + tag()
+        t = yp.decode_coinbase_tag(ss)
+        self.assertEqual((t["kind"], t["priceMicroUsd"], t["sourceMask"], t["signal"], t["payoutKeyHex"], t["offset"]),
+                         ("quote", 432007, 0b1011, True, KEY.hex(), 4))
+        self.assertEqual(len(ss), 4 + 37)
+
+    def test_tag_after_extranonce_and_text(self):
+        # Rule: TAG-1 the scan is byte-level, never a script parse (V4)
+        ss = yp.height_push(700001) + b"\x08" + b"\xde\xad\xbe\xef\x00\x00\x00\x01" + tag() + b"/pool text/"
+        t = yp.decode_coinbase_tag(ss)
+        self.assertEqual((t["kind"], t["offset"]), ("quote", 4 + 9))
+        # raw extranonce bytes that are not a valid push do not stop the scan
+        ss = yp.height_push(700001) + b"\x4c\xff\x00" + tag()
+        self.assertEqual(yp.decode_coinbase_tag(ss)["kind"], "quote")
+
+    def test_signal_only(self):
+        # Rule: TAG-3
+        t = yp.decode_coinbase_tag(yp.height_push(5) + tag(price=0))
+        self.assertEqual((t["kind"], t["priceMicroUsd"], t["signal"]), ("signal", 0, True))
+        t = yp.decode_coinbase_tag(yp.height_push(5) + tag(price=0, signal=False))
+        self.assertEqual((t["kind"], t["signal"]), ("signal", False))
+
+    def test_invalid_is_no_tag(self):
+        # Rule: TAG-2
+        h = yp.height_push(300)
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag(version=2)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag(version=0)))
+        ss = bytearray(h + tag())
+        ss[len(h) + 6] = 0x03                                              # flags bit 1 set (reserved)
+        self.assertIsNone(yp.decode_coinbase_tag(bytes(ss)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag(price=yp.PRICE_MIN - 1)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag(price=yp.PRICE_MAX + 1)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag(price=-5)))
+        self.assertIsNotNone(yp.decode_coinbase_tag(h + tag(price=yp.PRICE_MIN)))
+        self.assertIsNotNone(yp.decode_coinbase_tag(h + tag(price=yp.PRICE_MAX)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag()[:-1]))         # fewer than 32 bytes follow
+        self.assertIsNone(yp.decode_coinbase_tag(h))                       # no occurrence
+        self.assertIsNone(yp.decode_coinbase_tag(b""))                     # no height push at all
+
+    def test_five_byte_pattern_rule(self):
+        # Rule: P10 the magic without its push opcode is not a tag
+        h = yp.height_push(300)
+        self.assertIsNone(yp.decode_coinbase_tag(h + tag()[1:]))           # "YED!" without 0x24
+        self.assertIsNone(yp.decode_coinbase_tag(h + b"\x25" + tag()[1:])) # a 37-byte push is not the pattern
+        # the pattern inside the height push itself does not count: only bytes after the prefix are scanned
+        ss = b"\x05" + b"\x24YED!" + tag()
+        self.assertEqual(yp.decode_coinbase_tag(ss)["offset"], 6)
+        ss = b"\x05" + b"\x24YED!" + b"\x00" * 31
+        self.assertIsNone(yp.decode_coinbase_tag(ss))
+
+    def test_first_occurrence_decides(self):
+        # Rule: TAG-5
+        h = yp.height_push(300)
+        bad_then_good = h + tag(version=9) + tag()
+        self.assertIsNone(yp.decode_coinbase_tag(bad_then_good))
+        good_then_other = h + tag(price=1000) + tag(price=2000)
+        self.assertEqual(yp.decode_coinbase_tag(good_then_other)["priceMicroUsd"], 1000)
+        # a first occurrence whose 32-byte body fails TAG-2 (here: the price bytes are the second tag's
+        # pattern, out of range) is no tag, and the scan never continues to the valid second one (M2)
+        garbage_then_good = h + b"\x24YED!" + b"\x01\x01" + tag()
+        self.assertIsNone(yp.decode_coinbase_tag(garbage_then_good))
+
+    def test_encode_roundtrip_layout(self):
+        body = yp.encode_tag(1_000_000, 0x8001, KEY, signal=False)
+        self.assertEqual(len(body), 36)
+        self.assertEqual(body[:4], b"YED!")
+        self.assertEqual(body[4], 1)
+        self.assertEqual(body[5], 0)
+        self.assertEqual(int.from_bytes(body[6:14], "little", signed=True), 1_000_000)
+        self.assertEqual(int.from_bytes(body[14:16], "little"), 0x8001)
+        self.assertEqual(body[16:], KEY)
+        self.assertEqual(yp.decode_tag_body(body[4:])["sourceMask"], 0x8001)
 
 
 if __name__ == "__main__":

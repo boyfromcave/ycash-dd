@@ -214,7 +214,7 @@ jobs:
       - name: Price-feed unit tests
         # The feed half of the prototype's coordinator (sources, presets, guards, TWAP, median);
         # Phase 7 replaces the file with test_yellowback_price.py / test_yellowback_quote.py.
-        run: python3 -m unittest contrib/yellowback/test_yellowback_fed.py
+        run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: pyflakes (functional tests and the shared helper)
         run: python3 -m pyflakes qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py
       - name: pyflakes (contrib; blocking from Phase 7 when yellowback_fed.py is replaced)

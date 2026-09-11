@@ -245,7 +245,7 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
   framework and `main.cpp`/`net.cpp`/`miner.cpp`/`rpc/mining.cpp`/`chainparams.cpp` are
   byte-identical to `ycash-legacy`, and the failure reproduces with the one framework fix of this
   phase reverted, so they are the pin's, not the fork's.
-- `python3 -m unittest contrib/yellowback/test_yellowback_fed.py`: 24 tests OK. `pyflakes` over
+- `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py`: 52 tests OK (Phase 7 replaced `test_yellowback_fed.py`). `pyflakes` over
   `qa/rpc-tests/yellowback_*.py` and `yellowback_util.py`: clean.
 - Consensus set (`src/consensus`, `src/script`, `src/primitives`, `src/pow`, `chainparams.cpp`,
   `wallet/wallet.{h,cpp}`, `txdb.*`, `configure.ac`): zero lines changed vs `ycash-legacy`;
