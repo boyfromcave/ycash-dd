@@ -1264,8 +1264,15 @@ BOOST_AUTO_TEST_CASE(rpc_z_sendmany_internals)
         CTxOut out1 = tx.vout[0];
         BOOST_CHECK_EQUAL(out1.nValue, amount);
 
+        // A CReserveKey caches the key it reserved (CReserveKey::GetReservedKey
+        // only reserves when nIndex == -1), so reusing keyChange would yield the
+        // same change address by construction. The production callers in
+        // asyncrpcoperation_sendmany.cpp construct one CReserveKey per operation
+        // and add at most one change output to it; two change outputs mean two
+        // reserve keys, which is what the check below is about.
+        CReserveKey keyChange2(pwalletMain);
         amount = 111100000;
-        proxy.add_taddr_change_output_to_tx(keyChange, amount);
+        proxy.add_taddr_change_output_to_tx(keyChange2, amount);
         tx = proxy.getTx();
         BOOST_CHECK(tx.vout.size() == 2);
         CTxOut out2 = tx.vout[1];
