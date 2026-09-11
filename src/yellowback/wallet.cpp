@@ -182,11 +182,13 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
     // A payload that assigns cents to an output reassigns the YED; a REDEEM's burn is its own
     // rule (RED-2) and its change assignment is an assignment like any other. No payload at all,
     // or a payload with no assignments, means the YED simply disappears.
+    // A REDEEM payload (a vault spend: a redemption, a claim) is overlay business and is judged
+    // by MP-1, never here — its burn is the rule, not an accident. A TRANSFER payload reassigns
+    // the YED unless it assigns nothing at all. Everything else (no payload, an unreadable one, a
+    // MINT payload) leaves the spent cents with nowhere to go: the state machine burns them.
     std::optional<FoundPayload> fp = FindPayload(tx);
-    const bool reassigns = fp.has_value() &&
-                           (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM) &&
-                           !fp->payload.assignments.empty();
-    if (reassigns) return false;
+    if (fp.has_value() && fp->payload.type == PayloadType::REDEEM) return false;
+    if (fp.has_value() && fp->payload.type == PayloadType::TRANSFER && !fp->payload.assignments.empty()) return false;
 
     int64_t cents = 0;
     std::string outpoints;

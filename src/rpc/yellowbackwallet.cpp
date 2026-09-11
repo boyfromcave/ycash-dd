@@ -263,7 +263,9 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
-    o.pushKV("burnedCents", built.burnCents);
+    // H4: burnedCents stays the vault's debt; the sub-dollar remainder is reported beside it
+    // (the transaction burns burnedCents + extraBurnCents, which RED-2 allows: burn >= debt).
+    o.pushKV("burnedCents", built.burnCents - built.extraBurnCents);
     o.pushKV("feeZat", built.feeZat);
     o.pushKV("payee", PayeeToJSON(built.payee));
     o.pushKV("collateralOut", built.collateralOut);

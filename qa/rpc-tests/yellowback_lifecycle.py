@@ -176,32 +176,41 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         self.mine(POOLS[0])
         assert_equal(observer.yed_getbalance()['confirmedCents'], 10100)
         back = observer.yed_send(user.yed_getnewaddress(), 300)
-        assert_equal(back['changeCents'], 9800)   # smallest-first: 100 + 10000 in
+        # H1 (Phase 8): the floor-aware selector prefers one input with valid change to
+        # smallest-first accumulation, so the 100-cent coin stays put and the 10000 is spent.
+        assert_equal(back['changeCents'], 9700)
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(user.yed_getbalance()['confirmedCents'], 30900)
         assert_equal(sorted(c['cents'] for c in user.yed_listunspent()), [300, 9900, 10000, 10700])
 
 # Rule: XFER-1
-        print('change_floor: 101.50 YED from the smallest-first prefix 3 + 99 leaves 50 cents of change')
-        assert_rpc_error('change-floor', user.yed_send, observer.yed_getnewaddress(), 10150)
+        print('change_floor: 50 cents under the whole balance is unworkable at any selection (H2)')
+        assert_rpc_error('change-floor', user.yed_send, observer.yed_getnewaddress(),
+                         user.yed_getbalance()['confirmedCents'] - 50)
         assert_rpc_error('not-a-yellowback-address', user.yed_send, observer.getnewaddress(), 100)
         assert_rpc_error('insufficient-yed', observer.yed_send, user.yed_getnewaddress(), 20000)
         assert_equal(observer.yed_validateaddress(observer.getnewaddress())['reason'], 'not-a-yellowback-address')
 
 # Rule: IN-1 IN-3
         print('plain_yec_burn_recorded: the observer spends its 98 YED output as plain YEC')
-        coin = coin_of(observer, 9800)
+        coin = coin_of(observer, 9700)
         raw = observer.createrawtransaction([{'txid': coin['txid'], 'vout': coin['vout']}],
                                             {observer.getnewaddress(): Decimal(TOKEN_VALUE - YELLOWBACK_FEE) / COIN})
-        burn_txid = observer.sendrawtransaction(observer.signrawtransaction(raw)['hex'])
+        signed_burn = observer.signrawtransaction(raw)['hex']
+# Rule: H7
+        # Phase 8 H7: sendrawtransaction refuses to destroy this wallet's own YED unless the
+        # third argument says so, and yed_unlockcoin is what hands the outpoint back deliberately.
+        assert_rpc_error('yed-burn-refused', observer.sendrawtransaction, signed_burn)
+        assert_equal(observer.yed_unlockcoin(coin['txid'], coin['vout'], 'I understand this burns YED')['wasYellowbackLocked'], True)
+        burn_txid = observer.sendrawtransaction(signed_burn, False, True)
         self.sync_all()
         self.mine(POOLS[2])
         info = nodes[2].yed_gettxinfo(burn_txid)
-        assert_equal((info['yedIn'], info['yedOut'], info['burned']), (9800, 0, 9800))
+        assert_equal((info['yedIn'], info['yedOut'], info['burned']), (9700, 0, 9700))
         assert_equal(info['verdict'], 'burned')
-        assert_equal(observer.yed_getbalance()['confirmedCents'], 0)
-        assert_equal(nodes[2].yed_getstats()['supplyCents'], 30900)
+        assert_equal(observer.yed_getbalance()['confirmedCents'], 100)   # the 1 YED coin the H1 selector left untouched
+        assert_equal(nodes[2].yed_getstats()['supplyCents'], 31000)
         assert_equal([x['type'] for x in observer.yed_listtransactions() if x['txid'] == burn_txid], ['burn'])
 
 # Rule: XFER-2

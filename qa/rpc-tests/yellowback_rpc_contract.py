@@ -69,7 +69,7 @@ def assert_rpc_error(substr, fn, *args):
         fn(*args)
     except Exception as e:
         assert substr in str(e), 'expected %r in %r' % (substr, str(e))
-        return
+        return str(e)
     raise AssertionError('expected an error containing %r' % substr)
 
 
@@ -229,8 +229,44 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('not-a-yellowback-address', user.yed_sendmany, {user.getnewaddress(): 100})
         assert_rpc_error('insufficient-yed', user.yed_send, claimant.yed_getnewaddress(), 40000)
         assert_rpc_error('insufficient-yed', user.yed_sendmany, {claimant.yed_getnewaddress(): 40000})
-        assert_rpc_error('change-floor', user.yed_send, claimant.yed_getnewaddress(), 9950)
-        assert_rpc_error('change-floor', user.yed_sendmany, {claimant.yed_getnewaddress(): 9950})
+        # H1: the floor-aware selector makes most amounts workable; what is left unworkable is
+        # 50 cents under the wallet's whole spendable balance (no subset sums to it, and the
+        # only larger selection is everything, leaving 50 cents of change).
+        band_amount = user.yed_getbalance()['confirmedCents'] - 50
+        assert_rpc_error('change-floor', user.yed_send, claimant.yed_getnewaddress(), band_amount)
+        assert_rpc_error('change-floor', user.yed_sendmany, {claimant.yed_getnewaddress(): band_amount})
+# Rule: H2
+        # H2: the change-floor message is structured — the GUI reads the two amounts out of it.
+        msg = assert_rpc_error('change-floor', user.yed_send, claimant.yed_getnewaddress(), band_amount)
+        assert 'nearest workable amounts: below ' in msg and ', above ' in msg, msg
+
+# Rule: H3
+        print('yed_estimatesend (H3): the dry run, workable and unworkable')
+        est = c.check('yed_estimatesend', user.yed_estimatesend(10000))
+        assert_equal(est['workable'], True)
+        assert_equal(est['alternatives'], None)
+        assert_greater_than(len(est['inputs']), 0)
+        band = c.check('yed_estimatesend', user.yed_estimatesend(band_amount))
+        assert_equal(band['workable'], False)
+        assert_equal(band['error'], 'change-floor')
+        assert_equal(band['stage'], 'none')
+        assert band['alternatives'] is not None
+        c.check('yed_estimatesend', user.yed_estimatesend({claimant.yed_getnewaddress(): 10000}))
+
+# Rule: H5
+        print('yed_unlockcoin (H5) and the lockunspent refusal')
+        held = user.yed_listunspent()[0]
+        point = {'txid': held['txid'], 'vout': held['vout']}
+        assert_rpc_error('yed-locked-outpoint', user.lockunspent, True, [point])
+        assert_rpc_error('unlock-acknowledgement-missing', user.yed_unlockcoin, held['txid'], held['vout'], 'nope')
+        c.check('yed_unlockcoin', user.yed_unlockcoin(held['txid'], held['vout'], 'I understand this burns YED'))
+        user.yed_lockcoins()
+
+# Rule: H10
+        info_h10 = user.yed_getinfo()
+        assert_equal(info_h10['protectedByIndex'], True)
+        assert_equal(info_h10['lockedOutputs'], len(user.yed_listunspent()))
+
         sent = c.check('yed_send', user.yed_send(claimant.yed_getnewaddress(), 10000))
         self.sync_all()
         self.mine(POOLS[2])

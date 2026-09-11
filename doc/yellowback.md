@@ -133,6 +133,55 @@ names the reason (`unhealthyReason`) and always means "restart with `-reindex-ye
 safe on an enforcing node: nothing is rejected while the node is reindexing or in initial block
 download.
 
+## How your YED is protected from being spent as plain YEC (H5–H10)
+
+A YED output is an ordinary 10,000-zatoshi P2PKH output; the dollars it carries live in the
+overlay index, not in the output. Spend it with any command that does not know about Yellowback
+and the YED is destroyed while the 10,000 zatoshi survive. The wallet therefore:
+
+- **locks every YED outpoint it owns** (before it broadcasts, when it sees the transaction, and
+  again after every block and at startup), so `sendtoaddress`, `sendmany` and `z_sendmany` never
+  select one. `yed_getinfo.lockedOutputs` says how many are held and `yed_lockcoins` re-runs the
+  reconciliation if `yed_listunspent` ever shows more coins than that;
+- **refuses `lockunspent`** for one of those outpoints (`yed-locked-outpoint`), and re-applies its
+  own locks after `lockunspent true` unlocks everything. The deliberate way out is
+  `yed_unlockcoin "<txid>" <n> "I understand this burns YED"`;
+- **refuses `sendrawtransaction`** for a raw transaction that spends one of them without a payload
+  that reassigns it, unless you pass the third argument `allowyedburn` as `true`;
+- **refuses to start without `-yellowback`** when the datadir holds a Yellowback index. Start with
+  `-experimentalfeatures -yellowback`, or with `-yellowback=0` to say you accept that the YED
+  outputs in this wallet are spendable as plain YEC for this run;
+- **re-locks after an import**: `importprivkey`, `importaddress`, `importwallet` and `z_importkey`
+  reconcile once their rescan is done, so YED that has just become yours is locked at once.
+
+**What is not protected (H9 — documented, not enforced).** These are real ways to lose YED and no
+software here can prevent them:
+
+- **Keys used elsewhere.** A private key exported from this wallet and imported into any other
+  Ycash wallet, a hardware signer or a script: that software has no overlay, its coin selection
+  sees an ordinary 10,000-zatoshi output, and the first transaction it builds burns the YED.
+- **Other `-yellowback` nodes.** Another node that holds the same keys but is not this wallet
+  locks nothing of yours until it reconciles; two wallets sharing keys can each build a spend the
+  other does not know about.
+- **Sending YED to someone who does not run the overlay.** The `ye…`/`yt…`/`yr…` address prefix is
+  the only technical guard: an address that decodes to the same key hash spells the same output.
+  If the recipient's wallet does not run Yellowback, the YED you sent is theirs to burn by
+  accident. Ask before sending.
+- **Restoring an old `wallet.dat`.** A backup taken before a mint does not contain that vault's
+  owner key, and the collateral cannot be redeemed without it (see *Backups*).
+
+The rule of thumb: YED lives in the node that owns the keys **and** runs `-yellowback`. Keep it in
+one place, and treat any export of a key as an export of the dollars with it.
+
+## Sending an amount the wallet refuses
+
+`yed_send` refuses (`change-floor`) when no selection of your YED coins leaves change of either
+nothing at all or at least $1.00 — the minimum a payload can assign to an output. The message
+names the nearest amounts that do work, below and above, and `yed_estimatesend <cents>` shows the
+same thing before you commit to it, along with the inputs it would spend and the change it would
+leave. A redemption or a claim does not refuse: it burns the sub-dollar remainder instead
+(at most $0.99, reported as `extraBurnCents`) rather than leave the vault stranded.
+
 ## Backups
 
 Ycash transparent keys are a random keypool, not derived from a seed. The vault owner key of every
