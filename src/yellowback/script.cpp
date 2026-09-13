@@ -4,6 +4,8 @@
 
 #include "yellowback/script.h"
 
+#include "primitives/transaction.h"
+
 #include <algorithm>
 
 namespace yellowback {
@@ -144,6 +146,105 @@ std::optional<VaultSpendPath> ParseVaultSpendPath(const CScript& scriptSig)
     path.ownerPath = CastToBoolLikeInterpreter(path.selector);
     if (pushes.size() >= 3) path.ownerSig = StackElementFor(opcodes[sel - 1], pushes[sel - 1]);
     return path;
+}
+
+// ---------------------------------------------------------------- v3 (§3.4): carrier and bond
+
+CScript CarrierScript(const CPubKey& pk, const uint256& bundleHash)
+{
+    if (!IsCompressedKey(pk)) return CScript();
+    CScript script;
+    script << OP_SWAP << OP_SHA256 << valtype(bundleHash.begin(), bundleHash.end()) << OP_EQUALVERIFY;
+    script << valtype(pk.begin(), pk.end()) << OP_CHECKSIG;
+    return script;
+}
+
+bool IsCarrierScript(const CScript& script, CPubKey* pk, uint256* bundleHash)
+{
+    if (script.size() != CARRIER_SCRIPT_SIZE) return false;
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    valtype data;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_SWAP) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_SHA256) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != 32 || data.size() != 32) return false;
+    const uint256 hash(data);
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_EQUALVERIFY) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE || data.size() != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) return false;
+    const CPubKey key(data);
+    if (!IsCompressedKey(key)) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return false;
+    if (pc != script.end()) return false;
+    if (pk) *pk = key;
+    if (bundleHash) *bundleHash = hash;
+    return true;
+}
+
+CScript CarrierScriptSig(const valtype& bundle, const valtype& sig, const CScript& carrierScript)
+{
+    return CScript() << bundle << sig << valtype(carrierScript.begin(), carrierScript.end());
+}
+
+std::optional<CarrierSpend> ParseCarrierScriptSig(const CScript& scriptSig)
+{
+    std::vector<valtype> pushes;
+    std::vector<opcodetype> opcodes;
+    if (!GetPushes(scriptSig, pushes, &opcodes)) return std::nullopt;
+    if (pushes.size() != 3) return std::nullopt;
+    // Three data pushes: OP_0 / OP_1..OP_16 are not a bundle, a signature or a script.
+    for (opcodetype op : opcodes) {
+        if (op > OP_PUSHDATA4) return std::nullopt;
+    }
+    CarrierSpend spend;
+    spend.carrierScript = CScript(pushes[2].begin(), pushes[2].end());
+    if (!IsCarrierScript(spend.carrierScript, &spend.pk, &spend.bundleHash)) return std::nullopt;
+    spend.bundle = pushes[0];
+    spend.sig = pushes[1];
+    return spend;
+}
+
+std::optional<size_t> FindCarrierInput(const CTransaction& tx, bool skipVin0, std::string* reason)
+{
+    std::optional<size_t> found;
+    for (size_t i = skipVin0 ? 1 : 0; i < tx.vin.size(); i++) {
+        if (!ParseCarrierScriptSig(tx.vin[i].scriptSig)) continue;
+        if (found) {
+            if (reason) *reason = "two-carriers";
+            return std::nullopt;
+        }
+        found = i;
+    }
+    if (!found && reason) *reason = "shape";
+    return found;
+}
+
+CScript BondScript(const CPubKey& pk, uint32_t locktime)
+{
+    if (locktime == 0 || locktime >= LOCKTIME_THRESHOLD) return CScript();
+    if (!IsCompressedKey(pk)) return CScript();
+    CScript script;
+    script << (int64_t)locktime << OP_CHECKLOCKTIMEVERIFY << OP_DROP;
+    script << valtype(pk.begin(), pk.end()) << OP_CHECKSIG;
+    return script;
+}
+
+bool ParseBondScript(const CScript& script, CPubKey& pk, uint32_t& locktime)
+{
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    valtype data;
+    int64_t lock;
+    if (!ReadHeightPush(script, pc, lock)) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKLOCKTIMEVERIFY) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_DROP) return false;
+    if (!script.GetOp(pc, opcode, data) || data.size() != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) return false;
+    CPubKey key(data);
+    if (!IsCompressedKey(key)) return false;
+    if (!script.GetOp(pc, opcode, data) || opcode != OP_CHECKSIG) return false;
+    if (pc != script.end()) return false;
+    pk = key;
+    locktime = (uint32_t)lock;
+    return true;
 }
 
 // ---------------------------------------------------------------- shared helpers
