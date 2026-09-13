@@ -7,7 +7,7 @@
 One deterministic generator owns five corpora:
 
     src/fuzzing/YellowbackTag/input/*.bin       LE32(nHeight) ‖ coinbase scriptSig
-    src/fuzzing/YellowbackPayload/input/*.bin   OP_RETURN payload bytes (version 2)
+    src/fuzzing/YellowbackPayload/input/*.bin   OP_RETURN payload bytes (version 3)
     src/fuzzing/YellowbackScript/input/*.bin    vault scripts and vault scriptSigs
     src/fuzzing/YellowbackEvaluate/input/*.bin  the prefix grammar of src/test/yellowback_fuzz_harness.h ‖ a CBlock
     src/fuzzing/YellowbackPayee/input/*.bin     the FEE-W grammar of the same header
@@ -191,58 +191,115 @@ def tag_corpus():
     return seeds
 
 
-# ---------------------------------------------------------------- payload (§3.3)
-def hdr(t, version=2):
+# ---------------------------------------------------------------- payload (v3 plan §3.3)
+PAYLOAD_VERSION = 3
+KEY2 = bytes.fromhex("03a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90")
+SIG64 = bytes(range(64))
+TXID = bytes([0xAA]) * 32
+
+
+def hdr(t, version=PAYLOAD_VERSION):
     return bytes([0x59, 0x42, version, t])
 
 
-def mint(term=0, cents=10000, lock=1000, ref=950, key=KEY, fee=3, version=2):
-    return hdr(1, version) + bytes([term]) + struct.pack("<III", cents, lock, ref) + key + bytes([fee])
+def mint(term=0, cents=10000, lock=1000, ref=950, key=KEY, fee=3, attest_fee=0xFF, version=PAYLOAD_VERSION):
+    return hdr(1, version) + bytes([term]) + struct.pack("<III", cents, lock, ref) + key + bytes([fee, attest_fee])
 
 
-def transfer(assignments, version=2):
+def mint_v2(term=0, cents=10000, lock=1000, ref=950, key=KEY, fee=3):
+    """The v2 encoding (51 bytes): non-Yellowback under v3 (V23)."""
+    return hdr(1, 2) + bytes([term]) + struct.pack("<III", cents, lock, ref) + key + bytes([fee])
+
+
+def transfer(assignments, version=PAYLOAD_VERSION):
     body = bytes([len(assignments)])
     for v, c in assignments:
         body += bytes([v]) + struct.pack("<I", c)
     return hdr(2, version) + body
 
 
-def redeem(ref, fee, assignments):
-    body = struct.pack("<I", ref) + bytes([fee, len(assignments)])
+def redeem(ref, fee, assignments, attest_fee=0xFF):
+    body = struct.pack("<I", ref) + bytes([fee, attest_fee, len(assignments)])
     for v, c in assignments:
         body += bytes([v]) + struct.pack("<I", c)
     return hdr(3) + body
 
 
+def redeem_v2(ref, fee, assignments):
+    """The v2 encoding (10 + 5n): non-Yellowback under v3 (V23)."""
+    body = struct.pack("<I", ref) + bytes([fee, len(assignments)])
+    for v, c in assignments:
+        body += bytes([v]) + struct.pack("<I", c)
+    return hdr(3, 2) + body
+
+
+def register(attestor=KEY, bond=KEY2, locktime=420480, flags=0):
+    return hdr(5) + attestor + bond + struct.pack("<I", locktime) + bytes([flags])
+
+
+def notice(txid=TXID, vout=2, ref=950):
+    return hdr(6) + txid + bytes([vout]) + struct.pack("<I", ref)
+
+
+def equivocation():
+    return hdr(7)
+
+
+def revive(seq=1, price=50000, cited=949, sig=SIG64):
+    return hdr(8) + struct.pack("<HII", seq, price, cited) + sig
+
+
 def payload_corpus():
     fifteen = [(i, 100 + i) for i in range(15)]
-    fourteen = fifteen[:14]
+    thirteen = fifteen[:13]
     return [
         ("mint", mint()),
         ("mint_feevout_none", mint(term=2, cents=1000000, lock=0xFFFFFFFF, ref=0, fee=0xFF)),
+        ("mint_attest_fee", mint(fee=3, attest_fee=4)),
         ("mint_key_prefix_03", mint(key=bytes([0x03]) + KEY[1:])),
         ("transfer_empty", transfer([])),
         ("transfer_one", transfer([(1, 100)])),
         ("transfer_15", transfer(fifteen)),
         ("redeem_empty", redeem(950, 0xFF, [])),
-        ("redeem_one", redeem(950, 3, [(1, 12345)])),
-        ("redeem_14", redeem(0xFFFFFFFF, 0, fourteen)),
+        ("redeem_one", redeem(950, 3, [(1, 12345)], attest_fee=4)),
+        ("redeem_13", redeem(0xFFFFFFFF, 0, thirteen, attest_fee=1)),
+        ("register", register()),
+        ("register_key_prefix_04", register(attestor=bytes([0x04]) + KEY[1:], flags=0xFF)),
+        ("notice", notice()),
+        ("notice_vout_ff", notice(vout=0xFF, ref=0xFFFFFFFF)),
+        ("equivocation", equivocation()),
+        ("revive", revive()),
+        ("revive_max", revive(seq=0xFFFF, price=0xFFFFFFFF, cited=0xFFFFFFFF, sig=bytes([0xFF]) * 64)),
         ("bad_magic", b"\x59\x44" + mint()[2:]),
-        ("version1_mint", hdr(1, 1) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + KEY),   # v1, retained until Phase 2
-        ("version3", mint(version=3)),
+        ("version1_mint", hdr(1, 1) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + KEY),   # v1: non-Yellowback (V23)
+        ("version2_mint", mint_v2()),                                                               # v2: non-Yellowback (W14)
+        ("version2_transfer", transfer([(1, 100)], version=2)),
+        ("version2_redeem", redeem_v2(950, 3, [(1, 12345)])),
+        ("version2_header_v3_body", mint(version=2)),
+        ("version4", mint(version=4)),
         ("unknown_type_04", hdr(4) + b"\x01\x00\x00\x00"),
+        ("unknown_type_09", hdr(9) + b"\x00"),
         ("retired_type_10", hdr(0x10) + struct.pack("<Q", 50000)),
         ("reserved_type_20", hdr(0x20) + b"\x00"),
-        ("short", b"\x59\x42\x02"),
+        ("short", b"\x59\x42\x03"),
         ("mint_short", mint()[:-2]),
-        ("mint_no_feevout", mint()[:-1]),
+        ("mint_no_attest_feevout", mint()[:-1]),        # the v2 length under the v3 header
+        ("mint_no_feevout", mint()[:-2]),               # the v1 length
         ("mint_trailing", mint() + b"\x00"),
-        ("mint_uncompressed_key", hdr(1) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + UNCOMPRESSED_KEY[:33] + b"\x03"),
+        ("mint_uncompressed_key", hdr(1) + bytes([0]) + struct.pack("<III", 10000, 1000, 950) + UNCOMPRESSED_KEY[:33] + b"\x03\xff"),
         ("transfer_dup", transfer([(1, 1), (1, 2)])),
         ("transfer_zero", transfer([(1, 0)])),
         ("transfer_16", transfer([(i, 1) for i in range(16)])),
-        ("redeem_15", redeem(1, 0xFF, [(i, 1) for i in range(15)])),
+        ("redeem_14", redeem(1, 0xFF, [(i, 1) for i in range(14)])),
         ("redeem_short", redeem(950, 0xFF, [(1, 12345)])[:-1]),
+        ("redeem_v2_head", hdr(3) + struct.pack("<I", 950) + bytes([0xFF, 0])),   # the v2 head (no attestFeeVout) under the v3 header
+        ("register_short", register()[:-1]),
+        ("register_trailing", register() + b"\x00"),
+        ("notice_short", notice()[:-1]),
+        ("notice_trailing", notice() + b"\x00"),
+        ("equivocation_byte", equivocation() + b"\x00"),
+        ("revive_short", revive()[:-1]),
+        ("revive_trailing", revive() + b"\x00"),
         ("long81", hdr(2) + bytes(77)),
         ("random1", rnd("payload-random1", 40)),
         ("random2", rnd("payload-random2", 80)),

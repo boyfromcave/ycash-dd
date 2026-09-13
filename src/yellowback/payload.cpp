@@ -6,14 +6,19 @@
 
 #include "script/script.h"
 
+#include <algorithm>
 #include <set>
 
 namespace yellowback {
 
 namespace {
 
-const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + CPubKey::COMPRESSED_PUBLIC_KEY_SIZE + 1; // 47
-const size_t REDEEM_HEAD_SIZE = 4 + 1 + 1;                                               // refHeight, feeVout, count
+const size_t KEY_SIZE = CPubKey::COMPRESSED_PUBLIC_KEY_SIZE;                 // 33
+const size_t MINT_BODY_SIZE = 1 + 4 + 4 + 4 + KEY_SIZE + 1 + 1;              // 48 (v3: + attestFeeVout)
+const size_t REDEEM_HEAD_SIZE = 4 + 1 + 1 + 1;                               // refHeight, feeVout, attestFeeVout, count
+const size_t REGISTER_BODY_SIZE = KEY_SIZE + KEY_SIZE + 4 + 1;               // 71
+const size_t NOTICE_BODY_SIZE = 32 + 1 + 4;                                  // 37
+const size_t REVIVE_BODY_SIZE = 2 + 4 + 4 + COMPACT_SIG_SIZE;                // 74
 
 /** Bounds-checked little-endian reader. Never throws. */
 class Reader
@@ -25,6 +30,13 @@ public:
     {
         if (pos + 1 > data.size()) return false;
         v = data[pos++];
+        return true;
+    }
+    bool U16(uint16_t& v)
+    {
+        if (pos + 2 > data.size()) return false;
+        v = (uint16_t)((uint16_t)data[pos] | ((uint16_t)data[pos + 1] << 8));
+        pos += 2;
         return true;
     }
     bool U32(uint32_t& v)
@@ -55,6 +67,12 @@ private:
     size_t pos;
 };
 
+void PutU16(std::vector<unsigned char>& out, uint16_t v)
+{
+    out.push_back(v & 0xff);
+    out.push_back((v >> 8) & 0xff);
+}
+
 void PutU32(std::vector<unsigned char>& out, uint32_t v)
 {
     out.push_back(v & 0xff);
@@ -82,7 +100,8 @@ bool ValidAssignments(const std::vector<Assignment>& assignments, size_t maxCoun
 
 } // namespace
 
-Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout)
+Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, uint32_t refHeight, const CPubKey& owner, uint8_t feeVout,
+                      uint8_t attestFeeVout)
 {
     Payload p;
     p.type = PayloadType::MINT;
@@ -93,16 +112,64 @@ Payload Payload::Mint(uint8_t termClass, uint32_t cents, uint32_t lockHeight, ui
     p.ownerPubKey = owner;
     p.ownerKeyBytes.assign(owner.begin(), owner.end());
     p.feeVout = feeVout;
+    p.attestFeeVout = attestFeeVout;
     return p;
 }
 
-Payload Payload::Redeem(uint32_t refHeight, uint8_t feeVout, const std::vector<Assignment>& assignments)
+Payload Payload::Redeem(uint32_t refHeight, uint8_t feeVout, const std::vector<Assignment>& assignments, uint8_t attestFeeVout)
 {
     Payload p;
     p.type = PayloadType::REDEEM;
     p.refHeight = refHeight;
     p.feeVout = feeVout;
+    p.attestFeeVout = attestFeeVout;
     p.assignments = assignments;
+    return p;
+}
+
+Payload Payload::AttestorRegister(const CPubKey& attestorPubKey, const CPubKey& bondPubKey, uint32_t bondLocktime, uint8_t flags)
+{
+    Payload p;
+    p.type = PayloadType::ATTESTOR_REGISTER;
+    p.attestorPubKey = attestorPubKey;
+    p.attestorKeyBytes.assign(attestorPubKey.begin(), attestorPubKey.end());
+    p.bondPubKey = bondPubKey;
+    p.bondKeyBytes.assign(bondPubKey.begin(), bondPubKey.end());
+    p.bondLocktime = bondLocktime;
+    p.flags = flags;
+    return p;
+}
+
+Payload Payload::ClaimNotice(const uint256& vaultTxid, uint8_t vaultVout, uint32_t refHeight)
+{
+    Payload p;
+    p.type = PayloadType::CLAIM_NOTICE;
+    p.vaultTxid = vaultTxid;
+    p.vaultVout = vaultVout;
+    p.refHeight = refHeight;
+    return p;
+}
+
+Payload Payload::ClaimNotice(const COutPoint& vault, uint32_t refHeight)
+{
+    return ClaimNotice(vault.hash, (uint8_t)vault.n, refHeight);
+}
+
+Payload Payload::Equivocation()
+{
+    Payload p;
+    p.type = PayloadType::EQUIVOCATION;
+    return p;
+}
+
+Payload Payload::AttestorRevive(uint16_t seq, uint32_t priceMicroUsd, uint32_t citedHeight, const std::array<unsigned char, COMPACT_SIG_SIZE>& sig)
+{
+    Payload p;
+    p.type = PayloadType::ATTESTOR_REVIVE;
+    p.seq = seq;
+    p.priceMicroUsd = priceMicroUsd;
+    p.citedHeight = citedHeight;
+    p.sig = sig;
     return p;
 }
 
@@ -127,11 +194,22 @@ bool operator==(const Payload& a, const Payload& b)
     switch (a.type) {
     case PayloadType::MINT:
         return a.termClass == b.termClass && a.cents == b.cents && a.lockHeight == b.lockHeight &&
-               a.refHeight == b.refHeight && a.ownerKeyBytes == b.ownerKeyBytes && a.feeVout == b.feeVout;
+               a.refHeight == b.refHeight && a.ownerKeyBytes == b.ownerKeyBytes && a.feeVout == b.feeVout &&
+               a.attestFeeVout == b.attestFeeVout;
     case PayloadType::TRANSFER:
         return a.assignments == b.assignments;
     case PayloadType::REDEEM:
-        return a.refHeight == b.refHeight && a.feeVout == b.feeVout && a.assignments == b.assignments;
+        return a.refHeight == b.refHeight && a.feeVout == b.feeVout && a.attestFeeVout == b.attestFeeVout &&
+               a.assignments == b.assignments;
+    case PayloadType::ATTESTOR_REGISTER:
+        return a.attestorKeyBytes == b.attestorKeyBytes && a.bondKeyBytes == b.bondKeyBytes &&
+               a.bondLocktime == b.bondLocktime && a.flags == b.flags;
+    case PayloadType::CLAIM_NOTICE:
+        return a.vaultTxid == b.vaultTxid && a.vaultVout == b.vaultVout && a.refHeight == b.refHeight;
+    case PayloadType::EQUIVOCATION:
+        return true;
+    case PayloadType::ATTESTOR_REVIVE:
+        return a.seq == b.seq && a.priceMicroUsd == b.priceMicroUsd && a.citedHeight == b.citedHeight && a.sig == b.sig;
     }
     return false;
 }
@@ -157,15 +235,15 @@ void PutAssignments(std::vector<unsigned char>& out, const std::vector<Assignmen
     }
 }
 
-/** Version 2 bodies (§3.3). */
-bool DecodeBodyV2(Reader& r, uint8_t type, size_t size, Payload& p)
+/** Version 3 bodies (v3 plan §3.3). */
+bool DecodeBodyV3(Reader& r, uint8_t type, size_t size, Payload& p)
 {
     switch (type) {
     case (uint8_t)PayloadType::MINT: {
         if (size != 4 + MINT_BODY_SIZE) return false;
         p.type = PayloadType::MINT;
         if (!r.U8(p.termClass) || !r.U32(p.cents) || !r.U32(p.lockHeight) || !r.U32(p.refHeight) ||
-            !r.Bytes(CPubKey::COMPRESSED_PUBLIC_KEY_SIZE, p.ownerKeyBytes) || !r.U8(p.feeVout)) return false;
+            !r.Bytes(KEY_SIZE, p.ownerKeyBytes) || !r.U8(p.feeVout) || !r.U8(p.attestFeeVout)) return false;
         // Any 33 bytes: the codec fixes the shape, MINT-3 judges the key
         // (bad-mint-owner-key) and a VOID vault records the bytes verbatim.
         p.ownerPubKey.Set(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end());
@@ -182,13 +260,43 @@ bool DecodeBodyV2(Reader& r, uint8_t type, size_t size, Payload& p)
     case (uint8_t)PayloadType::REDEEM: {
         p.type = PayloadType::REDEEM;
         uint8_t count;
-        if (!r.U32(p.refHeight) || !r.U8(p.feeVout) || !r.U8(count)) return false;
+        if (!r.U32(p.refHeight) || !r.U8(p.feeVout) || !r.U8(p.attestFeeVout) || !r.U8(count)) return false;
         if (count > MAX_REDEEM_ASSIGNMENTS) return false;
         if (size != 4 + REDEEM_HEAD_SIZE + 5 * (size_t)count) return false;
         return ReadAssignments(r, count, p.assignments) && ValidAssignments(p.assignments, MAX_REDEEM_ASSIGNMENTS);
     }
+    case (uint8_t)PayloadType::ATTESTOR_REGISTER: {
+        if (size != 4 + REGISTER_BODY_SIZE) return false;
+        p.type = PayloadType::ATTESTOR_REGISTER;
+        if (!r.Bytes(KEY_SIZE, p.attestorKeyBytes) || !r.Bytes(KEY_SIZE, p.bondKeyBytes) ||
+            !r.U32(p.bondLocktime) || !r.U8(p.flags)) return false;
+        // Any 33 bytes, as the MINT owner key: REG-A1 judges them.
+        p.attestorPubKey.Set(p.attestorKeyBytes.begin(), p.attestorKeyBytes.end());
+        p.bondPubKey.Set(p.bondKeyBytes.begin(), p.bondKeyBytes.end());
+        return true;
+    }
+    case (uint8_t)PayloadType::CLAIM_NOTICE: {
+        if (size != 4 + NOTICE_BODY_SIZE) return false;
+        p.type = PayloadType::CLAIM_NOTICE;
+        std::vector<unsigned char> txid;
+        if (!r.Bytes(32, txid) || !r.U8(p.vaultVout) || !r.U32(p.refHeight)) return false;
+        p.vaultTxid = uint256(txid);
+        return true;
+    }
+    case (uint8_t)PayloadType::EQUIVOCATION:
+        if (size != 4) return false;
+        p.type = PayloadType::EQUIVOCATION;
+        return true;
+    case (uint8_t)PayloadType::ATTESTOR_REVIVE: {
+        if (size != 4 + REVIVE_BODY_SIZE) return false;
+        p.type = PayloadType::ATTESTOR_REVIVE;
+        std::vector<unsigned char> sig;
+        if (!r.U16(p.seq) || !r.U32(p.priceMicroUsd) || !r.U32(p.citedHeight) || !r.Bytes(COMPACT_SIG_SIZE, sig)) return false;
+        std::copy(sig.begin(), sig.end(), p.sig.begin());
+        return true;
+    }
     default:
-        return false; // unknown or reserved type (0x10-0xFF): forward-compatibility rule, non-Yellowback
+        return false; // unknown or reserved type (0x04, 0x09-0xFF): forward-compatibility rule, non-Yellowback
     }
 }
 
@@ -204,13 +312,14 @@ std::vector<unsigned char> EncodePayload(const Payload& payload)
     if (payload.version == PAYLOAD_VERSION) {
         switch (payload.type) {
         case PayloadType::MINT:
-            if (payload.ownerKeyBytes.size() != CPubKey::COMPRESSED_PUBLIC_KEY_SIZE) return {};
+            if (payload.ownerKeyBytes.size() != KEY_SIZE) return {};
             out.push_back(payload.termClass);
             PutU32(out, payload.cents);
             PutU32(out, payload.lockHeight);
             PutU32(out, payload.refHeight);
             out.insert(out.end(), payload.ownerKeyBytes.begin(), payload.ownerKeyBytes.end());
             out.push_back(payload.feeVout);
+            out.push_back(payload.attestFeeVout);
             break;
         case PayloadType::TRANSFER:
             if (!ValidAssignments(payload.assignments, MAX_ASSIGNMENTS)) return {};
@@ -220,7 +329,28 @@ std::vector<unsigned char> EncodePayload(const Payload& payload)
             if (!ValidAssignments(payload.assignments, MAX_REDEEM_ASSIGNMENTS)) return {};
             PutU32(out, payload.refHeight);
             out.push_back(payload.feeVout);
+            out.push_back(payload.attestFeeVout);
             PutAssignments(out, payload.assignments);
+            break;
+        case PayloadType::ATTESTOR_REGISTER:
+            if (payload.attestorKeyBytes.size() != KEY_SIZE || payload.bondKeyBytes.size() != KEY_SIZE) return {};
+            out.insert(out.end(), payload.attestorKeyBytes.begin(), payload.attestorKeyBytes.end());
+            out.insert(out.end(), payload.bondKeyBytes.begin(), payload.bondKeyBytes.end());
+            PutU32(out, payload.bondLocktime);
+            out.push_back(payload.flags);
+            break;
+        case PayloadType::CLAIM_NOTICE:
+            out.insert(out.end(), payload.vaultTxid.begin(), payload.vaultTxid.end());
+            out.push_back(payload.vaultVout);
+            PutU32(out, payload.refHeight);
+            break;
+        case PayloadType::EQUIVOCATION:
+            break;
+        case PayloadType::ATTESTOR_REVIVE:
+            PutU16(out, payload.seq);
+            PutU32(out, payload.priceMicroUsd);
+            PutU32(out, payload.citedHeight);
+            out.insert(out.end(), payload.sig.begin(), payload.sig.end());
             break;
         default:
             return {};
@@ -243,8 +373,8 @@ bool DecodePayload(const std::vector<unsigned char>& data, Payload& out)
 
     Payload p;
     p.version = version;
-    if (version != PAYLOAD_VERSION) return false; // version 1 and every later version: non-Yellowback (V23)
-    if (!DecodeBodyV2(r, type, data.size(), p)) return false;
+    if (version != PAYLOAD_VERSION) return false; // versions 1, 2 and every later version: non-Yellowback (V23)
+    if (!DecodeBodyV3(r, type, data.size(), p)) return false;
     if (!r.AtEnd()) return false;
     out = p;
     return true;
@@ -305,6 +435,10 @@ const char* PayloadTypeName(PayloadType type)
     case PayloadType::MINT: return "mint";
     case PayloadType::TRANSFER: return "transfer";
     case PayloadType::REDEEM: return "redeem";
+    case PayloadType::ATTESTOR_REGISTER: return "attestor_register";
+    case PayloadType::CLAIM_NOTICE: return "claim_notice";
+    case PayloadType::EQUIVOCATION: return "equivocation";
+    case PayloadType::ATTESTOR_REVIVE: return "attestor_revive";
     }
     return "unknown";
 }
