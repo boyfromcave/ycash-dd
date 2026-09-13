@@ -494,7 +494,7 @@ jobs:
           sudo apt-get install -y clang
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
             make -C src -j$(nproc) ycashd
             mkdir -p src/fuzzing/$t/output
@@ -759,7 +759,7 @@ jobs:
           set -e
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee; do
+          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
             make -C src -j$(nproc) ycashd
             mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged

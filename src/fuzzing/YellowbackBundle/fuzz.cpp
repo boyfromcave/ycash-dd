@@ -101,7 +101,7 @@ int fuzz_YellowbackBundle(const std::vector<unsigned char>& data)
         return Sha256(pre);
     };
     int rc = 0;
-    for (yellowback::BundleCarrierMode mode : { yellowback::BundleCarrierMode::SCRIPTSIG, yellowback::BundleCarrierMode::OP_RETURN, yellowback::BundleCarrierMode::EITHER }) {
+    for (yellowback::BundleCarrier mode : { yellowback::BundleCarrier::SCRIPTSIG, yellowback::BundleCarrier::OP_RETURN, yellowback::BundleCarrier::EITHER }) {
         for (bool skip : { false, true }) {
             std::string reason;
             yellowback::ExtractBundle(tx, mode, skip, tail, &reason);

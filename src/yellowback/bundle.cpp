@@ -33,24 +33,6 @@ BundleVerdict Fail(const std::string& reason)
     return v;
 }
 
-/**
- * Weighted quantile: the value at which the cumulative weight over the
- * sorted list first reaches ceil(qBps * total / 10^4). Precondition: the
- * lists are parallel and sorted by value.
- */
-// A1: switch to math.h WeightedQuantile once the proto agent adds it.
-MicroUsd LocalWeightedQuantile(const std::vector<std::pair<MicroUsd, arith_uint256>>& sorted, const arith_uint256& total, int qBps)
-{
-    arith_uint256 threshold = total * arith_uint256((uint64_t)qBps) + arith_uint256(9999);
-    threshold /= arith_uint256(10000);
-    arith_uint256 cum = 0;
-    for (const auto& e : sorted) {
-        cum += e.second;
-        if (cum >= threshold) return e.first;
-    }
-    return sorted.back().first;
-}
-
 } // namespace
 
 std::vector<unsigned char> EncodeBundle(const Bundle& b)
@@ -87,11 +69,11 @@ std::optional<Bundle> DecodeBundle(const std::vector<unsigned char>& data, size_
 }
 
 std::optional<std::pair<std::vector<unsigned char>, BundleSource>>
-ExtractBundle(const CTransaction& tx, BundleCarrierMode mode, bool skipVin0,
+ExtractBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
               const std::vector<unsigned char>& payloadTail, std::string* reason)
 {
-    const bool wantScriptSig = mode != BundleCarrierMode::OP_RETURN;
-    const bool wantOpReturn = mode != BundleCarrierMode::SCRIPTSIG;
+    const bool wantScriptSig = mode != BundleCarrier::OP_RETURN;
+    const bool wantOpReturn = mode != BundleCarrier::SCRIPTSIG;
 
     std::string carrierReason;
     std::optional<size_t> carrier = wantScriptSig ? FindCarrierInput(tx, skipVin0, &carrierReason) : std::nullopt;
@@ -129,7 +111,7 @@ uint256 SigCacheKey(const Attestation& att, const uint256& blockHash)
     return Sha256(pre);
 }
 
-BundleVerdict VerifyBundle(const CTransaction& tx, BundleCarrierMode mode, bool skipVin0,
+BundleVerdict VerifyBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
                            const std::vector<unsigned char>& payloadTail,
                            int R, const std::vector<uint16_t>& selected, const BundleLimits& limits,
                            const std::function<std::optional<CPubKey>(uint16_t)>& pubkeyOf,
@@ -199,13 +181,10 @@ BundleStat(const std::vector<Attestation>& C, const std::vector<arith_uint256>& 
         if (C[a].priceMicroUsd != C[b].priceMicroUsd) return C[a].priceMicroUsd < C[b].priceMicroUsd;
         return C[a].seq < C[b].seq;
     });
-    std::vector<std::pair<MicroUsd, arith_uint256>> sorted;
-    arith_uint256 total = 0;
-    for (size_t i : order) {
-        sorted.emplace_back((MicroUsd)C[i].priceMicroUsd, weights[i]);
-        total += weights[i];
-    }
-    return { LocalWeightedQuantile(sorted, total, qLowBps), LocalWeightedQuantile(sorted, total, qHighBps) };
+    // Sorted by (price, seq) here; WeightedQuantile's stable sort keeps that order (math.h).
+    std::vector<WeightedPrice> sorted;
+    for (size_t i : order) sorted.emplace_back((MicroUsd)C[i].priceMicroUsd, weights[i]);
+    return { WeightedQuantile(sorted, qLowBps), WeightedQuantile(sorted, qHighBps) };
 }
 
 } // namespace yellowback
