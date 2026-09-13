@@ -282,7 +282,10 @@ def run_tests(test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=Fal
     tests_dir = src_dir + '/qa/rpc-tests/'
 
     flags = ["--srcdir={}/src".format(build_dir)] + args
-    flags.append("--cachedir=%s/qa/cache" % build_dir)
+    # Yellowback (plan v3 section 6.0 item 1, R16): a --cachedir/--portseed the user passed wins
+    # over the runner's own, so two runners in one worktree can isolate their chains and ports.
+    if not any(a.startswith("--cachedir=") for a in args):
+        flags.append("--cachedir=%s/qa/cache" % build_dir)
 
     if enable_coverage:
         coverage = RPCCoverage()
@@ -352,6 +355,8 @@ class RPCTestHandler:
             self.num_running += 1
             t = self.test_list.pop(0)
             port_seed = ["--portseed={}".format(len(self.test_list) + self.portseed_offset)]
+            if any(a.startswith("--portseed=") for a in self.flags):
+                port_seed = []
             log_stdout = tempfile.SpooledTemporaryFile(max_size=2**16)
             log_stderr = tempfile.SpooledTemporaryFile(max_size=2**16)
             self.jobs.append((t,
