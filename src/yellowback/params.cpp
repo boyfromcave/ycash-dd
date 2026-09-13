@@ -63,6 +63,40 @@ void SetCommon(Params& p)
     p.payeeTiltBps   = 10000;
 
     p.enforceUntilHeight = 0;       // set per release beside startHeight (L8)
+
+    // v3 §3.1: price attestation
+    p.attestArmMin        = 5;      // ARM-1 (D-4)
+    p.attestArmDelay      = 1152;   // ARM-2: one day
+    p.attestRequired      = true;   // W15
+    p.bundleCarrier       = BundleCarrier::SCRIPTSIG;   // W2
+    p.nSlots              = 9;
+    p.mSelect             = 4;
+    p.kSlack              = 2;
+    p.bundleMax           = 6;      // the 520-byte push
+    p.qLowBps             = 3333;
+    p.qHighBps            = 6667;
+    p.attestMaxAge        = 20;     // 2 k (R4)
+    p.pinWindow           = 288;    // PIN-1/2
+    p.pinDeltaBps         = 500;
+    p.pinMinTags          = 3;
+    p.pinMinBundles       = 2;
+    p.divergeBpsAttest    = 1500;   // MINT-10
+    p.emergencyRatioBps   = 10500;  // NOT-1, RED-4(b)
+    p.emergencyPersist    = 48;
+    p.emergencyNoticeTtl  = 1152;
+    p.residualMinZat      = 100000; // RED-5
+    p.attestFeeBps        = 2500;   // AFEE-1 (D-3)
+    p.bondMin             = 20000 * COIN;
+    p.bondMinLock         = 420480; // one year
+    p.bondMaturity        = 16128;  // two weeks
+    p.ageCap              = 207360; // 180 d
+    p.foundingWindow      = 8064;   // 7 d
+    p.dormancyBlocks      = 16128;
+    p.dormancyMinBundles  = 20;
+    p.dormancyCheck       = 48;     // S15
+    p.carrierValue        = 10000;  // wallet policy
+    p.attestInterval      = 10;     // k, agent policy
+    p.walletConfirmations = 6;      // wallet policy
 }
 
 } // namespace
@@ -77,7 +111,13 @@ Params::Params()
       grace(0), claimThresholdBps(0), supplyCapBps(0), globalRatioHaltBps(0), divergenceBps(0),
       volWindow(0), volStep(0), volPeriodsPerYear(0), sigmaRefBps(0), sigmaMultMaxBps(0),
       minMint(0), maxMint(0), minOutput(0), maxOutput(0), tokenValue(0), refWindow(0),
-      nPenalty(0), accuracyWindow(0), payeeTiltBps(0)
+      nPenalty(0), accuracyWindow(0), payeeTiltBps(0),
+      attestArmMin(0), attestArmDelay(0), attestRequired(true), bundleCarrier(BundleCarrier::SCRIPTSIG),
+      nSlots(0), mSelect(0), kSlack(0), bundleMax(0), qLowBps(0), qHighBps(0), attestMaxAge(0),
+      pinWindow(0), pinDeltaBps(0), pinMinTags(0), pinMinBundles(0), divergeBpsAttest(0),
+      emergencyRatioBps(0), emergencyPersist(0), emergencyNoticeTtl(0), residualMinZat(0), attestFeeBps(0),
+      bondMin(0), bondMinLock(0), bondMaturity(0), ageCap(0), foundingWindow(0),
+      dormancyBlocks(0), dormancyMinBundles(0), dormancyCheck(0), carrierValue(0), attestInterval(0), walletConfirmations(0)
 {
     for (int i = 0; i < NUM_CLASSES; i++) {
         classMin[i] = classMax[i] = baseRatioBps[i] = 0;
@@ -120,8 +160,27 @@ const Params& TestParams()
     return p;
 }
 
-/** The §3.1 regtest column; only the four arguments come from flags (M13). */
-Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil)
+std::optional<BundleCarrier> ParseBundleCarrier(const std::string& name)
+{
+    if (name == "scriptsig") return BundleCarrier::SCRIPTSIG;
+    if (name == "opreturn") return BundleCarrier::OP_RETURN;
+    if (name == "either") return BundleCarrier::EITHER;
+    return std::nullopt;
+}
+
+const char* BundleCarrierName(BundleCarrier carrier)
+{
+    switch (carrier) {
+    case BundleCarrier::SCRIPTSIG: return "scriptsig";
+    case BundleCarrier::OP_RETURN: return "opreturn";
+    case BundleCarrier::EITHER: return "either";
+    }
+    return "unknown";
+}
+
+/** The §3.1 regtest column; only the six arguments come from flags (M13). */
+Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
+                     int attestArmMin, BundleCarrier bundleCarrier)
 {
     Params r;
     r.network = "regtest";
@@ -150,11 +209,33 @@ Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enf
     r.volStep   = 8;
     r.nPenalty       = 12;
     r.accuracyWindow = 24;
-    // the four flags
+    // v3 §3.1 regtest column
+    r.attestArmDelay      = 8;
+    r.nSlots              = 5;
+    r.mSelect             = 2;
+    r.kSlack              = 1;
+    r.attestMaxAge        = 8;      // k = 4
+    r.pinWindow           = 16;
+    r.pinMinTags          = 2;
+    r.emergencyPersist    = 4;
+    r.emergencyNoticeTtl  = 64;
+    r.bondMin             = 10 * COIN;
+    r.bondMinLock         = 200;
+    r.bondMaturity        = 8;
+    r.ageCap              = 64;
+    r.foundingWindow      = 16;
+    r.dormancyBlocks      = 16;
+    r.dormancyMinBundles  = 2;
+    r.dormancyCheck       = 4;
+    r.attestInterval      = 4;
+    r.walletConfirmations = 1;
+    // the six flags
     r.startHeight        = startHeight;
     r.sigmaRefBps        = sigmaRefBps;
     r.supplyCapBps       = supplyCapBps;
     r.enforceUntilHeight = enforceUntil;
+    r.attestArmMin       = attestArmMin;
+    r.bundleCarrier      = bundleCarrier;
     return r;
 }
 

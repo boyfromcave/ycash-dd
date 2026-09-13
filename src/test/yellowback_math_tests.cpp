@@ -3,7 +3,9 @@
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 // The §3.7 arithmetic: integers and arith_uint256 only, the worked examples
-// of the plan as fixtures, the overflow corners of K14 and the V17 regression.
+// of the plan as fixtures, the overflow corners of K14 and the V17 regression;
+// then the v3 §3.7 quantities (bond weight, the bundle quantile, the claimant
+// maximum and residual, the attestor fee, PRICE-2's combination).
 
 #include "yellowback/math.h"
 #include "yellowback/params.h"
@@ -378,6 +380,338 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK(!RegtestParams(0, 0, 0, 0).IsConfigured());
     BOOST_CHECK(!ParamsForNetwork("regtest").IsConfigured());
     BOOST_CHECK_THROW(ParamsForNetwork("nope"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------- v3 (v3 plan §3.1, §3.7)
+
+// Rule: ARM-1
+// Rule: ARM-2
+// The v3 §3.1 rows, both columns, and the two regtest flags.
+BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK_EQUAL(PAYLOAD_VERSION, 3);
+    BOOST_CHECK_EQUAL(PayloadVersion(), 3);
+    BOOST_CHECK_EQUAL(m.attestArmMin, 5);
+    BOOST_CHECK_EQUAL(m.attestArmDelay, 1152);
+    BOOST_CHECK_EQUAL(m.attestRequired, true);
+    BOOST_CHECK(m.bundleCarrier == BundleCarrier::SCRIPTSIG);
+    BOOST_CHECK_EQUAL(m.nSlots, 9);
+    BOOST_CHECK_EQUAL(m.mSelect, 4);
+    BOOST_CHECK_EQUAL(m.kSlack, 2);
+    BOOST_CHECK_EQUAL(m.bundleMax, 6);
+    BOOST_CHECK_EQUAL(m.qLowBps, 3333);
+    BOOST_CHECK_EQUAL(m.qHighBps, 6667);
+    BOOST_CHECK_EQUAL(m.attestMaxAge, 20);
+    BOOST_CHECK_EQUAL(m.attestMaxAge, 2 * m.attestInterval);   // R4
+    BOOST_CHECK_EQUAL(m.pinWindow, 288);
+    BOOST_CHECK_EQUAL(m.pinDeltaBps, 500);
+    BOOST_CHECK_EQUAL(m.pinMinTags, 3);
+    BOOST_CHECK_EQUAL(m.pinMinBundles, 2);
+    BOOST_CHECK_EQUAL(m.divergeBpsAttest, 1500);
+    BOOST_CHECK_EQUAL(m.emergencyRatioBps, 10500);
+    BOOST_CHECK_EQUAL(m.emergencyPersist, 48);
+    BOOST_CHECK_EQUAL(m.emergencyNoticeTtl, 1152);
+    BOOST_CHECK_EQUAL(m.residualMinZat, 100000);
+    BOOST_CHECK_EQUAL(m.attestFeeBps, 2500);
+    BOOST_CHECK_EQUAL(m.bondMin, 20000 * COIN);
+    BOOST_CHECK_EQUAL(m.bondMinLock, 420480);
+    BOOST_CHECK_EQUAL(m.bondMinLock, BLOCKS_PER_YEAR);
+    BOOST_CHECK_EQUAL(m.bondMaturity, 16128);
+    BOOST_CHECK_EQUAL(m.ageCap, 207360);
+    BOOST_CHECK_EQUAL(m.foundingWindow, 8064);
+    BOOST_CHECK_EQUAL(m.dormancyBlocks, 16128);
+    BOOST_CHECK_EQUAL(m.dormancyMinBundles, 20);
+    BOOST_CHECK_EQUAL(m.dormancyCheck, 48);
+    BOOST_CHECK_EQUAL(m.carrierValue, 10000);
+    BOOST_CHECK_EQUAL(m.attestInterval, 10);
+    BOOST_CHECK_EQUAL(m.walletConfirmations, 6);
+    BOOST_CHECK_EQUAL(TestParams().attestArmMin, 5);
+    BOOST_CHECK_EQUAL(TestParams().bondMin, 20000 * COIN);
+    // "ARMED" means both the snapshot status and ATTEST_REQUIRED (W15).
+    BOOST_CHECK(m.IsArmed(true));
+    BOOST_CHECK(!m.IsArmed(false));
+    Params off = m;
+    off.attestRequired = false;
+    BOOST_CHECK(!off.IsArmed(true));
+
+    Params r = RegtestParams(150, 0, 0, 0);   // the two v3 flags default to 3 / scriptsig
+    BOOST_CHECK_EQUAL(r.attestArmMin, 3);
+    BOOST_CHECK(r.bundleCarrier == BundleCarrier::SCRIPTSIG);
+    BOOST_CHECK_EQUAL(r.attestArmDelay, 8);
+    BOOST_CHECK_EQUAL(r.attestRequired, true);
+    BOOST_CHECK_EQUAL(r.nSlots, 5);
+    BOOST_CHECK_EQUAL(r.mSelect, 2);
+    BOOST_CHECK_EQUAL(r.kSlack, 1);
+    BOOST_CHECK_EQUAL(r.bundleMax, 6);
+    BOOST_CHECK_EQUAL(r.qLowBps, 3333);
+    BOOST_CHECK_EQUAL(r.qHighBps, 6667);
+    BOOST_CHECK_EQUAL(r.attestMaxAge, 8);
+    BOOST_CHECK_EQUAL(r.attestMaxAge, 2 * r.attestInterval);
+    BOOST_CHECK_EQUAL(r.pinWindow, 16);
+    BOOST_CHECK_EQUAL(r.pinDeltaBps, 500);
+    BOOST_CHECK_EQUAL(r.pinMinTags, 2);
+    BOOST_CHECK_EQUAL(r.pinMinBundles, 2);
+    BOOST_CHECK_EQUAL(r.divergeBpsAttest, 1500);
+    BOOST_CHECK_EQUAL(r.emergencyRatioBps, 10500);
+    BOOST_CHECK_EQUAL(r.emergencyPersist, 4);
+    BOOST_CHECK_EQUAL(r.emergencyNoticeTtl, 64);
+    BOOST_CHECK_EQUAL(r.residualMinZat, 100000);
+    BOOST_CHECK_EQUAL(r.attestFeeBps, 2500);
+    BOOST_CHECK_EQUAL(r.bondMin, 10 * COIN);
+    BOOST_CHECK_EQUAL(r.bondMinLock, 200);
+    BOOST_CHECK_EQUAL(r.bondMaturity, 8);
+    BOOST_CHECK_EQUAL(r.ageCap, 64);
+    BOOST_CHECK_EQUAL(r.foundingWindow, 16);
+    BOOST_CHECK_EQUAL(r.dormancyBlocks, 16);
+    BOOST_CHECK_EQUAL(r.dormancyMinBundles, 2);
+    BOOST_CHECK_EQUAL(r.dormancyCheck, 4);
+    BOOST_CHECK_EQUAL(r.carrierValue, 10000);
+    BOOST_CHECK_EQUAL(r.attestInterval, 4);
+    BOOST_CHECK_EQUAL(r.walletConfirmations, 1);
+    // The flags land: 0 = never arms; every carrier spelling parses.
+    Params never = RegtestParams(150, 0, 0, 0, 0, BundleCarrier::EITHER);
+    BOOST_CHECK_EQUAL(never.attestArmMin, 0);
+    BOOST_CHECK(never.bundleCarrier == BundleCarrier::EITHER);
+    BOOST_CHECK(RegtestParams(1, 0, 0, 0, 7, BundleCarrier::OP_RETURN).bundleCarrier == BundleCarrier::OP_RETURN);
+    BOOST_CHECK(ParseBundleCarrier("scriptsig").value() == BundleCarrier::SCRIPTSIG);
+    BOOST_CHECK(ParseBundleCarrier("opreturn").value() == BundleCarrier::OP_RETURN);
+    BOOST_CHECK(ParseBundleCarrier("either").value() == BundleCarrier::EITHER);
+    BOOST_CHECK(!ParseBundleCarrier("").has_value());
+    BOOST_CHECK(!ParseBundleCarrier("ScriptSig").has_value());
+    BOOST_CHECK(!ParseBundleCarrier("op_return").has_value());
+    for (BundleCarrier c : { BundleCarrier::SCRIPTSIG, BundleCarrier::OP_RETURN, BundleCarrier::EITHER }) {
+        BOOST_CHECK(ParseBundleCarrier(BundleCarrierName(c)).value() == c);
+    }
+    BOOST_CHECK_EQUAL(std::string(BundleCarrierName(BundleCarrier::SCRIPTSIG)), "scriptsig");
+    // The default-constructed set is unconfigured but not disarmable by accident.
+    BOOST_CHECK_EQUAL(Params().attestRequired, true);
+    BOOST_CHECK(Params().bundleCarrier == BundleCarrier::SCRIPTSIG);
+}
+
+// Rule: BUNDLE-1
+// weight = bondZat * clamp(age, 0, AGE_CAP), in arith_uint256 (R10).
+BOOST_AUTO_TEST_CASE(bundle1_bond_weight_clamps_age)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK(BondWeight(m.bondMin, 0, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMin, -5, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMin, 1, m.ageCap) == arith_uint256(m.bondMin));
+    BOOST_CHECK(BondWeight(m.bondMin, 100, m.ageCap) == arith_uint256(m.bondMin) * arith_uint256(100));
+    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap, m.ageCap) == arith_uint256(m.bondMin) * arith_uint256(m.ageCap));
+    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap + 1, m.ageCap) == BondWeight(m.bondMin, m.ageCap, m.ageCap));
+    BOOST_CHECK(BondWeight(m.bondMin, 1000000000LL, m.ageCap) == BondWeight(m.bondMin, m.ageCap, m.ageCap));
+    // R10: 20,000 YEC at AGE_CAP is 4.1e17 -- past 2^58, so a 64-bit sum over nine slots would be at risk.
+    BOOST_CHECK(BondWeight(m.bondMin, m.ageCap, m.ageCap) == arith_uint256(414720000000000000ULL));
+    BOOST_CHECK(BondWeight(MAX_MONEY, m.ageCap, m.ageCap) == arith_uint256(MAX_MONEY) * arith_uint256(m.ageCap));
+    BOOST_CHECK(!FitsInt64(BondWeight(MAX_MONEY, m.ageCap, m.ageCap) * arith_uint256(9)));
+    // Degenerate inputs: zero, never a throw.
+    BOOST_CHECK(BondWeight(0, 10, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(-1, 10, m.ageCap) == arith_uint256(0));
+    BOOST_CHECK(BondWeight(m.bondMin, 10, 0) == arith_uint256(0));
+    // Regtest: 10 YEC, cap 64.
+    Params r = RegtestParams(1, 0, 0, 0);
+    BOOST_CHECK(BondWeight(r.bondMin, 100, r.ageCap) == arith_uint256(10 * COIN) * arith_uint256(64));
+}
+
+// Rule: PRICE-2
+// Rule: BUNDLE-1
+// The bundle statistic: the price at which cumulative weight first reaches
+// ceil(q * total / 10^4), over the price-ascending order.
+BOOST_AUTO_TEST_CASE(price2_weighted_quantile_thresholds)
+{
+    const Params& m = MainParams();
+    const arith_uint256 W(1000);
+    // Single entry: both quantiles are its price.
+    BOOST_CHECK_EQUAL(WeightedQuantile({ WeightedPrice(50000, W) }, m.qLowBps).value(), 50000);
+    BOOST_CHECK_EQUAL(WeightedQuantile({ WeightedPrice(50000, W) }, m.qHighBps).value(), 50000);
+    BOOST_CHECK_EQUAL(WeightedQuantile({ WeightedPrice(50000, W) }, 0).value(), 50000);
+    BOOST_CHECK_EQUAL(WeightedQuantile({ WeightedPrice(50000, W) }, 10000).value(), 50000);
+    // Empty: undefined. Over 10^4: the threshold exceeds the total, undefined.
+    BOOST_CHECK(!WeightedQuantile({}, m.qLowBps).has_value());
+    BOOST_CHECK(!WeightedQuantile({ WeightedPrice(50000, W) }, 10001).has_value());
+    // Equal weights, four prices: total 4000; low threshold ceil(3333*4000/1e4) = 1334 -> the 2nd; high ceil(2666.8) = 2667 -> the 3rd.
+    std::vector<WeightedPrice> four = { WeightedPrice(10, W), WeightedPrice(20, W), WeightedPrice(30, W), WeightedPrice(40, W) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(four, m.qLowBps).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(four, m.qHighBps).value(), 30);
+    // Unsorted input is put into price order first (the caller's tie order is kept).
+    std::vector<WeightedPrice> shuffled = { WeightedPrice(40, W), WeightedPrice(10, W), WeightedPrice(30, W), WeightedPrice(20, W) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(shuffled, m.qLowBps).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(shuffled, m.qHighBps).value(), 30);
+    // Exact threshold: three equal weights, q = 3333 -> ceil(0.9999) = 1 -> the first; q = 3334 -> ceil(1.0002) = 2 -> the second.
+    std::vector<WeightedPrice> three = { WeightedPrice(10, arith_uint256(1)), WeightedPrice(20, arith_uint256(1)), WeightedPrice(30, arith_uint256(1)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(three, 3333).value(), 10);
+    BOOST_CHECK_EQUAL(WeightedQuantile(three, 3334).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(three, 6666).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(three, 6667).value(), 30);
+    BOOST_CHECK_EQUAL(WeightedQuantile(three, 10000).value(), 30);
+    // Cumulative weight exactly equal to the threshold counts ("first >="): weights 1, 1 at q = 5000 -> threshold 1 -> the first.
+    std::vector<WeightedPrice> two = { WeightedPrice(10, arith_uint256(1)), WeightedPrice(20, arith_uint256(1)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(two, 5000).value(), 10);
+    BOOST_CHECK_EQUAL(WeightedQuantile(two, 5001).value(), 20);
+    // Weights 3, 1 with q = 7500: threshold exactly 3 -> the first; 7501 -> ceil(3.0004) = 4 -> the second.
+    std::vector<WeightedPrice> heavyLow = { WeightedPrice(10, arith_uint256(3)), WeightedPrice(20, arith_uint256(1)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(heavyLow, 7500).value(), 10);
+    BOOST_CHECK_EQUAL(WeightedQuantile(heavyLow, 7501).value(), 20);
+    // A dominant weight pulls both quantiles to its price.
+    std::vector<WeightedPrice> whale = { WeightedPrice(10, arith_uint256(1)), WeightedPrice(20, arith_uint256(100)), WeightedPrice(30, arith_uint256(1)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(whale, m.qLowBps).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(whale, m.qHighBps).value(), 20);
+    // Ties in price: the answer is the price, whichever tied entry crosses the threshold.
+    std::vector<WeightedPrice> tied = { WeightedPrice(10, W), WeightedPrice(20, W), WeightedPrice(20, W), WeightedPrice(20, W), WeightedPrice(30, W) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(tied, m.qLowBps).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(tied, m.qHighBps).value(), 20);
+    BOOST_CHECK_EQUAL(WeightedQuantile(tied, 2000).value(), 10);      // threshold 1000: the first alone
+    BOOST_CHECK_EQUAL(WeightedQuantile(tied, 8001).value(), 30);      // threshold 4001: past the three 20s
+    // Zero-weight entries never move the cumulative sum; a zero total gives the first price (threshold 0).
+    std::vector<WeightedPrice> zeros = { WeightedPrice(10, arith_uint256(0)), WeightedPrice(20, arith_uint256(1)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(zeros, m.qLowBps).value(), 20);
+    std::vector<WeightedPrice> allZero = { WeightedPrice(30, arith_uint256(0)), WeightedPrice(10, arith_uint256(0)) };
+    BOOST_CHECK_EQUAL(WeightedQuantile(allZero, m.qLowBps).value(), 10);
+    // 256-bit weights (R10): six bonds at AGE_CAP, no overflow in total * qBps.
+    std::vector<WeightedPrice> big;
+    for (int i = 0; i < 6; i++) big.push_back(WeightedPrice(10 * (i + 1), BondWeight(MAX_MONEY, m.ageCap, m.ageCap)));
+    BOOST_CHECK_EQUAL(WeightedQuantile(big, m.qLowBps).value(), 20);   // ceil(3333*6/1e4) = 2 -> the 2nd
+    BOOST_CHECK_EQUAL(WeightedQuantile(big, m.qHighBps).value(), 50);  // ceil(6667*6/1e4) = 5 -> the 5th
+    // Negative q is read as 0.
+    BOOST_CHECK_EQUAL(WeightedQuantile(four, -1).value(), 10);
+}
+
+// Rule: RED-5
+// claimantMaxZat = ceil(mintedCents * marginBps * COIN / pClaim); residual = max(0, collateral - that).
+BOOST_AUTO_TEST_CASE(red5_claimant_max_and_residual_worked_example)
+{
+    const Params& m = MainParams();
+    // §3.7 check: $100 at 110 % and 18,333 uUSD => 1.1e16 / 18,333 = 600,010,909,289.6.. => 600,010,909,290 zat ~ 6,000 YEC.
+    auto c = ClaimantMaxZat(10000, m.claimThresholdBps, 18333);
+    BOOST_REQUIRE(c.has_value());
+    BOOST_CHECK_EQUAL(c.value(), 600010909290LL);
+    BOOST_CHECK_EQUAL(c.value() / COIN, 6000);
+    // Clause (b): margin 10^4, exactly the debt at the adverse price (R1).
+    c = ClaimantMaxZat(10000, 10000, 18333);
+    BOOST_REQUIRE(c.has_value());
+    BOOST_CHECK_EQUAL(c.value(), 545464462991LL);
+    // A vault at exactly the 110 % threshold: collateral * pClaim == minted * 11,000 * COIN, so the claimant takes it all, residual 0.
+    // $100 minted, pClaim 20,000 uUSD: threshold collateral = 1e4 * 11,000 * 1e8 / 20,000 = 5.5e11 zat (5,500 YEC) exactly.
+    const CAmount atThreshold = 550000000000LL;
+    BOOST_CHECK(!IsUnderwater(atThreshold, 20000, 10000, m.claimThresholdBps));   // RED-4(a): strictly below, so not (yet) claimable
+    BOOST_CHECK(IsUnderwater(atThreshold - 1, 20000, 10000, m.claimThresholdBps));
+    c = ClaimantMaxZat(10000, m.claimThresholdBps, 20000);
+    BOOST_REQUIRE(c.has_value());
+    BOOST_CHECK_EQUAL(c.value(), atThreshold);
+    BOOST_CHECK_EQUAL(ResidualZat(atThreshold, c), 0);
+    BOOST_CHECK_EQUAL(ResidualZat(atThreshold - 1, c), 0);          // underwater by a zat: still nothing back
+    BOOST_CHECK_EQUAL(ResidualZat(atThreshold + 1, c), 1);
+    BOOST_CHECK_EQUAL(ResidualZat(atThreshold + m.residualMinZat, c), m.residualMinZat);
+    // The worked vault (6,000 YEC) claimed at 18,333: the 110 % share (6,000.1 YEC) exceeds the collateral => 0.
+    BOOST_CHECK_EQUAL(ResidualZat(600000000000LL, ClaimantMaxZat(10000, m.claimThresholdBps, 18333)), 0);
+    // Claimed at a price above the threshold price (say 30,000 uUSD, a forced early liquidation under (b) only, margin 10^4):
+    // claimant max = 1e4 * 1e4 * 1e8 / 30,000 = 333,333,333,334 zat; residual = 6e11 - that.
+    c = ClaimantMaxZat(10000, 10000, 30000);
+    BOOST_REQUIRE(c.has_value());
+    BOOST_CHECK_EQUAL(c.value(), 333333333334LL);
+    BOOST_CHECK_EQUAL(ResidualZat(600000000000LL, c), 266666666666LL);
+    // Ceiling, not floor: $1 at 110 % and 70,000 uUSD = 1,571,428,571.4.. => 1,571,428,572.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(100, 11000, 70000).value(), 1571428572LL);
+    // Undefined inputs.
+    BOOST_CHECK(!ClaimantMaxZat(0, 11000, 18333).has_value());
+    BOOST_CHECK(!ClaimantMaxZat(10000, 0, 18333).has_value());
+    BOOST_CHECK(!ClaimantMaxZat(10000, 11000, 0).has_value());
+    BOOST_CHECK(!ClaimantMaxZat(-1, 11000, 18333).has_value());
+    // Undefined claimant max (pClaim undefined or the overflow below) => residual 0, never a throw.
+    BOOST_CHECK_EQUAL(ResidualZat(600000000000LL, std::nullopt), 0);
+    BOOST_CHECK_EQUAL(ResidualZat(0, ClaimantMaxZat(10000, 11000, 18333)), 0);
+    BOOST_CHECK_EQUAL(ResidualZat(-5, ClaimantMaxZat(10000, 11000, 18333)), 0);
+}
+
+// Rule: RED-5
+// Overflow at PRICE_MIN: MAX_MINT * 11,000 * COIN / 100 = 1.1e16 zat > MAX_MONEY => nullopt (residual 0), never a wrapped number.
+BOOST_AUTO_TEST_CASE(red5_claimant_max_overflow_at_price_min)
+{
+    const Params& m = MainParams();
+    BOOST_CHECK(!ClaimantMaxZat(m.maxMint, m.claimThresholdBps, PRICE_MIN).has_value());
+    BOOST_CHECK(!ClaimantMaxZat(m.maxMint, 10000, PRICE_MIN).has_value());
+    BOOST_CHECK_EQUAL(ResidualZat(MAX_MONEY, ClaimantMaxZat(m.maxMint, m.claimThresholdBps, PRICE_MIN)), 0);
+    // The minimum mint at PRICE_MIN still fits: 1e4 * 11,000 * 1e8 / 100 = 1.1e14 zat = 1,100,000 YEC < MAX_MONEY.
+    auto c = ClaimantMaxZat(m.minMint, m.claimThresholdBps, PRICE_MIN);
+    BOOST_REQUIRE(c.has_value());
+    BOOST_CHECK_EQUAL(c.value(), 110000000000000LL);
+    // Exactly MAX_MONEY is representable; one zat more is not. margin 10^4 at PRICE_MAX: cents * 1e4 zat => MAX_MONEY at 2.1e11 cents.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(210000000000LL, 10000, PRICE_MAX).value(), MAX_MONEY);
+    BOOST_CHECK(!ClaimantMaxZat(210000000001LL, 10000, PRICE_MAX).has_value());
+    // The product itself passes int64 before the division (1e6 * 11,000 * 1e8 = 1.1e18 fits; 1e7 cents would not): still exact.
+    BOOST_CHECK_EQUAL(ClaimantMaxZat(m.maxOutput, m.claimThresholdBps, PRICE_MAX).value(), 110000000000LL);   // $100,000 at 110 % / $100 per YEC = 1,100 YEC
+}
+
+// Rule: AFEE-1
+// attestFeeZat = feeZat * ATTEST_FEE_BPS / 10^4 (floor), out of FEE-1's fee.
+BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_a_quarter_of_the_pool_fee)
+{
+    const Params& m = MainParams();
+    // The worked vault: 6,000 YEC pays 15 YEC to the pool and 3.75 YEC to the attestor.
+    const CAmount fee = FeeZat(6000 * COIN, m.feeMin, m.feeBps);
+    BOOST_CHECK_EQUAL(fee, 15 * COIN);
+    BOOST_CHECK_EQUAL(AttestFeeZat(fee, m.attestFeeBps), 375000000);
+    // The minimum fee: 0.5 YEC => 0.125 YEC.
+    BOOST_CHECK_EQUAL(AttestFeeZat(m.feeMin, m.attestFeeBps), 12500000);
+    // Floor.
+    BOOST_CHECK_EQUAL(AttestFeeZat(3, m.attestFeeBps), 0);
+    BOOST_CHECK_EQUAL(AttestFeeZat(4, m.attestFeeBps), 1);
+    BOOST_CHECK_EQUAL(AttestFeeZat(7, m.attestFeeBps), 1);
+    // Degenerate: zero or negative inputs give 0; 10^4 bps is the whole fee; MAX_MONEY does not overflow.
+    BOOST_CHECK_EQUAL(AttestFeeZat(0, m.attestFeeBps), 0);
+    BOOST_CHECK_EQUAL(AttestFeeZat(-1, m.attestFeeBps), 0);
+    BOOST_CHECK_EQUAL(AttestFeeZat(fee, 0), 0);
+    BOOST_CHECK_EQUAL(AttestFeeZat(fee, 10000), fee);
+    BOOST_CHECK_EQUAL(AttestFeeZat(MAX_MONEY, m.attestFeeBps), MAX_MONEY / 4);
+    BOOST_CHECK_EQUAL(AttestFeeZat(MAX_MONEY, 10000), MAX_MONEY);
+}
+
+// Rule: PRICE-2
+// pMint = min(xMint, aMint), pClaim = max(xClaim, aClaim), pEmerg = min(xClaim, aClaim); each undefined if any input is.
+BOOST_AUTO_TEST_CASE(price2_combine_takes_the_conservative_side)
+{
+    CombinedPrices c = PriceCombine(50000, 52000, 48000, 55000);
+    BOOST_CHECK_EQUAL(c.pMint.value(), 48000);
+    BOOST_CHECK_EQUAL(c.pClaim.value(), 55000);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), 52000);
+    // The other way round.
+    c = PriceCombine(48000, 55000, 50000, 52000);
+    BOOST_CHECK_EQUAL(c.pMint.value(), 48000);
+    BOOST_CHECK_EQUAL(c.pClaim.value(), 55000);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), 52000);
+    // Equal inputs.
+    c = PriceCombine(50000, 50000, 50000, 50000);
+    BOOST_CHECK_EQUAL(c.pMint.value(), 50000);
+    BOOST_CHECK_EQUAL(c.pClaim.value(), 50000);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), 50000);
+    // Each input undefined in turn: only the outputs that read it become undefined.
+    c = PriceCombine(std::nullopt, 52000, 48000, 55000);
+    BOOST_CHECK(!c.pMint.has_value());
+    BOOST_CHECK_EQUAL(c.pClaim.value(), 55000);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), 52000);
+    c = PriceCombine(50000, std::nullopt, 48000, 55000);
+    BOOST_CHECK_EQUAL(c.pMint.value(), 48000);
+    BOOST_CHECK(!c.pClaim.has_value());
+    BOOST_CHECK(!c.pEmerg.has_value());
+    c = PriceCombine(50000, 52000, std::nullopt, 55000);
+    BOOST_CHECK(!c.pMint.has_value());
+    BOOST_CHECK_EQUAL(c.pClaim.value(), 55000);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), 52000);
+    c = PriceCombine(50000, 52000, 48000, std::nullopt);
+    BOOST_CHECK_EQUAL(c.pMint.value(), 48000);
+    BOOST_CHECK(!c.pClaim.has_value());
+    BOOST_CHECK(!c.pEmerg.has_value());
+    c = PriceCombine(std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+    BOOST_CHECK(!c.pMint.has_value());
+    BOOST_CHECK(!c.pClaim.has_value());
+    BOOST_CHECK(!c.pEmerg.has_value());
+    BOOST_CHECK(!CombinedPrices().pMint.has_value());
+    // The bounds survive: PRICE_MIN and PRICE_MAX on either side.
+    c = PriceCombine(PRICE_MIN, PRICE_MAX, PRICE_MAX, PRICE_MIN);
+    BOOST_CHECK_EQUAL(c.pMint.value(), PRICE_MIN);
+    BOOST_CHECK_EQUAL(c.pClaim.value(), PRICE_MAX);
+    BOOST_CHECK_EQUAL(c.pEmerg.value(), PRICE_MIN);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
