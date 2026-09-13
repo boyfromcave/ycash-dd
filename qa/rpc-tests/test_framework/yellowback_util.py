@@ -541,7 +541,8 @@ class YellowbackTestFramework(BitcoinTestFramework):
 
     def _cross_edges(self):
         a, b = self.SPLIT_HALVES
-        return [(x, y) for x, y in self.EDGES if (x in a and y in b) or (x in b and y in a)]
+        n = len(self.nodes)
+        return [(x, y) for x, y in self.EDGES if x < n and y < n and ((x in a and y in b) or (x in b and y in a))]
 
     def split_network(self, timeout=30):
         """Disconnect {1, 5} from {0, 2, 3, 4} with ``disconnectnode`` (rpc/net.cpp:220); no
