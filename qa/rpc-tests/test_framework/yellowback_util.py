@@ -204,6 +204,38 @@ MAX_PAYLOAD = 80
 UNDO_KEEP = 4_096
 FEE_VOUT_NONE = ym.FEE_VOUT_NONE
 
+# --- v3 (price attestation) regtest values, plan v3 section 3.1; policy rows marked ---------
+PAYLOAD_VERSION_V3 = 3
+ATTEST_ARM_MIN = 3
+ATTEST_ARM_DELAY = 8
+N_SLOTS = 5
+M_SELECT = 2
+K_SLACK = 1
+BUNDLE_MAX = 6
+Q_LOW_BPS = 3_333
+Q_HIGH_BPS = 6_667
+ATTEST_MAX_AGE = 8             # = 2 * ATTEST_K
+PIN_WINDOW = 16
+PIN_DELTA_BPS = 500
+PIN_MIN_TAGS = 2
+PIN_MIN_BUNDLES = 2
+DIVERGE_BPS_ATTEST = 1_500
+EMERGENCY_RATIO_BPS = 10_500
+EMERGENCY_PERSIST = 4
+EMERGENCY_NOTICE_TTL = 64
+RESIDUAL_MIN_ZAT = 100_000
+ATTEST_FEE_BPS = 2_500
+BOND_MIN_ZAT = 10 * COIN
+BOND_MIN_LOCK = 200
+BOND_MATURITY = 8
+AGE_CAP = 64
+FOUNDING_WINDOW = 16
+DORMANCY_BLOCKS = 16
+DORMANCY_MIN_BUNDLES = 2
+DORMANCY_CHECK = 4
+CARRIER_VALUE = 10_000         # wallet policy
+ATTEST_K = 4                   # agent policy: signing interval in blocks
+
 # the blocks activate() mines: one signal window, the activation delay, and the block after
 ACTIVATION_BLOCKS = SIGNAL_WINDOW + ACTIVATION_DELAY + 1     # 129
 
@@ -220,6 +252,10 @@ STOCK = 1
 POOLS = [2, 3, 4]
 OBSERVER = 5
 ENFORCING = [0, 2, 3, 4]
+# v3 (plan v3 section 6.0 item 2): the two attestor wallets, present only with num_nodes=8
+ATTESTOR_A = 6
+ATTESTOR_B = 7
+ENFORCING_V3 = ENFORCING + [ATTESTOR_A, ATTESTOR_B]
 
 # Three fixed regtest keys for the pools' payout addresses: a pool needs its address *before* it
 # starts, so the WIF is imported after start (no two-phase restart).  Secrets are
@@ -426,9 +462,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # first block (P12).
     initial_blocks = 101
 
-    def __init__(self):
+    def __init__(self, num_nodes=6):
         super().__init__()
-        self.num_nodes = 6
+        self.num_nodes = num_nodes        # v3 scripts pass 8 (nodes 6-7 the attestor wallets)
         self.setup_clean_chain = True
         self.is_network_split = False
         self.mock_time = None
@@ -483,8 +519,9 @@ class YellowbackTestFramework(BitcoinTestFramework):
     # star on node 1 (the stock miner's blocks reach every node), 2<->3<->4 between the pools,
     # and 0<->2 so the enforcing half {0, 2, 3, 4} stays connected while split (see the note
     # in docs/mapping.md section 13.2: the plan's star alone would isolate node 0 during a split)
-    EDGES = [(1, 0), (1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (3, 4), (0, 2)]
-    SPLIT_HALVES = ([0, 2, 3, 4], [1, 5])
+    # nodes 6-7 (v3, when present) join the star on node 1 and the enforcing half of a split
+    EDGES = [(1, 0), (1, 2), (1, 3), (1, 4), (1, 5), (2, 3), (3, 4), (0, 2), (1, 6), (1, 7)]
+    SPLIT_HALVES = ([0, 2, 3, 4, 6, 7], [1, 5])
 
     def setup_network(self, split=False):
         self.nodes = self.setup_nodes()
@@ -545,7 +582,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def groups(self):
         """The connected groups of node indices given the split state."""
         if self.is_network_split:
-            return [list(g) for g in self.SPLIT_HALVES]
+            return [[i for i in g if i < len(self.nodes)] for g in self.SPLIT_HALVES]
         return [list(range(len(self.nodes)))]
 
     def sync_all(self, blocks_only=False):
@@ -556,7 +593,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
                 sync_mempools(nodes)
 
     def enforcing_nodes(self):
-        return [self.nodes[i] for i in ENFORCING]
+        return [self.nodes[i] for i in ENFORCING_V3 if i < len(self.nodes)]
 
     # --- quotes --------------------------------------------------------------
 
