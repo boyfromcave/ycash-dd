@@ -570,5 +570,60 @@ class TagTests(unittest.TestCase):
         self.assertEqual(yp.decode_tag_body(body[4:])["sourceMask"], 0x8001)
 
 
+class FixtureCrossCheck(unittest.TestCase):
+    """The Rust agent's aggregator (contrib/yellowback/attest, plan §5) and this module must agree
+    on the recorded exchange replies under attest/fixtures/. expected.json was written by this
+    module (fixtures/expected.py); this test proves the file still matches the Python behaviour,
+    the Rust test `fixtures::tests` proves the port matches the file."""
+
+    FIXTURES = os.path.join(HERE, "attest", "fixtures")
+
+    def _run(self, scenario, now):
+        sources = yp.normalize_sources(scenario["sources"])
+        btc = yp.normalize_btc_sources(scenario.get("btc_usd_sources", []))
+        table = {}
+        for s in sources + btc:
+            f = scenario["replies"][s["name"]]
+            if f is None:
+                table[s["url"]] = OSError("no reply (fixture: connection refused)")
+            else:
+                with open(os.path.join(self.FIXTURES, f), "rb") as fh:
+                    table[s["url"]] = fh.read()
+        feed = make_feed(scenario["sources"], table, scenario.get("btc_usd_sources", []), **scenario.get("settings", {}))
+        yp.time.time = lambda: float(now)
+        feed.poll(force=True)
+        return feed.aggregate(), feed.report()
+
+    def test_expected_json_is_this_modules_answer(self):
+        # Rule: plan §5 cross-test on recorded fixtures
+        import json
+        with open(os.path.join(self.FIXTURES, "scenarios.json")) as f:
+            spec = json.load(f)
+        with open(os.path.join(self.FIXTURES, "expected.json")) as f:
+            expected = json.load(f)
+        self.assertEqual(spec["now"], expected["now"])
+        self.assertEqual([s["name"] for s in spec["scenarios"]], [s["name"] for s in expected["scenarios"]])
+        real_time = yp.time.time
+        try:
+            for sc, ex in zip(spec["scenarios"], expected["scenarios"]):
+                agg, r = self._run(sc, spec["now"])
+                with self.subTest(scenario=sc["name"]):
+                    self.assertEqual(None if agg is None else agg[0], ex["median_micro_usd"])
+                    self.assertEqual(None if agg is None else agg[1], ex["source_mask"])
+                    self.assertEqual([] if agg is None else agg[2], ex["contributing"])
+                    self.assertEqual((r["live_sources"], r["live_venues"]), (ex["live_sources"], ex["live_venues"]))
+                    self.assertEqual((r["btc_usd"]["reference_usd"], r["btc_usd"]["live"]), (ex["btc_reference_usd"], ex["btc_live"]))
+                    for name, e in ex["sources"].items():
+                        h = r["sources"][name]
+                        self.assertEqual(h["state"], e["state"], name)
+                        self.assertEqual(h["last_price_micro_usd"] if h["state"] == "ok" else None, e["micro_usd"], name)
+                    for name, e in ex["btc_usd_sources"].items():
+                        h = r["btc_usd"]["sources"][name]
+                        self.assertEqual(h["state"], e["state"], name)
+                        self.assertEqual(h["last_price_micro_usd"] if h["state"] == "ok" else None, e["micro_usd"], name)
+        finally:
+            yp.time.time = real_time
+
+
 if __name__ == "__main__":
     unittest.main()

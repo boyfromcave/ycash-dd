@@ -6,6 +6,7 @@
 
 mod attest;
 mod config;
+mod fixtures;
 mod framing;
 mod price;
 mod rpc;
