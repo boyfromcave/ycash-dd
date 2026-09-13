@@ -16,6 +16,7 @@
 
 #include "chainparams.h"
 #include "coins.h"
+#include "crypto/sha256.h"
 #include "consensus/upgrades.h"
 #include "key.h"
 #include "keystore.h"
@@ -614,6 +615,401 @@ BOOST_AUTO_TEST_CASE(mint3_templates_are_standard_under_canopy)
 {
     RegtestActivateCanopy();
     CheckTemplatesStandard(NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId, "canopy");
+    RegtestDeactivateCanopy();
+}
+
+// ---------------------------------------------------------------------------
+// v3 (§3.4): the carrier and bond scripts (BUNDLE-1, W7, R2).
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(bundle1_carrier_script_shape_and_parse)
+{
+    const CKey key = NewKey();
+    const CPubKey pub = key.GetPubKey();
+    const valtype bundle(448, 0xAB);
+    uint256 h;
+    CSHA256().Write(bundle.data(), bundle.size()).Finalize(h.begin());
+
+    const CScript carrier = CarrierScript(pub, h);
+    BOOST_REQUIRE(!carrier.empty());
+    BOOST_CHECK_EQUAL(carrier.size(), 71u);   // 1 + 1 + (1 + 32) + 1 + (1 + 33) + 1; CARRIER_SCRIPT_SIZE
+    BOOST_CHECK_EQUAL(carrier.size(), CARRIER_SCRIPT_SIZE);
+    CScript expect;
+    expect << OP_SWAP << OP_SHA256 << valtype(h.begin(), h.end()) << OP_EQUALVERIFY << valtype(pub.begin(), pub.end()) << OP_CHECKSIG;
+    BOOST_CHECK(carrier == expect);
+    BOOST_CHECK_EQUAL(carrier[0], OP_SWAP);
+    BOOST_CHECK_EQUAL(carrier[1], OP_SHA256);
+    BOOST_CHECK_EQUAL(carrier[2], 32);
+    BOOST_CHECK_EQUAL(carrier[35], OP_EQUALVERIFY);
+    BOOST_CHECK_EQUAL(carrier[36], 33);
+    BOOST_CHECK_EQUAL(carrier[70], OP_CHECKSIG);
+    BOOST_CHECK_EQUAL(carrier.GetSigOpCount(true), 1u);
+    const CScript spk = P2SHScript(carrier);
+    BOOST_CHECK(spk.IsPayToScriptHash());
+    const CScript scriptSig = CarrierScriptSig(bundle, valtype(71, 0x30), carrier);
+    BOOST_CHECK_EQUAL(spk.GetSigOpCount(scriptSig), 1u);   // what AreInputsStandard counts through P2SH
+    BOOST_CHECK(scriptSig.IsPushOnly());
+    BOOST_CHECK_EQUAL(scriptSig.size(), 3u + 448u + 1u + 71u + 1u + 71u);   // PUSHDATA2 for 448, direct pushes for 71 and 71
+    BOOST_CHECK(scriptSig.size() <= 1650);   // policy.cpp:88-97's scriptSig ceiling
+
+    CPubKey k;
+    uint256 hh;
+    BOOST_CHECK(IsCarrierScript(carrier));
+    BOOST_CHECK(IsCarrierScript(carrier, &k, &hh));
+    BOOST_CHECK(k == pub);
+    BOOST_CHECK(hh == h);
+    std::optional<CarrierSpend> spend = ParseCarrierScriptSig(scriptSig);
+    BOOST_REQUIRE(spend);
+    BOOST_CHECK(spend->bundle == bundle);
+    BOOST_CHECK(spend->sig == valtype(71, 0x30));
+    BOOST_CHECK(spend->pk == pub);
+    BOOST_CHECK(spend->bundleHash == h);
+    BOOST_CHECK(spend->carrierScript == carrier);
+
+    // Not carriers: an uncompressed key, an empty key, a different script of 72 bytes, the vault, a bond, a P2PKH.
+    BOOST_CHECK(CarrierScript(NewKey(false).GetPubKey(), h).empty());
+    BOOST_CHECK(CarrierScript(CPubKey(), h).empty());
+    BOOST_CHECK(!IsCarrierScript(CScript()));
+    BOOST_CHECK(!IsCarrierScript(CScript() << OP_DROP << OP_SHA256 << valtype(h.begin(), h.end()) << OP_EQUALVERIFY << valtype(pub.begin(), pub.end()) << OP_CHECKSIG));
+    BOOST_CHECK(!IsCarrierScript(CScript() << OP_SWAP << OP_HASH256 << valtype(h.begin(), h.end()) << OP_EQUALVERIFY << valtype(pub.begin(), pub.end()) << OP_CHECKSIG));
+    BOOST_CHECK(!IsCarrierScript(CScript() << OP_SWAP << OP_SHA256 << valtype(h.begin(), h.end()) << OP_EQUAL << valtype(pub.begin(), pub.end()) << OP_CHECKSIG));
+    BOOST_CHECK(!IsCarrierScript(CScript() << OP_SWAP << OP_SHA256 << valtype(h.begin(), h.end()) << OP_EQUALVERIFY << valtype(pub.begin(), pub.end()) << OP_CHECKSIGVERIFY));
+    BOOST_CHECK(!IsCarrierScript(carrier + CScript(CScript() << OP_NOP)));
+    BOOST_CHECK(!IsCarrierScript(CScript(carrier.begin(), carrier.end() - 1)));
+    BOOST_CHECK(!IsCarrierScript(VaultScript(120000, pub, 130000)));
+    BOOST_CHECK(!IsCarrierScript(BondScript(pub, 120000)));
+    BOOST_CHECK(!IsCarrierScript(GetScriptForDestination(pub.GetID())));
+    // (A 33-byte key prefix 02/03 that is not a curve point is still carrier-shaped, as it is vault-shaped for
+    // ParseVaultScript: shape is IsCompressedKey, not IsFullyValid - consensus fails such a spend at OP_CHECKSIG.)
+    // Not carrier scriptSigs: two pushes, four pushes, a non-push opcode, a third push that is not a carrier, small-integer pushes, the vault shapes.
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << bundle << valtype(carrier.begin(), carrier.end())));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << bundle << valtype(71, 0x30) << valtype(1, 1) << valtype(carrier.begin(), carrier.end())));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << bundle << valtype(71, 0x30) << valtype(carrier.begin(), carrier.end()) << OP_NOP));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << bundle << OP_DUP << valtype(carrier.begin(), carrier.end())));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << bundle << valtype(71, 0x30) << valtype(71, 0x51)));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript() << OP_1 << valtype(71, 0x30) << valtype(carrier.begin(), carrier.end())));
+    BOOST_CHECK(!ParseCarrierScriptSig(OwnerScriptSig(valtype(71, 0x30), VaultScript(120000, pub, 130000))));
+    BOOST_CHECK(!ParseCarrierScriptSig(ClaimScriptSig(VaultScript(120000, pub, 130000))));
+    BOOST_CHECK(!ParseCarrierScriptSig(CScript()));
+    // An empty bundle push (OP_0) is still carrier-shaped: the verifier calls it "shape" when it decodes.
+    BOOST_CHECK(ParseCarrierScriptSig(CarrierScriptSig(valtype(), valtype(71, 0x30), carrier)));
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(bundle1_carrier_spend_verifies_and_malleation_fails)
+{
+    RegtestActivateSapling();
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const CAmount carrierValue = 10000;   // CARRIER_VALUE
+    const CKey key = NewKey();
+    const valtype bundle(448, 0xAB);
+    uint256 h;
+    CSHA256().Write(bundle.data(), bundle.size()).Finalize(h.begin());
+    const CScript carrier = CarrierScript(key.GetPubKey(), h);
+    const CScript spk = P2SHScript(carrier);
+
+    auto build = [&](const valtype& pushedBundle, const CKey& signer) {
+        CMutableTransaction mtx = SpendingTx(carrierValue, 0);
+        mtx.vout[0].nValue = 0;
+        // ZIP-243 sighash with the carrier script as scriptCode, exactly as the vault owner path signs.
+        valtype sig = Sign(signer, carrier, mtx, 0, carrierValue, branchId);
+        mtx.vin[0].scriptSig = CarrierScriptSig(pushedBundle, sig, carrier);
+        return mtx;
+    };
+
+    // Success under STANDARD_SCRIPT_VERIFY_FLAGS and the consensus flags (P2SH | CLTV).
+    {
+        CMutableTransaction ok = build(bundle, key);
+        ScriptError err;
+        BOOST_CHECK_MESSAGE(Verify(ok, spk, carrierValue, branchId, &err), ScriptErrorString(err));
+        BOOST_CHECK(Verify(ok, spk, carrierValue, branchId, &err, CONSENSUS_FLAGS));
+        BOOST_CHECK(ok.vin[0].scriptSig.IsPushOnly());
+        // Consensus also checks the hash: the bundle in the scriptSig is exactly what the overlay's extractor sees.
+        std::optional<CarrierSpend> spend = ParseCarrierScriptSig(ok.vin[0].scriptSig);
+        BOOST_REQUIRE(spend);
+        uint256 again;
+        CSHA256().Write(spend->bundle.data(), spend->bundle.size()).Finalize(again.begin());
+        BOOST_CHECK(again == spend->bundleHash);
+    }
+    // The malleation case (R2): a relay node swaps the bundle push (which no signature covers) for another
+    // -> OP_EQUALVERIFY fails. The signature itself is still valid over the unchanged scriptCode.
+    {
+        CMutableTransaction mal = build(bundle, key);
+        valtype other = bundle;
+        other[0] ^= 1;
+        std::optional<CarrierSpend> spend = ParseCarrierScriptSig(mal.vin[0].scriptSig);
+        mal.vin[0].scriptSig = CarrierScriptSig(other, spend->sig, carrier);
+        ScriptError err;
+        BOOST_CHECK(!Verify(mal, spk, carrierValue, branchId, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EQUALVERIFY);
+        BOOST_CHECK(!Verify(mal, spk, carrierValue, branchId, &err, CONSENSUS_FLAGS));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EQUALVERIFY);
+        // An empty or truncated bundle likewise.
+        mal.vin[0].scriptSig = CarrierScriptSig(valtype(), spend->sig, carrier);
+        BOOST_CHECK(!Verify(mal, spk, carrierValue, branchId, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EQUALVERIFY);
+    }
+    // Wrong signer: the hash matches, OP_CHECKSIG fails.
+    {
+        CMutableTransaction wrong = build(bundle, NewKey());
+        ScriptError err;
+        BOOST_CHECK(!Verify(wrong, spk, carrierValue, branchId, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+    }
+    // A carrier committed to a 520-byte bundle spends; a 521-byte push fails MAX_SCRIPT_ELEMENT_SIZE at execution
+    // even when the script commits to it - the cap is real, and BUNDLE_MAX = 6 (448 bytes) sits under it.
+    {
+        for (size_t n : { (size_t)520, (size_t)521 }) {
+            const valtype big(n, 0xCD);
+            uint256 bh;
+            CSHA256().Write(big.data(), big.size()).Finalize(bh.begin());
+            const CScript bigCarrier = CarrierScript(key.GetPubKey(), bh);
+            const CScript bigSpk = P2SHScript(bigCarrier);
+            CMutableTransaction mtx = SpendingTx(carrierValue, 0);
+            mtx.vout[0].nValue = 0;
+            valtype sig = Sign(key, bigCarrier, mtx, 0, carrierValue, branchId);
+            mtx.vin[0].scriptSig = CarrierScriptSig(big, sig, bigCarrier);
+            BOOST_CHECK(mtx.vin[0].scriptSig.IsPushOnly());
+            ScriptError err;
+            const bool ok = Verify(mtx, bigSpk, carrierValue, branchId, &err);
+            if (n == 520) {
+                BOOST_CHECK_MESSAGE(ok, ScriptErrorString(err));
+            } else {
+                BOOST_CHECK(!ok);
+                BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PUSH_SIZE);
+                BOOST_CHECK(!Verify(mtx, bigSpk, carrierValue, branchId, &err, CONSENSUS_FLAGS));
+                BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PUSH_SIZE);
+            }
+        }
+        BOOST_CHECK_EQUAL(MAX_SCRIPT_ELEMENT_SIZE, 520u);
+    }
+    RegtestDeactivateSapling();
+}
+
+// Rule: REG-A1
+BOOST_AUTO_TEST_CASE(rega1_bond_script_verifies)
+{
+    RegtestActivateSapling();
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const CAmount bondValue = 20000 * COIN;
+    const uint32_t locktime = 420480 + 1000;
+    const CKey key = NewKey();
+    const CPubKey pub = key.GetPubKey();
+
+    const CScript bond = BondScript(pub, locktime);
+    BOOST_REQUIRE(!bond.empty());
+    CScript expect;
+    expect << (int64_t)locktime << OP_CHECKLOCKTIMEVERIFY << OP_DROP << valtype(pub.begin(), pub.end()) << OP_CHECKSIG;
+    BOOST_CHECK(bond == expect);
+    BOOST_CHECK_EQUAL(bond.size(), 41u);   // 3-byte height push
+    BOOST_CHECK_EQUAL(BondScript(pub, 5).size(), 38u);   // OP_5
+    BOOST_CHECK_EQUAL(bond.GetSigOpCount(true), 1u);
+    CPubKey k;
+    uint32_t lt = 0;
+    BOOST_REQUIRE(ParseBondScript(bond, k, lt));
+    BOOST_CHECK(k == pub);
+    BOOST_CHECK_EQUAL(lt, locktime);
+    BOOST_CHECK(BondScript(pub, 0).empty());
+    BOOST_CHECK(BondScript(pub, LOCKTIME_THRESHOLD).empty());
+    BOOST_CHECK(BondScript(NewKey(false).GetPubKey(), locktime).empty());
+    BOOST_CHECK(!ParseBondScript(CScript(), k, lt));
+    BOOST_CHECK(!ParseBondScript(VaultScript(locktime, pub, locktime + 10), k, lt));
+    BOOST_CHECK(!ParseBondScript(CarrierScript(pub, uint256()), k, lt));
+    BOOST_CHECK(!ParseBondScript(bond + CScript(CScript() << OP_NOP), k, lt));
+    BOOST_CHECK(!ParseBondScript(CScript() << (int64_t)locktime << OP_CHECKLOCKTIMEVERIFY << OP_DROP << valtype(pub.begin(), pub.end()) << OP_CHECKSIGVERIFY, k, lt));
+    {
+        CScript s;   // non-minimal 4-byte push of the height
+        s.push_back(0x04); s.push_back(0x78); s.push_back(0x6e); s.push_back(0x06); s.push_back(0x00);
+        s << OP_CHECKLOCKTIMEVERIFY << OP_DROP << valtype(pub.begin(), pub.end()) << OP_CHECKSIG;
+        BOOST_CHECK(!ParseBondScript(s, k, lt));
+    }
+
+    const CScript spk = P2SHScript(bond);
+    auto build = [&](uint32_t nLockTime, const CKey& signer) {
+        CMutableTransaction mtx = SpendingTx(bondValue, nLockTime);
+        valtype sig = Sign(signer, bond, mtx, 0, bondValue, branchId);
+        mtx.vin[0].scriptSig = CScript() << sig << valtype(bond.begin(), bond.end());
+        return mtx;
+    };
+    ScriptError err;
+    BOOST_CHECK_MESSAGE(Verify(build(locktime, key), spk, bondValue, branchId, &err), ScriptErrorString(err));
+    BOOST_CHECK(Verify(build(locktime + 1, key), spk, bondValue, branchId, &err, CONSENSUS_FLAGS));
+    BOOST_CHECK(!Verify(build(locktime - 1, key), spk, bondValue, branchId, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+    BOOST_CHECK(!Verify(build(locktime, NewKey()), spk, bondValue, branchId, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+    // A final sequence number disables CLTV.
+    {
+        CMutableTransaction mtx = build(locktime, key);
+        mtx.vin[0].nSequence = 0xFFFFFFFF;
+        mtx.vin[0].scriptSig = CScript() << Sign(key, bond, mtx, 0, bondValue, branchId) << valtype(bond.begin(), bond.end());
+        BOOST_CHECK(!Verify(mtx, spk, bondValue, branchId, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+    }
+    RegtestDeactivateSapling();
+}
+
+// Rule: BUNDLE-1
+// Rule: RED-5
+// A synthetic mint with a carrier input, and a claim with a carrier input and a
+// residual output, through IsStandardTx and AreInputsStandard called directly
+// (the carrier scriptSig is 595 bytes of pushes: under policy.cpp's 1,650 and
+// push-only; the P2SH redeem script has one sigop).
+void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
+{
+    const int height = 1;
+    LOCK(cs_main);
+    const yellowback::Params& params = MainParams();
+
+    const CKey ownerKey = NewKey(), userKey = NewKey(), payeeKey = NewKey(), carrierKey = NewKey(), attestorKey = NewKey();
+    CBasicKeyStore keystore;
+    keystore.AddKey(userKey);
+    const CScript userP2PKH = GetScriptForDestination(userKey.GetPubKey().GetID());
+    const CScript payeeP2PKH = GetScriptForDestination(payeeKey.GetPubKey().GetID());
+    const CScript attestorP2PKH = GetScriptForDestination(attestorKey.GetPubKey().GetID());
+    const CScript ownerP2PKH = GetScriptForDestination(ownerKey.GetPubKey().GetID());
+    const uint32_t refHeight = 100;
+    const uint32_t lockHeight = refHeight + params.classMin[0];
+    const uint32_t claimHeight = lockHeight + params.grace;
+    const CScript vault = VaultScript(lockHeight, ownerKey.GetPubKey(), claimHeight);
+    const CScript vaultSpk = P2SHScript(vault);
+    const CAmount vaultValue = 6000 * COIN;
+    const CAmount feeZat = FeeZat(vaultValue, params.feeMin, params.feeBps);
+    const CAmount attestFeeZat = feeZat / 4;
+    const CAmount carrierValue = 10000;
+    const valtype bundle(448, 0xAB);   // BUNDLE_MAX attestations' worth of bytes
+    uint256 h;
+    CSHA256().Write(bundle.data(), bundle.size()).Finalize(h.begin());
+    const CScript carrier = CarrierScript(carrierKey.GetPubKey(), h);
+    const CScript carrierSpk = P2SHScript(carrier);
+
+    CMutableTransaction fund;
+    fund.fOverwintered = true;
+    fund.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+    fund.nVersion = SAPLING_TX_VERSION;
+    fund.vout.push_back(CTxOut(10000 * COIN, userP2PKH));   // 0: YEC
+    fund.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));    // 1: a YED token
+    fund.vout.push_back(CTxOut(vaultValue, vaultSpk));      // 2: a vault
+    fund.vout.push_back(CTxOut(carrierValue, carrierSpk));  // 3: a carrier
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    view.ModifyCoins(fund.GetHash())->FromTx(fund, height);
+    const uint256 fundHash = fund.GetHash();
+
+    auto newTx = [&](uint32_t nLockTime) {
+        CMutableTransaction mtx;
+        mtx.fOverwintered = true;
+        mtx.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+        mtx.nVersion = SAPLING_TX_VERSION;
+        mtx.nExpiryHeight = refHeight + REF_WINDOW;
+        mtx.nLockTime = nLockTime;
+        return mtx;
+    };
+    auto signCarrier = [&](CMutableTransaction& mtx, unsigned int nIn) {
+        mtx.vin[nIn].scriptSig = CarrierScriptSig(bundle, Sign(carrierKey, carrier, mtx, nIn, carrierValue, branchId), carrier);
+    };
+    auto checkStandard = [&](CMutableTransaction& mtx, const std::string& what, size_t carrierIndex) {
+        std::string reason;
+        BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(mtx), reason, ::Params(), height), what + " (" + upgrade + "): " + reason);
+        BOOST_CHECK_MESSAGE(AreInputsStandard(CTransaction(mtx), view, branchId), what + " (" + upgrade + "): inputs");
+        BOOST_CHECK(FindCarrierInput(CTransaction(mtx), false) == std::optional<size_t>(carrierIndex));
+        ScriptError err;
+        BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[carrierIndex].scriptSig, carrierSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
+                                         MutableTransactionSignatureChecker(&mtx, carrierIndex, carrierValue), branchId, &err),
+                            what + ": carrier " + ScriptErrorString(err));
+    };
+
+    // MINT: YEC input, carrier input last; vault, token, OP_RETURN MINT(feeVout = 3), pool fee, attestor fee, change.
+    {
+        CMutableTransaction mtx = newTx(0);
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 0)));
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
+        mtx.vout.push_back(CTxOut(vaultValue, vaultSpk));
+        mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
+        // A1: the v3 MINT payload gains attestFeeVout (= 4 here); the v2 factory is used until payload.h has it.
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3)))));
+        mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
+        mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
+        mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - vaultValue - TOKEN_VALUE - feeZat - attestFeeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 0, 10000 * COIN, SIGHASH_ALL, branchId));
+        signCarrier(mtx, 1);
+        checkStandard(mtx, "MINT+carrier", 1);
+        BOOST_CHECK(mtx.vin[1].scriptSig.size() < 1650);
+    }
+    // CLAIM: vault input (claim path) at vin[0], token input, carrier input; YED change, payload, pool fee, attestor fee, residual.
+    {
+        CMutableTransaction mtx = newTx(claimHeight);
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 2), ClaimScriptSig(vault), 0xFFFFFFFE));
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 1)));
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
+        const CAmount residual = 1000 * COIN;
+        mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Redeem(refHeight, 2, { Assignment(0, 100) })))));
+        mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
+        mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
+        mtx.vout.push_back(CTxOut(residual, ownerP2PKH));
+        mtx.vout.push_back(CTxOut(vaultValue + carrierValue - feeZat - attestFeeZat - residual - DEFAULT_YELLOWBACK_FEE, userP2PKH));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, TOKEN_VALUE, SIGHASH_ALL, branchId));
+        signCarrier(mtx, 2);
+        checkStandard(mtx, "CLAIM+carrier+residual", 2);
+        // The vault input is the claim path and is never the carrier, with or without skipVin0.
+        BOOST_CHECK(!ParseVaultSpendPath(mtx.vin[0].scriptSig)->ownerPath);
+        BOOST_CHECK(!ParseCarrierScriptSig(mtx.vin[0].scriptSig));
+        BOOST_CHECK(FindCarrierInput(CTransaction(mtx), true) == std::optional<size_t>(2));
+        ScriptError err;
+        BOOST_CHECK_MESSAGE(VerifyScript(mtx.vin[0].scriptSig, vaultSpk, STANDARD_SCRIPT_VERIFY_FLAGS,
+                                         MutableTransactionSignatureChecker(&mtx, 0, vaultValue), branchId, &err), ScriptErrorString(err));
+    }
+    // CLAIM_NOTICE: a YEC input and the carrier; payload and change only.
+    {
+        CMutableTransaction mtx = newTx(0);
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
+        mtx.vin.push_back(CTxIn(COutPoint(fundHash, 0)));
+        mtx.vout.push_back(CTxOut(0, CScript() << OP_RETURN << valtype(41 + 4, 0x06)));   // A1: Payload::ClaimNotice
+        mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - DEFAULT_YELLOWBACK_FEE, userP2PKH));
+        BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, 10000 * COIN, SIGHASH_ALL, branchId));
+        signCarrier(mtx, 0);
+        checkStandard(mtx, "CLAIM_NOTICE+carrier", 0);
+    }
+    // Negative control: a carrier scriptSig with a 521-byte bundle is still push-only and under 1,650 bytes, so
+    // IsStandardTx passes; AreInputsStandard does NOT - it evaluates the scriptSig (policy.cpp:156, EvalScript with
+    // SCRIPT_VERIFY_NONE) and the push fails MAX_SCRIPT_ELEMENT_SIZE there (interpreter.cpp:277) before any sigop
+    // count; and execution under VerifyScript fails the same way. The 520-byte cap is enforced at relay and in consensus.
+    {
+        const valtype big(521, 0xCD);
+        uint256 bh;
+        CSHA256().Write(big.data(), big.size()).Finalize(bh.begin());
+        const CScript bigCarrier = CarrierScript(carrierKey.GetPubKey(), bh);
+        CMutableTransaction fund2 = fund;
+        fund2.vout[3] = CTxOut(carrierValue, P2SHScript(bigCarrier));
+        view.ModifyCoins(fund2.GetHash())->FromTx(fund2, height);
+        CMutableTransaction mtx = newTx(0);
+        mtx.vin.push_back(CTxIn(COutPoint(fund2.GetHash(), 3)));
+        mtx.vout.push_back(CTxOut(0, CScript() << OP_RETURN));
+        mtx.vin[0].scriptSig = CarrierScriptSig(big, Sign(carrierKey, bigCarrier, mtx, 0, carrierValue, branchId), bigCarrier);
+        std::string reason;
+        BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(mtx), reason, ::Params(), height), reason);
+        BOOST_CHECK(!AreInputsStandard(CTransaction(mtx), view, branchId));
+        ScriptError err;
+        BOOST_CHECK(!VerifyScript(mtx.vin[0].scriptSig, P2SHScript(bigCarrier), STANDARD_SCRIPT_VERIFY_FLAGS,
+                                  MutableTransactionSignatureChecker(&mtx, 0, carrierValue), branchId, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PUSH_SIZE);
+    }
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(bundle1_carrier_templates_are_standard_under_sapling)
+{
+    RegtestActivateSapling();
+    CheckCarrierTemplatesStandard(NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId, "sapling");
+    RegtestDeactivateSapling();
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(bundle1_carrier_templates_are_standard_under_canopy)
+{
+    RegtestActivateCanopy();
+    CheckCarrierTemplatesStandard(NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId, "canopy");
     RegtestDeactivateCanopy();
 }
 
