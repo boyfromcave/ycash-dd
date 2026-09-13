@@ -10,6 +10,7 @@
 #include "script/script.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,9 @@ typedef int64_t MicroUsd;
 /** Payload magic ("YB") and version (§3.3). */
 static const unsigned char PAYLOAD_MAGIC_0 = 0x59;
 static const unsigned char PAYLOAD_MAGIC_1 = 0x42;
-static const unsigned char PAYLOAD_VERSION = 0x02;
+static const unsigned char PAYLOAD_VERSION = 0x03;
+/** The payload version this release emits and accepts (v3 plan W14); versions 1 and 2 are non-Yellowback (V23). */
+inline uint8_t PayloadVersion() { return PAYLOAD_VERSION; }
 /** Largest payload: Ycash nMaxDatacarrierBytes (83) minus OP_RETURN and the push opcode. */
 static const size_t MAX_PAYLOAD = 80;
 static const size_t MIN_PAYLOAD = 4;
@@ -79,8 +82,22 @@ static const CAmount DEFAULT_YELLOWBACK_FEE = 1000;
 static const int NUM_CLASSES = 3;
 /** A signal-only tag carries this price (V9). */
 static const uint64_t TAG_PRICE_SIGNAL_ONLY = 0;
-/** feeVout value meaning "no enforcement-fee output" (§3.3). */
+/** feeVout / attestFeeVout value meaning "no fee output" (§3.3). */
 static const uint8_t FEE_VOUT_NONE = 0xFF;
+
+/**
+ * Where a transaction carries its attestation bundle (v3 plan §3.1 BUNDLE_CARRIER, W2):
+ * the scriptSig of a P2SH carrier input (shipped), the OP_RETURN payload tail
+ * (unshipped), or either. Regtest-only override -yellowbackbundlecarrier.
+ */
+enum class BundleCarrier : uint8_t {
+    SCRIPTSIG = 0,
+    OP_RETURN = 1,
+    EITHER    = 2,
+};
+/** "scriptsig" / "opreturn" / "either" (the flag's spelling); nullopt for anything else. */
+std::optional<BundleCarrier> ParseBundleCarrier(const std::string& name);
+const char* BundleCarrierName(BundleCarrier carrier);
 
 /**
  * Per-network parameters (§3.1, field list §4.2a). Built once per network.
@@ -153,6 +170,42 @@ struct Params
     int accuracyWindow;                  //!< 576
     int payeeTiltBps;                    //!< 10,000
 
+    // Price attestation (v3 plan §3.1). Regtest reads attestArmMin and bundleCarrier from
+    // -yellowbackattestarmmin / -yellowbackbundlecarrier (ParamsFromArgs, index.cpp); the
+    // state-hash preimage gains both in A1 (M13), not here.
+    int attestArmMin;                    //!< ATTEST_ARM_MIN 5 (ARM-1); 0 = never arms (regtest)
+    int attestArmDelay;                  //!< ATTEST_ARM_DELAY 1,152 (ARM-2)
+    bool attestRequired;                 //!< ATTEST_REQUIRED (W15): false => PRICE-2 reads x only, bundles ignored
+    BundleCarrier bundleCarrier;         //!< BUNDLE_CARRIER (W2)
+    int nSlots;                          //!< N_SLOTS 9
+    int mSelect;                         //!< M_SELECT 4
+    int kSlack;                          //!< K_SLACK 2
+    int bundleMax;                       //!< BUNDLE_MAX 6 (the 520-byte push)
+    int qLowBps;                         //!< Q_LOW_BPS 3,333
+    int qHighBps;                        //!< Q_HIGH_BPS 6,667
+    int attestMaxAge;                    //!< ATTEST_MAX_AGE 20 (= 2 k)
+    int pinWindow;                       //!< PIN_WINDOW 288 (PIN-1/2)
+    int pinDeltaBps;                     //!< PIN_DELTA_BPS 500
+    int pinMinTags;                      //!< PIN_MIN_TAGS 3
+    int pinMinBundles;                   //!< PIN_MIN_BUNDLES 2
+    int divergeBpsAttest;                //!< DIVERGE_BPS_ATTEST 1,500 (MINT-10)
+    int emergencyRatioBps;               //!< EMERGENCY_RATIO_BPS 10,500 (NOT-1, RED-4(b))
+    int emergencyPersist;                //!< EMERGENCY_PERSIST 48
+    int emergencyNoticeTtl;              //!< EMERGENCY_NOTICE_TTL 1,152
+    CAmount residualMinZat;              //!< RESIDUAL_MIN_ZAT 100,000 (RED-5)
+    int attestFeeBps;                    //!< ATTEST_FEE_BPS 2,500 (AFEE-1)
+    CAmount bondMin;                     //!< BOND_MIN 20,000 YEC
+    int bondMinLock;                     //!< BOND_MIN_LOCK 420,480
+    int bondMaturity;                    //!< BOND_MATURITY 16,128
+    int ageCap;                          //!< AGE_CAP 207,360 (bond weight)
+    int foundingWindow;                  //!< FOUNDING_WINDOW 8,064
+    int dormancyBlocks;                  //!< DORMANCY_BLOCKS 16,128
+    int dormancyMinBundles;              //!< DORMANCY_MIN_BUNDLES 20
+    int dormancyCheck;                   //!< DORMANCY_CHECK 48 (S15)
+    CAmount carrierValue;                //!< CARRIER_VALUE 10,000 zat (wallet policy, never hashed)
+    int attestInterval;                  //!< k 10 (agent policy: signing interval; ATTEST_MAX_AGE = 2 k)
+    int walletConfirmations;             //!< WALLET_CONFIRMATIONS 6 (wallet policy)
+
     Params();
 
     /** v2: configured iff the start height is known (§4.2). */
@@ -160,6 +213,12 @@ struct Params
     /** Class index (0..2) for a lock length in blocks; -1 if in no class (V19). */
     int ClassForLockBlocks(int64_t lockBlocks) const;
     bool IsValidClass(int termClass) const { return termClass >= 0 && termClass < NUM_CLASSES; }
+    /**
+     * "ARMED" in every v3 rule means both: the snapshot's Attest.status == ARMED and
+     * this set's attestRequired (W15). A1 adds IsArmedAt(const Snapshot&) once the
+     * Snapshot record carries `attest`; until then the status is passed in.
+     */
+    bool IsArmed(bool snapshotArmed) const { return attestRequired && snapshotArmed; }
     /** WINDOW_MIN_FILL of the three price windows (PRICE-1, L9). */
     int MinFill(int window) const
     {
@@ -174,12 +233,15 @@ const Params& MainParams();
 const Params& TestParams();
 
 /**
- * v2 regtest parameters (§3.1 regtest column). The four arguments are the
- * regtest-only flags -yellowbackstartheight, -yellowbacksigmaref (0 = multiplier
+ * Regtest parameters (§3.1 regtest column). The first four arguments are the
+ * v2 regtest-only flags -yellowbackstartheight, -yellowbacksigmaref (0 = multiplier
  * fixed at 1), -yellowbacksupplycapbps (0 = no cap) and -yellowbackenforceuntil
- * (0 = no sunset); they are the only values hashed into the state hash (M13).
+ * (0 = no sunset); v3 adds -yellowbackattestarmmin (0 = never arms) and
+ * -yellowbackbundlecarrier. All six are hashed into the state hash (M13; the
+ * two v3 values join the preimage in A1).
  */
-Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil);
+Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
+                     int attestArmMin = 3, BundleCarrier bundleCarrier = BundleCarrier::SCRIPTSIG);
 
 /**
  * Parameter-set selection by height (§3.1 *Parameter versioning*, K10): the
