@@ -697,7 +697,8 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def reconnect(self, i):
         cross = self._cross_edges() if self.is_network_split else []
         for a, b in self.EDGES:
-            if i in (a, b) and (a, b) not in cross and self.nodes[a] is not None and self.nodes[b] is not None:
+            if i in (a, b) and (a, b) not in cross and a < len(self.nodes) and b < len(self.nodes) \
+                    and self.nodes[a] is not None and self.nodes[b] is not None:
                 connect_nodes_bi(self.nodes, a, b)
 
     def advance_clock(self, seconds):
