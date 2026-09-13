@@ -207,6 +207,8 @@ BITCOIN_CORE_H = \
   script/standard.h \
   script/ismine.h \
   yellowback/address.h \
+  yellowback/attest.h \
+  yellowback/bundle.h \
   yellowback/coinselect.h \
   yellowback/db.h \
   yellowback/index.h \
@@ -465,6 +467,8 @@ libbitcoin_common_a_SOURCES = \
   utiltest.cpp \
   warnings.cpp \
   yellowback/address.cpp \
+  yellowback/attest.cpp \
+  yellowback/bundle.cpp \
   yellowback/coinselect.cpp \
   yellowback/params.cpp \
   yellowback/payload.cpp \
