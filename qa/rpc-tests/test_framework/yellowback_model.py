@@ -63,10 +63,23 @@ TAG_SIZE = 36
 TAG_PATTERN = b'\x24' + TAG_MAGIC      # direct-push opcode 0x24 (36) followed by the magic (P10)
 
 PAYLOAD_MAGIC = b'YB'
-PAYLOAD_VERSION = 2
+PAYLOAD_VERSION = 3
 PAYLOAD_MINT = 0x01
 PAYLOAD_TRANSFER = 0x02
 PAYLOAD_REDEEM = 0x03
+# v3 types (v3 plan section 3.3).  Decoded by name; no rule evaluates them yet (A1): a transaction
+# carrying one is handled exactly as the C++ handles it today -- through the TRANSFER/REDEEM path
+# with no assignments, so it touches no token and writes no TxLog unless it spends YED.
+PAYLOAD_ATTESTOR_REGISTER = 0x05
+PAYLOAD_CLAIM_NOTICE = 0x06
+PAYLOAD_EQUIVOCATION = 0x07
+PAYLOAD_ATTESTOR_REVIVE = 0x08
+PAYLOAD_TYPE_NAMES = {PAYLOAD_MINT: 'MINT', PAYLOAD_TRANSFER: 'TRANSFER', PAYLOAD_REDEEM: 'REDEEM',
+                      PAYLOAD_ATTESTOR_REGISTER: 'ATTESTOR_REGISTER', PAYLOAD_CLAIM_NOTICE: 'CLAIM_NOTICE',
+                      PAYLOAD_EQUIVOCATION: 'EQUIVOCATION', PAYLOAD_ATTESTOR_REVIVE: 'ATTESTOR_REVIVE'}
+# BUNDLE_CARRIER (v3 plan section 3.1, W2), the params.h enum order
+CARRIER_SCRIPTSIG, CARRIER_OP_RETURN, CARRIER_EITHER = 0, 1, 2
+CARRIER_NAMES = {CARRIER_SCRIPTSIG: 'scriptsig', CARRIER_OP_RETURN: 'opreturn', CARRIER_EITHER: 'either'}
 MAX_PAYLOAD = 80
 FEE_VOUT_NONE = 0xFF
 
@@ -126,7 +139,8 @@ VERDICT_BURNED = 'burned'
 class Params(object):
     """Every value a rule reads (section 3.1).  Build with Params.regtest(...) or Params.mainnet(...)."""
 
-    # The "hashed" record (section 3.6 Params): startHeight, sigmaRefBps, supplyCapBps, enforceUntil.
+    # The "hashed" record (section 3.6 Params): startHeight, sigmaRefBps, supplyCapBps, enforceUntil,
+    # and with v3 attestArmMin (u32) and bundleCarrier (u8) (M13).
 
     def __init__(self, network, start_height, sigma_ref_bps, supply_cap_bps, enforce_until,
                  p_fast_window, p_mid_window, p_slow_window,
@@ -138,7 +152,7 @@ class Params(object):
                  class_min, class_max, base_ratio_bps, vol_window, vol_step,
                  vol_periods_per_year, sigma_mult_max_bps, min_mint, max_mint, min_output,
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
-                 price_min=100, price_max=100_000_000):
+                 price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -187,6 +201,8 @@ class Params(object):
         self.ref_lag = ref_lag
         self.price_min = price_min
         self.price_max = price_max
+        self.attest_arm_min = attest_arm_min
+        self.bundle_carrier = bundle_carrier
 
     # WINDOW_MIN_FILL (section 3.1, L9): fast ceil(W/2); mid and slow ceil(2W/3)
     @property
@@ -208,10 +224,12 @@ class Params(object):
         return (self.class_min[term_class], self.class_max[term_class])
 
     @classmethod
-    def regtest(cls, start_height, sigma_ref_bps=0, supply_cap_bps=0, enforce_until=0):
+    def regtest(cls, start_height, sigma_ref_bps=0, supply_cap_bps=0, enforce_until=0, attest_arm_min=3,
+                bundle_carrier=CARRIER_SCRIPTSIG):
         return cls(
             network='regtest', start_height=start_height, sigma_ref_bps=sigma_ref_bps,
             supply_cap_bps=supply_cap_bps, enforce_until=enforce_until,
+            attest_arm_min=attest_arm_min, bundle_carrier=bundle_carrier,
             p_fast_window=8, p_mid_window=24, p_slow_window=64,
             signal_window=64, activation_threshold=48, participation_floor=39, activation_delay=64,
             enforcement_floor=32, enforcement_resume=39, valve_blocks=6, abandon_blocks=128,
@@ -246,15 +264,20 @@ class Params(object):
 
 
 def params_from_getinfo(info):
-    """Params from a ``yed_getinfo`` result (section 4.5): the four hashed values from ``params``,
-    everything else from the network's compiled-in table (the regtest table for regtest)."""
+    """Params from a ``yed_getinfo`` result (section 4.5): the hashed values from ``params`` (the four
+    v2 ones plus v3's ``attest.armMin`` and ``attest.carrierMode``), everything else from the
+    network's compiled-in table (the regtest table for regtest)."""
     p = info['params']
     network = info.get('network', 'regtest')
+    attest = p.get('attest', {})
+    carrier = {v: k for k, v in CARRIER_NAMES.items()}[attest.get('carrierMode', 'scriptsig')]
     if network == 'regtest':
         params = Params.regtest(int(p['startHeight']),
                                 sigma_ref_bps=int(p.get('sigmaRefBps', 0)),
                                 supply_cap_bps=int(p.get('supplyCapBps', 0)),
-                                enforce_until=int(p.get('enforceUntilHeight', 0) or 0))
+                                enforce_until=int(p.get('enforceUntilHeight', 0) or 0),
+                                attest_arm_min=int(attest.get('armMin', 3)),
+                                bundle_carrier=carrier)
     else:
         params = Params.mainnet(int(p['startHeight']), int(p.get('enforceUntilHeight', 0) or 0),
                                 network=network)
@@ -735,9 +758,11 @@ def find_tag(script_sig, height, params):
 # section 3.3  Payload codec
 
 class Payload(object):
-    """A well-formed payload.  type in {PAYLOAD_MINT, PAYLOAD_TRANSFER, PAYLOAD_REDEEM}."""
+    """A well-formed payload.  type in PAYLOAD_TYPE_NAMES."""
     __slots__ = ('type', 'term_class', 'cents', 'lock_height', 'ref_height', 'owner_pubkey',
-                 'fee_vout', 'assignments')
+                 'fee_vout', 'attest_fee_vout', 'assignments',
+                 'attestor_pubkey', 'bond_pubkey', 'bond_locktime', 'flags',
+                 'vault_txid', 'vault_vout', 'seq', 'price_micro_usd', 'cited_height', 'sig')
 
     def __init__(self, type_):
         self.type = type_
@@ -747,17 +772,32 @@ class Payload(object):
         self.ref_height = None
         self.owner_pubkey = None
         self.fee_vout = None
+        self.attest_fee_vout = None
         self.assignments = []      # list of (vout, cents)
+        # ATTESTOR_REGISTER
+        self.attestor_pubkey = None
+        self.bond_pubkey = None
+        self.bond_locktime = None
+        self.flags = None
+        # CLAIM_NOTICE (vault_txid is display-order hex, as everywhere in the model)
+        self.vault_txid = None
+        self.vault_vout = None
+        # ATTESTOR_REVIVE
+        self.seq = None
+        self.price_micro_usd = None
+        self.cited_height = None
+        self.sig = None
 
     @property
     def type_name(self):
-        return {PAYLOAD_MINT: 'MINT', PAYLOAD_TRANSFER: 'TRANSFER', PAYLOAD_REDEEM: 'REDEEM'}[self.type]
+        return PAYLOAD_TYPE_NAMES[self.type]
 
 
-def encode_mint(term_class, cents, lock_height, ref_height, owner_pubkey, fee_vout):
+def encode_mint(term_class, cents, lock_height, ref_height, owner_pubkey, fee_vout, attest_fee_vout=FEE_VOUT_NONE):
     assert len(owner_pubkey) == 33
     return (PAYLOAD_MAGIC + bytes([PAYLOAD_VERSION, PAYLOAD_MINT, term_class & 0xFF])
-            + struct.pack('<III', cents, lock_height, ref_height) + owner_pubkey + bytes([fee_vout & 0xFF]))
+            + struct.pack('<III', cents, lock_height, ref_height) + owner_pubkey
+            + bytes([fee_vout & 0xFF, attest_fee_vout & 0xFF]))
 
 
 def encode_transfer(assignments):
@@ -767,9 +807,9 @@ def encode_transfer(assignments):
     return out
 
 
-def encode_redeem(ref_height, fee_vout, assignments):
+def encode_redeem(ref_height, fee_vout, assignments, attest_fee_vout=FEE_VOUT_NONE):
     out = (PAYLOAD_MAGIC + bytes([PAYLOAD_VERSION, PAYLOAD_REDEEM]) + struct.pack('<I', ref_height)
-           + bytes([fee_vout & 0xFF, len(assignments)]))
+           + bytes([fee_vout & 0xFF, attest_fee_vout & 0xFF, len(assignments)]))
     for vout, cents in assignments:
         out += bytes([vout & 0xFF]) + struct.pack('<I', cents)
     return out
@@ -787,13 +827,42 @@ def decode_payload(data, n_vout=None, opret_index=None):
     t = data[3]
     body = data[4:]
     if t == PAYLOAD_MINT:
-        if len(body) != 47:
+        if len(body) != 48:
             return None
         p = Payload(PAYLOAD_MINT)
         p.term_class = body[0]
         p.cents, p.lock_height, p.ref_height = struct.unpack('<III', body[1:13])
         p.owner_pubkey = bytes(body[13:46])
         p.fee_vout = body[46]
+        p.attest_fee_vout = body[47]
+        return p
+    if t == PAYLOAD_ATTESTOR_REGISTER:
+        if len(body) != 71:
+            return None
+        p = Payload(t)
+        p.attestor_pubkey = bytes(body[0:33])
+        p.bond_pubkey = bytes(body[33:66])
+        p.bond_locktime = struct.unpack('<I', body[66:70])[0]
+        p.flags = body[70]
+        return p
+    if t == PAYLOAD_CLAIM_NOTICE:
+        if len(body) != 37:
+            return None
+        p = Payload(t)
+        p.vault_txid = bytes(body[0:32])[::-1].hex()
+        p.vault_vout = body[32]
+        p.ref_height = struct.unpack('<I', body[33:37])[0]
+        return p
+    if t == PAYLOAD_EQUIVOCATION:
+        if len(body) != 0:
+            return None
+        return Payload(t)
+    if t == PAYLOAD_ATTESTOR_REVIVE:
+        if len(body) != 74:
+            return None
+        p = Payload(t)
+        p.seq, p.price_micro_usd, p.cited_height = struct.unpack('<HII', body[0:10])
+        p.sig = bytes(body[10:74])
         return p
     if t == PAYLOAD_TRANSFER:
         if len(body) < 1:
@@ -804,15 +873,16 @@ def decode_payload(data, n_vout=None, opret_index=None):
         p = Payload(PAYLOAD_TRANSFER)
         rest = body[1:]
     elif t == PAYLOAD_REDEEM:
-        if len(body) < 6:
+        if len(body) < 7:
             return None
         p = Payload(PAYLOAD_REDEEM)
         p.ref_height = struct.unpack('<I', body[0:4])[0]
         p.fee_vout = body[4]
-        count = body[5]
-        if len(body) != 6 + 5 * count:
+        p.attest_fee_vout = body[5]
+        count = body[6]
+        if len(body) != 7 + 5 * count:
             return None
-        rest = body[6:]
+        rest = body[7:]
     else:
         return None
     seen = set()
@@ -1610,7 +1680,9 @@ class YellowbackModel(object):
             created = self._apply_mint(tx, height, rec, payload, opret)
             touched = touched or created
         elif payload is not None:
-            rec.type = payload.type_name
+            # The C++ labels every non-MINT payload TRANSFER or REDEEM (state.cpp); until A1 evaluates
+            # the v3 types they take the REDEEM label and the assignment-less XFER path there too.
+            rec.type = 'TRANSFER' if payload.type == PAYLOAD_TRANSFER else 'REDEEM'
             self._apply_transfer(tx, height, rec, payload, yed_in)
         else:
             rec.type = 'NONE'
@@ -1885,7 +1957,8 @@ class YellowbackModel(object):
         out += b'G' + _ser_totals(self.totals)
         for h in sorted(self.snapshots):
             out += b'S' + _u32be(h) + _ser_snapshot(self.snapshots[h])
-        out += b'P' + _i32(p.start_height) + _i32(p.sigma_ref_bps) + _i32(p.supply_cap_bps) + _i32(p.enforce_until)
+        out += (b'P' + _i32(p.start_height) + _i32(p.sigma_ref_bps) + _i32(p.supply_cap_bps) + _i32(p.enforce_until)
+                + _u32(p.attest_arm_min) + _u8(p.bundle_carrier))
         return bytes(out)
 
     def state_hash(self):
@@ -2112,7 +2185,8 @@ def replay_golden(doc):
     and return the model.  Each block is {height, hash, subsidyZat, txs: [raw hex...]} with
     txs[0] the coinbase."""
     p = doc['params']
-    params = Params.regtest(int(p['startHeight']), int(p['sigmaRefBps']), int(p['supplyCapBps']), int(p['enforceUntil']))
+    params = Params.regtest(int(p['startHeight']), int(p['sigmaRefBps']), int(p['supplyCapBps']), int(p['enforceUntil']),
+                            int(p.get('attestArmMin', 3)), int(p.get('bundleCarrier', CARRIER_SCRIPTSIG)))
     model = YellowbackModel(params)
     for b in doc['blocks']:
         txs = [tx_from_hex(h) for h in b['txs']]
