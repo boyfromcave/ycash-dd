@@ -360,6 +360,18 @@ jobs:
         if: steps.crate.outputs.present == 'true' && !cancelled()
         working-directory: contrib/yellowback/attest
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: rustfmt
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: cargo fmt --check
+      - name: expected.json is the Python aggregator's answer
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: python3 fixtures/expected.py && git diff --exit-code fixtures/expected.json
+      - name: The sample configuration parses
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: cargo run --locked -q -- check-config --conf attest.toml.sample
       - name: No agent crate in the node's build (v3 plan §8.4 item 14)
         if: steps.crate.outputs.present == 'true' && !cancelled()
         run: |
@@ -425,37 +437,6 @@ jobs:
   # The attestor agent (plan §5, W13): its own toolchain (rust-toolchain.toml), its own lock,
   # never the node's depends/. Also proves fixtures/expected.json is still what the Python
   # aggregator (the reference) computes, so the Rust/Python cross-check cannot drift silently.
-  agent:
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: contrib/yellowback/attest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Rust toolchain (the crate's rust-toolchain.toml selects it)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: contrib/yellowback/attest
-      - name: Build (locked)
-        run: cargo build --locked
-      - name: Unit tests (framing, config, aggregator fixtures, RPC mock, dir and local iroh round trips)
-        run: cargo test --locked
-      - name: Clippy
-        if: ${{ !cancelled() }}
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: rustfmt
-        if: ${{ !cancelled() }}
-        run: cargo fmt --check
-      - name: expected.json is the Python aggregator's answer
-        if: ${{ !cancelled() }}
-        run: python3 fixtures/expected.py && git diff --exit-code fixtures/expected.json
-      - name: The sample configuration parses
-        if: ${{ !cancelled() }}
-        run: cargo run --locked -q -- check-config --conf attest.toml.sample
-
   nightly:
     if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
