@@ -85,6 +85,13 @@ std::string P2PKHAddress(const CKeyID& key)
     return keyIO.EncodeDestination(CTxDestination(key));
 }
 
+/** The P2SH address of a redeem script (the bond output, v3 §3.4). */
+std::string P2SHAddress(const CScript& redeemScript)
+{
+    KeyIO keyIO(::Params());
+    return keyIO.EncodeDestination(CTxDestination(CScriptID(redeemScript)));
+}
+
 UniValue PayeeOrNull(bool has, const uint160& key)
 {
     return has ? UniValue(P2PKHAddress(CKeyID(key))) : NullUniValue;
@@ -294,12 +301,14 @@ UniValue PayloadToJSON(const Payload& p)
         o.pushKV("refHeight", (int64_t)p.refHeight);
         o.pushKV("ownerPubKey", HexStr(p.ownerKeyBytes.begin(), p.ownerKeyBytes.end()));
         o.pushKV("feeVout", (int)p.feeVout);
+        o.pushKV("attestFeeVout", (int)p.attestFeeVout);
         break;
     case PayloadType::TRANSFER:
     case PayloadType::REDEEM: {
         if (p.type == PayloadType::REDEEM) {
             o.pushKV("refHeight", (int64_t)p.refHeight);
             o.pushKV("feeVout", (int)p.feeVout);
+            o.pushKV("attestFeeVout", (int)p.attestFeeVout);
         }
         UniValue as(UniValue::VARR);
         for (const Assignment& a : p.assignments) {
@@ -310,6 +319,47 @@ UniValue PayloadToJSON(const Payload& p)
         }
         o.pushKV("assignments", as);
         o.pushKV("assignedCents", p.AssignedCents());
+        break;
+    }
+    case PayloadType::ATTESTOR_REGISTER: {
+        // Contract: register {attestorPubKey, bondPubKey, bondAddress, bondLocktime, flags {tier, pool}};
+        // bondAddress is the P2SH address of BondScript(bondPubKey, bondLocktime) (v3 §3.4).
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("attestorPubKey", HexStr(p.attestorKeyBytes.begin(), p.attestorKeyBytes.end()));
+        r.pushKV("bondPubKey", HexStr(p.bondKeyBytes.begin(), p.bondKeyBytes.end()));
+        r.pushKV("bondAddress", p.bondPubKey.IsValid() ? UniValue(P2SHAddress(BondScript(p.bondPubKey, p.bondLocktime))) : NullUniValue);
+        r.pushKV("bondLocktime", (int64_t)p.bondLocktime);
+        UniValue flags(UniValue::VOBJ);
+        flags.pushKV("tier", (int)(p.flags & 0x03));
+        flags.pushKV("pool", (p.flags & 0x04) != 0);
+        r.pushKV("flags", flags);
+        o.pushKV("register", r);
+        break;
+    }
+    case PayloadType::CLAIM_NOTICE: {
+        UniValue n(UniValue::VOBJ);
+        UniValue vault(UniValue::VOBJ);
+        vault.pushKV("txid", p.vaultTxid.GetHex());
+        vault.pushKV("vout", (int)p.vaultVout);
+        n.pushKV("vault", vault);
+        n.pushKV("refHeight", (int64_t)p.refHeight);
+        o.pushKV("notice", n);
+        break;
+    }
+    case PayloadType::EQUIVOCATION:
+        o.pushKV("equivocation", UniValue(UniValue::VOBJ));
+        break;
+    case PayloadType::ATTESTOR_REVIVE: {
+        UniValue rv(UniValue::VOBJ);
+        UniValue att(UniValue::VOBJ);
+        att.pushKV("seq", (int)p.seq);
+        att.pushKV("priceMicroUsd", (int64_t)p.priceMicroUsd);
+        att.pushKV("citedHeight", (int64_t)p.citedHeight);
+        att.pushKV("sig", HexStr(p.sig.begin(), p.sig.end()));
+        std::vector<unsigned char> raw = EncodePayload(p);
+        att.pushKV("hex", raw.size() > 4 ? HexStr(raw.begin() + 4, raw.end()) : "");
+        rv.pushKV("attestation", att);
+        o.pushKV("revive", rv);
         break;
     }
     }
@@ -459,7 +509,43 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
     policy.pushKV("tiltBps", pp.tiltBps);
     policy.pushKV("preferredPayee", pp.preferred.has_value() ? UniValue(P2PKHAddress(pp.preferred.value())) : NullUniValue);
+    // A2 wires AFEE-W; until then the flag is reported as given (a seq number), null when unset.
+    policy.pushKV("preferredAttestor", mapArgs.count("-yellowbackpreferredattestor") ? UniValue(GetArg("-yellowbackpreferredattestor", 0)) : NullUniValue);
     prm.pushKV("policy", policy);
+    // v3 §3.1 attestation parameters (contract: params.attest; armMin and carrierMode are hashed on regtest, M13)
+    UniValue attest(UniValue::VOBJ);
+    attest.pushKV("payloadVersion", (int)PayloadVersion());
+    attest.pushKV("armMin", p.attestArmMin);
+    attest.pushKV("armDelay", p.attestArmDelay);
+    attest.pushKV("required", p.attestRequired);
+    attest.pushKV("carrierMode", BundleCarrierName(p.bundleCarrier));
+    attest.pushKV("nSlots", p.nSlots);
+    attest.pushKV("mSelect", p.mSelect);
+    attest.pushKV("kSlack", p.kSlack);
+    attest.pushKV("bundleMax", p.bundleMax);
+    attest.pushKV("qLowBps", p.qLowBps);
+    attest.pushKV("qHighBps", p.qHighBps);
+    attest.pushKV("attestMaxAge", p.attestMaxAge);
+    attest.pushKV("pinWindow", p.pinWindow);
+    attest.pushKV("pinDeltaBps", p.pinDeltaBps);
+    attest.pushKV("pinMinTags", p.pinMinTags);
+    attest.pushKV("pinMinBundles", p.pinMinBundles);
+    attest.pushKV("divergeBpsAttest", p.divergeBpsAttest);
+    attest.pushKV("emergencyRatioBps", p.emergencyRatioBps);
+    attest.pushKV("emergencyPersist", p.emergencyPersist);
+    attest.pushKV("emergencyNoticeTtl", p.emergencyNoticeTtl);
+    attest.pushKV("residualMinZat", p.residualMinZat);
+    attest.pushKV("attestFeeBps", p.attestFeeBps);
+    attest.pushKV("bondMinZat", p.bondMin);
+    attest.pushKV("bondMinLock", p.bondMinLock);
+    attest.pushKV("bondMaturity", p.bondMaturity);
+    attest.pushKV("ageCap", p.ageCap);
+    attest.pushKV("foundingWindow", p.foundingWindow);
+    attest.pushKV("dormancyBlocks", p.dormancyBlocks);
+    attest.pushKV("dormancyMinBundles", p.dormancyMinBundles);
+    attest.pushKV("dormancyCheck", p.dormancyCheck);
+    attest.pushKV("carrierValueZat", p.carrierValue);
+    prm.pushKV("attest", attest);
     o.pushKV("params", prm);
     return o;
 }
@@ -966,7 +1052,7 @@ UniValue yed_decodepayload(const UniValue& params, bool fHelp)
     if (fHelp || params.size() != 1)
         throw std::runtime_error(
             "yed_decodepayload \"hex\"\n"
-            "\nDecode a version-2 Yellowback payload (the data push, a whole OP_RETURN script, or a raw transaction). Allowed while unhealthy.\n");
+            "\nDecode a version-3 Yellowback payload (the data push, a whole OP_RETURN script, or a raw transaction). Allowed while unhealthy.\n");
 
     EnsureIndex();
     std::string hex = params[0].get_str();
@@ -992,7 +1078,7 @@ UniValue yed_decodepayload(const UniValue& params, bool fHelp)
     o.pushKV("valid", false);
     o.pushKV("version", 0);
     o.pushKV("type", "none");
-    o.pushKV("reason", "malformed: not a version-2 Yellowback payload, OP_RETURN script or transaction carrying one");
+    o.pushKV("reason", "malformed: not a version-3 Yellowback payload, OP_RETURN script or transaction carrying one");
     return o;
 }
 
