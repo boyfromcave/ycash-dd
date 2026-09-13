@@ -20,10 +20,18 @@ If **M** is Taproot, SegWit, BIP9, `nVersion` bit-packing, the `Coin` model or M
 
 - [ ] node / wallet / RPC (no rule change)
 - [ ] mining policy (Tier 1)
-- [ ] soft-fork hook (`src/main.cpp`, `src/miner.cpp`, `src/rpc/mining.cpp`, `src/yellowback/state.cpp`):
-      two approving reviewers, one of whom did not write or pair on it
+- [ ] overlay rule shared by enforcing miners (`src/yellowback/state.cpp`, `bundle.cpp`, `attest.cpp`;
+      v3 plan §1 item 2 — the v2 soft-fork rule set, no new hook): two approving reviewers, one of
+      whom did not write or pair on it
+- [ ] soft-fork hook (`src/main.cpp`, `src/miner.cpp`, `src/rpc/mining.cpp`): **frozen since v3**
+      (v3 plan §4.1: no new line; the `audit` job enforces zero delta against `feature/yellowback-sf`)
 - [ ] consensus set (`src/consensus`, `src/script`, `src/primitives`, `src/pow`, `chainparams.cpp`,
       `wallet/wallet.{h,cpp}`, `txdb.*`, `configure.ac`) — **refused**; the `audit` job enforces zero lines
+
+Tier statement (v3 plan §1 item 2, §4 rule 4 of AGENTS.md): every rule this PR adds or changes is
+evaluated inside the overlay's `ProcessTx`/`ComputeSnapshot`, reached from the v2 hooks unchanged;
+block validity stays "ACTIVE-vault spends obey RED-1..5". If that sentence is not true of this PR,
+say so here and stop.
 
 Why the cheaper tier cannot do it:
 
@@ -42,6 +50,11 @@ line before it; the `audit` job finds rule coverage through those tags. Rule ide
 | consensus set | | 0 |
 
 Every behaviour-changing statement in those files sits inside `if (g_yellowback)`; `DoS(0)` only.
+
+- [ ] **No delta in the frozen files** (v3 plan §4.1, §8.4 item 1):
+      `git diff --quiet feature/yellowback-sf...HEAD -- $(cat qa/yellowback-frozen-files.txt)` exits 0.
+      The list is the one file `qa/yellowback-frozen-files.txt`, read by the `audit` job; a PR that needs
+      a line in any of them is refused, not budgeted — say so in the tier section instead.
 
 ## Disabled or removed tests
 

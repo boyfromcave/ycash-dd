@@ -19,9 +19,11 @@ on:
   push:
     branches:
       - feature/yellowback-sf
+      - feature/yellowback-price-attest
   pull_request:
     branches:
       - feature/yellowback-sf
+      - feature/yellowback-price-attest
   schedule:
     - cron: '0 3 * * *'
     - cron: '0 4 * * 0'
@@ -148,12 +150,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch the pristine baseline branch
-        # Every diff below is against ycash-legacy (= upstream v4.5.0). A missing branch is an
-        # error, never a vacuous pass.
+      - name: Fetch the pristine baseline branch and the v2 baseline
+        # Every diff below is against ycash-legacy (= upstream v4.5.0), and the v3 frozen-file check
+        # against feature/yellowback-sf (= v2 complete). A missing branch is an error, never a
+        # vacuous pass.
         run: |
           git fetch --no-tags origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
           git rev-parse --verify ycash-legacy
+          git fetch --no-tags origin +refs/heads/feature/yellowback-sf:refs/remotes/origin/feature/yellowback-sf
+          git rev-parse --verify origin/feature/yellowback-sf
+
+      - name: Zero delta in the frozen files vs feature/yellowback-sf (v3 plan §4.1, §8.4 item 1)
+        # v3 adds no line to the soft-fork hooks, the policy layer or the consensus set: the list
+        # is the one file qa/yellowback-frozen-files.txt (quoted by the plan and the PR template),
+        # one path per line, directories allowed. --quiet exits 1 on any difference; the diff is
+        # printed first so the reviewer sees what moved.
+        run: |
+          set -e
+          test -s qa/yellowback-frozen-files.txt
+          frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$')
+          echo "frozen set:"; echo "$frozen"
+          git --no-pager diff --stat origin/feature/yellowback-sf...HEAD -- $frozen
+          git diff --quiet origin/feature/yellowback-sf...HEAD -- $frozen
 
       - name: Line budget and the consensus zero set (plan §4.1)
         run: |
@@ -176,12 +194,17 @@ jobs:
         # name what is forbidden). tag.cpp joins the list when Phase 1 adds it (K23).
         run: |
           set -e
+          # attest and bundle join the set in v3 (plan §3.10); they exist from Phase A0's crypto chunk.
           pure=""
-          for f in state math tag payload script view; do
+          for f in state math tag payload script view attest bundle; do
             for x in src/yellowback/$f.cpp src/yellowback/$f.h; do test -f "$x" && pure="$pure $x"; done
           done
           echo "pure modules:$pure"
           ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          # libsecp256k1 is reached through one wrapper only, VerifyCompactSig in attest.cpp (v3 §3.10,
+          # §8.4 item 2), so the fuzz harness can stub it and low-S is enforced in one place. Comment
+          # lines are skipped; nothing else under src/yellowback or src/rpc/yellowback* may name it.
+          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
           # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
           ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
           # GetTime() has two homes only: the quote RPC (stamps receivedAt) and policy.cpp (BuildTagScript), M11.
@@ -220,8 +243,30 @@ jobs:
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
           ! git grep -in roster -- src/yellowback
-          test -f doc/yellowback-rpc.md && grep -q 'rpcversion.*2' doc/yellowback-rpc.md
+          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 3' doc/yellowback-rpc.md
           python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
+          # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
+          # error identifier present in the generated JSON — the C++ agents implement these names.
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("doc/yellowback-rpc-contract.json"))
+          missing = []
+          if d.get("rpcversion") != 3: missing.append("rpcversion=3")
+          if "attest" not in d["yed_getinfo"]["returns"]: missing.append("yed_getinfo.attest")
+          for c in ["yed_listattestors", "yed_getattestations", "yed_addattestation", "yed_buildbundle", "yed_getselection",
+                    "yed_getnotice", "yed_claimnotice", "yed_sweepcarriers", "yed_registerattestor", "yed_withdrawbond",
+                    "yed_revive", "yed_reportequivocation", "yed_signattestation"]:
+              if c not in d: missing.append(c)
+          for e in ["attest-unknown-seq", "attest-not-eligible", "attest-stale", "attest-bad-sig", "attest-range",
+                    "bundle-insufficient", "mint10-diverged", "notice-standing", "notice-not-underwater", "bond-below-min",
+                    "lock-below-min", "bond-locked", "not-dormant", "not-equivocation", "attest-key-not-held",
+                    "equivocation-guard"]:
+              if e not in d["errors"]: missing.append("errors." + e)
+          if missing: print("contract missing:", missing); sys.exit(1)
+          PY
+          # The spec copy carries the v3 delta (make spec appends the v3 plan's section 3).
+          grep -q '^## v3 delta' doc/yellowback-spec.md
+          test -f doc/yellowback-attestor.md && test -f qa/yellowback-frozen-files.txt
           git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(' | { ! grep -v 'DoS(0'; }
           # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
           echo "main.cpp residual (lines not mentioning g_yellowback):"
@@ -249,6 +294,78 @@ jobs:
           done
           exit $rc
 
+      - name: Rule -> test tags, v3 identifiers (soft until Phase A1 lands; then blocking, v3 plan §7)
+        # The v3 rules of plan §3.8 (ARM-1/2, REG-A1, BUNDLE-1, MINT-9/10, NOT-1, EQV-1, REV-1, PIN-1/2,
+        # AFEE-0/1, RED-5) are implemented in Phase A1 (state machine) on top of A0's bundle/attest
+        # library, so most of them have no test to tag yet. continue-on-error keeps CI green for rules
+        # that do not exist; the step still prints every missing tag. REMOVE continue-on-error at A1's
+        # exit (the plan's "rule-tag loop over the v3 identifiers" is blocking from then on), and fold
+        # the list into the loop above when the v3 series merges into feature/yellowback-sf.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          set -e
+          rc=0
+          for id in ARM-1 ARM-2 REG-A1 BUNDLE-1 MINT-9 MINT-10 NOT-1 EQV-1 REV-1 PIN-1 PIN-2 AFEE-0 AFEE-1 RED-5; do
+            git grep -qE "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (v3): $id"; rc=1; }
+          done
+          exit $rc
+
+  # The Rust attestor agent of v3 plan §5 (contrib/yellowback/attest/, Phase A4): built with the
+  # toolchain its own rust-toolchain.toml pins, never by depends. Runs only when the crate exists —
+  # a checkout without it (Phases A0-A3) skips every step and the job is green by construction.
+  # GitHub's `paths:` filter is workflow-wide, not per job, so the gate is the presence check below
+  # plus a cargo cache keyed on Cargo.lock; the crate is small and the job is cheap.
+  agent:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Crate present?
+        id: crate
+        run: |
+          if [ -f contrib/yellowback/attest/Cargo.toml ] && [ -f contrib/yellowback/attest/rust-toolchain.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"; echo "contrib/yellowback/attest/ not present yet (Phase A4); nothing to build"
+          fi
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        if: steps.crate.outputs.present == 'true'
+        # rustup reads rust-toolchain.toml from the working directory: the pin lives in the crate,
+        # not in this workflow (v3 plan S8, W13).
+        working-directory: contrib/yellowback/attest
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" show
+          "$HOME/.cargo/bin/rustup" component add clippy
+      - uses: actions/cache@v4
+        if: steps.crate.outputs.present == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contrib/yellowback/attest/target
+          key: attest-cargo-${{ runner.os }}-${{ hashFiles('contrib/yellowback/attest/Cargo.lock', 'contrib/yellowback/attest/rust-toolchain.toml') }}
+      - name: cargo build --locked
+        if: steps.crate.outputs.present == 'true'
+        working-directory: contrib/yellowback/attest
+        run: cargo build --locked
+      - name: cargo test
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: cargo test --locked
+      - name: cargo clippy -D warnings
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: No agent crate in the node's build (v3 plan §8.4 item 14)
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        run: |
+          ! grep -q 'iroh' Cargo.lock
+          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest'
+
   python:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-22.04
@@ -264,11 +381,33 @@ jobs:
       - run: python3 -m pip install --user pyflakes
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
-      - name: pyflakes (functional tests and the shared helper)
+      - name: pyflakes (functional tests and the shared helpers)
         # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
+        # does not hide the others. The job still fails overall. The two v3 framework files
+        # (Phase A0's pyfw chunk) are listed by name; a file that is not there yet is skipped, one
+        # that is there is checked.
         if: ${{ !cancelled() }}
-        run: python3 -m pyflakes qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py
+        run: |
+          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py"
+          for f in qa/rpc-tests/test_framework/yellowback_attest.py qa/rpc-tests/test_framework/test_yellowback_attest.py; do
+            test -f "$f" && files="$files $f"
+          done
+          python3 -m pyflakes $files
+      - name: sign_attestation known-answer test and the attest framework's unit tests (v3 plan §6.0 item 6)
+        # test_framework/test_yellowback_attest.py holds the low-S known-answer vectors (R18) that the
+        # C++ yellowback_attest_tests replays; it imports the inherited framework, hence the same
+        # prerequisites the main job installs. Skipped, loudly, until the pyfw chunk lands.
+        if: ${{ !cancelled() }}
+        run: |
+          if [ ! -f qa/rpc-tests/test_framework/test_yellowback_attest.py ]; then
+            echo "qa/rpc-tests/test_framework/test_yellowback_attest.py not present yet (Phase A0 pyfw chunk)"; exit 0
+          fi
+          python3 -m pip install --user simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
