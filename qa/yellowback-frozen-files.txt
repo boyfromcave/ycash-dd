@@ -1,0 +1,14 @@
+src/main.cpp
+src/miner.cpp
+src/rpc/mining.cpp
+src/policy/
+src/script/
+src/consensus/
+src/primitives/
+src/pow/
+configure.ac
+src/wallet/wallet.h
+src/wallet/wallet.cpp
+src/txdb.cpp
+src/txdb.h
+src/chainparams.cpp
