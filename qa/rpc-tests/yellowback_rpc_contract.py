@@ -602,7 +602,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
             set_quote(nodes[i], '10.20')
         self.mine_round_robin(POOLS, max(64, claim_height - user.getblockcount()) + REF_LAG)
         assert_equal(user.yed_getprice()['pClaim'], usd_to_micro('10.20'))
-        feed_all(user, {seq: 11 for seq in live})
+        for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
+            feed_all(node, {seq: 11 for seq in live})
         pos = {p['txid']: p for p in c.check('yed_listpositions', user.yed_listpositions('ACTIVE'))}
         assert_equal((pos[victim]['noticed'], pos[victim]['canNotice'], pos[victim]['canClaim']), (False, True, False))
         assert_equal([x['vault'] for x in user.yed_listclaimable() if x['vault'] == victim + ':0'], [])
@@ -616,7 +617,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal((pos[victim]['noticed'], pos[victim]['noticeHeight'], pos[victim]['canNotice']), (True, user.getblockcount(), False))
         assert_rpc_error('notice-standing', claimant.yed_claimnotice, victim)
         self.mine_round_robin(POOLS, notice['emergencyOpenAt'] - user.getblockcount())
-        feed_all(user, {seq: 11 for seq in live})
+        for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
+            feed_all(node, {seq: 11 for seq in live})
         claimable = {x['vault']: x for x in c.check('yed_listclaimable', user.yed_listclaimable())}
         assert_equal((claimable[victim + ':0']['claimPath'], claimable[victim + ':0']['noticed']), ('b', True))
         pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
