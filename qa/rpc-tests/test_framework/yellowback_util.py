@@ -526,6 +526,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
     def setup_network(self, split=False):
         self.nodes = self.setup_nodes()
         self.is_network_split = False
+        self.setup_node_count = len(self.nodes)
         self.connect_all()
         if self.initial_blocks and self.nodes[USER].getblockcount() == 0:
             self.nodes[USER].generate(self.initial_blocks)
@@ -581,9 +582,13 @@ class YellowbackTestFramework(BitcoinTestFramework):
         self.sync_all(blocks_only=blocks_only)
 
     def groups(self):
-        """The connected groups of node indices given the split state."""
+        """The connected groups of node indices given the split state.  A node a script appends
+        after setup (yellowback_index.py's fresh node 6, wired to STOCK alone) belongs to no half:
+        SPLIT_HALVES names the attestor slots 6-7 only when the topology started with them, and the
+        script syncs a late node itself."""
         if self.is_network_split:
-            return [[i for i in g if i < len(self.nodes)] for g in self.SPLIT_HALVES]
+            n = min(len(self.nodes), getattr(self, 'setup_node_count', len(self.nodes)))
+            return [[i for i in g if i < n] for g in self.SPLIT_HALVES]
         return [list(range(len(self.nodes)))]
 
     def sync_all(self, blocks_only=False):

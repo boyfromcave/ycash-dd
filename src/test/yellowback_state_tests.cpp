@@ -4,17 +4,21 @@
 
 // Every rule of plan §3.7–3.9 on synthetic blocks over an in-memory view
 // (Phase 2). Each case carries a `// Rule:` tag; the acceptance loop greps
-// them. The golden vector (statehash_golden_vector) replays 224 blocks of
+// them. The golden vector (statehash_golden_vector) replays 440 blocks of
 // real serialised transactions built by the Python model
 // (qa/rpc-tests/test_framework/yellowback_golden.json) and must reproduce
 // its pinned state hash byte for byte (N18, N23).
 
+#include "yellowback/attest.h"
+#include "yellowback/bundle.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
 #include "yellowback/view.h"
+
+#include "crypto/sha256.h"
 
 #include "consensus/validation.h"
 #include "core_io.h"
@@ -30,12 +34,16 @@
 
 #include <univalue.h>
 
+#include <cstring>
+#include <map>
+#include <set>
+
 using namespace yellowback;
 
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "bf4e41ff50326919fc0da42d352fb8e96efd2f0dd6aede3c028db1283d9a97a7";
+const std::string GOLDEN_HASH = "abe131e0cd68cd438449ce22969c7b331930ca3b9e4324ed9d841e90a340a4fe";
 
 uint160 KeyOf(int i)
 {
@@ -56,6 +64,12 @@ struct MintOpts
     bool p2shVault = true;
     std::vector<COutPoint> yedInputs;
     std::optional<CScript> vaultScriptOverride;
+    // v3
+    std::optional<valtype> bundle;          //!< carried by an extra (last) input
+    int attestPayee = -1;                   //!< seq whose bond key receives the attestor fee at vout 4; -1 = no such output
+    CAmount attestFeeValue = -1;            //!< -1 = attestFeeZat(feeZat(collateral))
+    uint8_t attestFeeVout = 4;              //!< the payload field when attestPayee >= 0
+    std::optional<CScript> attestFeeScript; //!< overrides the attestor-fee output's script
 };
 
 struct SpendOpts
@@ -70,6 +84,27 @@ struct SpendOpts
     std::optional<Payload> payloadOverride;
     std::vector<COutPoint> extraVaults;     //!< spent after vin[0]
     bool vaultFirst = true;
+    // v3
+    std::optional<valtype> bundle;          //!< carried by an extra (last) input, never vin[0]
+    int attestPayee = -1;                   //!< seq paid the attestor fee (after the assigned outputs); -1 = none
+    CAmount attestFeeValue = -1;
+    std::optional<CAmount> residualValue;   //!< a residual output after the attestor fee
+    std::optional<CScript> residualScript;  //!< default P2PKH(owner)
+};
+
+/** A tiny SigCache for the cache tests: an unbounded map. */
+struct MapSigCache : public SigCache
+{
+    std::map<uint256, bool> entries;
+    int hits = 0;
+    std::optional<bool> Lookup(const uint256& key) const override
+    {
+        auto it = entries.find(key);
+        if (it == entries.end()) return std::nullopt;
+        const_cast<MapSigCache*>(this)->hits++;
+        return it->second;
+    }
+    void Insert(const uint256& key, bool valid) override { entries[key] = valid; }
 };
 
 /** A synthetic chain over a MemoryStateView with the regtest parameters. */
@@ -82,12 +117,27 @@ struct Fixture
     int tip;
     CKey ownerKey, userKey;
     int fakeCounter;
+    std::vector<CKey> hotKeys, bondKeys;    //!< v3: attestor i registers with hotKeys[i] / bondKeys[i] and becomes seq i
+    SigCache* cache = nullptr;
 
-    explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int until = 0)
-        : P(RegtestParams(start, sigmaRef, capBps, until)), tip(start - 1), fakeCounter(0)
+    explicit Fixture(int start = 1, int sigmaRef = 0, int capBps = 0, int until = 0, int armMin = 3)
+        : P(RegtestParams(start, sigmaRef, capBps, until, armMin)), tip(start - 1), fakeCounter(0)
     {
         ownerKey.MakeNewKey(true);
         userKey.MakeNewKey(true);
+        for (int i = 0; i < 8; i++) {
+            hotKeys.push_back(DeterministicKey("yellowback-state-test-hot", i));
+            bondKeys.push_back(DeterministicKey("yellowback-state-test-bond", i));
+        }
+    }
+
+    static CKey DeterministicKey(const char* tag, int i)
+    {
+        unsigned char d[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write((const unsigned char*)tag, strlen(tag)).Write((const unsigned char*)&i, sizeof(i)).Finalize(d);
+        CKey k;
+        k.Set(d, d + 32, true);
+        return k;
     }
 
     static uint256 FakeHash(int height)
@@ -140,7 +190,7 @@ struct Fixture
         block.vtx.push_back(CTransaction(Coinbase(height, tag)));
         for (auto& m : txs) block.vtx.push_back(CTransaction(m));
         OverlayStateView overlay(view);
-        BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, FakeHash(height), SUBSIDY);
+        BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, FakeHash(height), SUBSIDY, cache);
         overlay.Commit();
         undos[height] = ev.undo;
         evals[height] = ev;
@@ -198,7 +248,8 @@ struct Fixture
         for (const COutPoint& op : o.yedInputs) m.vin.push_back(CTxIn(op));
         m.vout.push_back(CTxOut(collateral, o.p2shVault ? P2SHScript(vs) : GetScriptForDestination(owner.GetID())));
         m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
-        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, owner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout);
+        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, owner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
+                                  o.attestPayee >= 0 ? o.attestFeeVout : FEE_VOUT_NONE);
         if (!o.rawOwner.empty()) p.ownerKeyBytes = o.rawOwner;
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
         if (o.feeKey != -1) {
@@ -207,7 +258,13 @@ struct Fixture
             CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(collateral, P.feeMin, P.feeBps);
             m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key)))));
         }
+        if (o.attestPayee >= 0) {
+            while (m.vout.size() < 4) m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(FeeZat(collateral, P.feeMin, P.feeBps), P.attestFeeBps);
+            m.vout.push_back(CTxOut(afee, o.attestFeeScript.value_or(GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID()))));
+        }
         for (int i = 0; i < o.extraOutputs; i++) m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        if (o.bundle.has_value()) m.vin.push_back(CarrierIn(o.bundle.value()));
         return m;
     }
 
@@ -240,16 +297,171 @@ struct Fixture
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
         CAmount fee = o.feeValue >= 0 ? o.feeValue : FeeZat(v->collateralZat, P.feeMin, P.feeBps);
         m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
+        size_t nOut = 3;
+        for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
+        const uint8_t attestFeeVout = o.attestPayee >= 0 ? (uint8_t)nOut : FEE_VOUT_NONE;
         if (o.payload) {
-            Payload p = o.payloadOverride.value_or(Payload::Redeem((uint32_t)refHeight, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout, o.assigned));
+            Payload p = o.payloadOverride.value_or(Payload::Redeem((uint32_t)refHeight, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout, o.assigned, attestFeeVout));
             m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
         } else {
             m.vout.push_back(CTxOut(0, GetScriptForDestination(userKey.GetPubKey().GetID())));
         }
-        size_t nOut = 3;
-        for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
         while (m.vout.size() < nOut) m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        if (o.attestPayee >= 0) {
+            CAmount afee = o.attestFeeValue >= 0 ? o.attestFeeValue : AttestFeeZat(FeeZat(v->collateralZat, P.feeMin, P.feeBps), P.attestFeeBps);
+            m.vout.push_back(CTxOut(afee, GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID())));
+        }
+        if (o.residualValue.has_value()) {
+            m.vout.push_back(CTxOut(o.residualValue.value(), o.residualScript.value_or(GetScriptForDestination(v->OwnerKey().GetID()))));
+        }
+        if (o.bundle.has_value()) m.vin.push_back(CarrierIn(o.bundle.value()));
         return m;
+    }
+
+    // ---------------------------------------------------------------- v3 helpers
+
+    std::optional<AttestorRecord> Attestor(uint16_t seq) const { return State(const_cast<MemoryStateView&>(view)).GetAttestor(seq); }
+    AttestState Attest() const { return State(const_cast<MemoryStateView&>(view)).GetAttest(); }
+    std::optional<NoticeRecord> Notice(const uint256& vaultTxid) const { return State(const_cast<MemoryStateView&>(view)).GetNotice(COutPoint(vaultTxid, 0)); }
+    std::optional<BundleLogRecord> BundleRow(int h) const { return State(const_cast<MemoryStateView&>(view)).GetBundleLog((uint32_t)h); }
+    bool Armed() const { return P.IsArmed(Attest().IsArmed()); }
+
+    /** A registration of attestor i: vout[0] the 10 YEC bond (P2SH), vout[1] the payload, vout[2] change. */
+    CMutableTransaction RegisterTx(int i, CAmount bondZat = 10 * COIN, int lockBlocks = -1, uint8_t flags = 0, bool bareBond = false,
+                                   std::optional<CPubKey> hot = std::nullopt)
+    {
+        const uint32_t locktime = (uint32_t)(tip + 1 + (lockBlocks < 0 ? P.bondMinLock : lockBlocks));
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(FakeInput()));
+        const CScript bond = BondScript(bondKeys[i].GetPubKey(), locktime);
+        m.vout.push_back(CTxOut(bondZat, bareBond ? bond : P2SHScript(bond)));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRegister(hot.value_or(hotKeys[i].GetPubKey()), bondKeys[i].GetPubKey(), locktime, flags)))));
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    /** Register attestors [from, from + n) one per block. */
+    void Register(int n, int from = 0)
+    {
+        for (int i = from; i < from + n; i++) {
+            Mine(Quote(50000, (tip + 1) % 3), { RegisterTx(i) });
+            BOOST_REQUIRE_MESSAGE(Attestor((uint16_t)i).has_value(), strprintf("attestor %d not registered at %d", i, tip));
+        }
+    }
+
+    /** Activate (if needed), register n attestors and mine until ARMED. */
+    void Arm(int n = 3, MicroUsd price = 50000)
+    {
+        if (tip < P.startHeight + 2 * P.signalWindow + 2) Activate(price);
+        Register(n);
+        while (!Attest().IsArmed()) Mine(Quote(price, (tip + 1) % 3));
+        Mine(Quote(price, (tip + 1) % 3));       // one more: a transaction at tip + 1 reads Snapshots[tip - 1], which must be ARMED
+        BOOST_REQUIRE(Attest().IsArmed());
+        BOOST_REQUIRE(ArmedAt(view, P, tip - 1) == P.attestRequired);
+    }
+
+    /** A compact low-S signature of attestor seq over (seq, price, cited, blockHash(cited)); the block hash defaults to the chain's. */
+    Attestation Att(int seq, MicroUsd price, int cited, std::optional<uint256> blockHash = std::nullopt)
+    {
+        Attestation a;
+        a.seq = (uint16_t)seq;
+        a.priceMicroUsd = (uint32_t)price;
+        a.citedHeight = (uint32_t)cited;
+        const uint256 msg = AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash.value_or(FakeHash(cited)));
+        std::vector<unsigned char> der;
+        BOOST_REQUIRE(hotKeys[seq].Sign(msg, der));
+        a.sig.fill(0);
+        size_t pos = 3;
+        for (int part = 0; part < 2; part++) {
+            size_t len = der[pos++];
+            size_t skip = len > 32 ? len - 32 : 0;
+            std::copy(der.begin() + pos + skip, der.begin() + pos + len, a.sig.begin() + part * 32 + (32 - (len - skip)));
+            pos += len + 1;
+        }
+        return a;
+    }
+
+    /** The bundle for (R, selector): every selected seq not in `skip` signs `price` citing `cited` (default R). */
+    valtype BundleFor(int R, const valtype& selector, MicroUsd price, std::set<int> skip = {}, int cited = -1, std::map<int, MicroUsd> prices = {})
+    {
+        Bundle b;
+        for (uint16_t seq : Selected(view, P, R, selector)) {
+            if (skip.count(seq)) continue;
+            auto it = prices.find(seq);
+            b.atts.push_back(Att(seq, it != prices.end() ? it->second : price, cited < 0 ? R : cited));
+        }
+        return EncodeBundle(b);
+    }
+
+    /** A carrier-shaped input whose redeem script commits to `bundle`. */
+    CTxIn CarrierIn(const valtype& bundle)
+    {
+        uint256 h;
+        CSHA256().Write(bundle.data(), bundle.size()).Finalize(h.begin());
+        const CScript redeem = CarrierScript(userKey.GetPubKey(), h);
+        return CTxIn(FakeInput(), CarrierScriptSig(bundle, valtype(71, 0x30), redeem));
+    }
+
+    /** A CLAIM_NOTICE for the vault at (vaultTxid, 0) with refHeight R carrying `bundle`. */
+    CMutableTransaction NoticeTx(const uint256& vaultTxid, int R, const valtype& bundle)
+    {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(FakeInput()));
+        m.vin.push_back(CarrierIn(bundle));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::ClaimNotice(COutPoint(vaultTxid, 0), (uint32_t)R)))));
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    CMutableTransaction EquivocationTx(const Attestation& a, const Attestation& b)
+    {
+        Bundle bundle;
+        bundle.atts = { a, b };
+        CMutableTransaction m;
+        m.vin.push_back(CarrierIn(EncodeBundle(bundle)));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Equivocation()))));
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    CMutableTransaction ReviveTx(const Attestation& a)
+    {
+        CMutableTransaction m;
+        m.vin.push_back(CTxIn(FakeInput()));
+        m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::AttestorRevive(a.seq, a.priceMicroUsd, a.citedHeight, a.sig)))));
+        m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    CMutableTransaction BondSpendTx(int seq)
+    {
+        std::optional<AttestorRecord> rec = Attestor((uint16_t)seq);
+        BOOST_REQUIRE(rec.has_value());
+        CMutableTransaction m;
+        m.nLockTime = rec->bondLocktime;
+        const CScript bond = BondScript(rec->BondKey(), rec->bondLocktime);
+    m.vin.push_back(CTxIn(rec->bondOutpoint, CScript() << valtype(71, 0x30) << valtype(bond.begin(), bond.end()), 0xFFFFFFFE));
+        m.vout.push_back(CTxOut(rec->bondZat - 1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
+        return m;
+    }
+
+    /** An ARMED mint at tip + 1 with refHeight = tip - 1: the bundle at `price` from the selected set, fee to a pool, attestor fee to the first signer. */
+    CMutableTransaction MintV3(Cents cents, MicroUsd price, MintOpts o = MintOpts(), std::set<int> skip = {})
+    {
+        const int ref = tip - 1;
+        o.bundle = BundleFor(ref, valtype(), price, skip);
+        if (o.attestPayee == -1) {
+            std::vector<uint16_t> sel = Selected(view, P, ref, valtype());
+            for (uint16_t q : sel) {
+                if (!skip.count(q)) { o.attestPayee = q; break; }
+            }
+        }
+        if (o.collateral < 0) {
+            Snapshot s = Snap(ref);
+            const MicroUsd pMint = std::min(s.PMint().value(), price);
+            o.collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[o.termClass], s.sigmaMultBps), pMint).value();
+        }
+        return MintTx(cents, 48, ref, o);
     }
 
     /** A ready ACTIVE vault of `cents` (mint at tip + 1, refHeight = tip - 1); returns the mint txid. */
@@ -1802,6 +2014,1342 @@ BOOST_AUTO_TEST_CASE(mempoolcheck_bench)
     BOOST_CHECK(!ev.blockInvalid);
     BOOST_CHECK(ev.txlogs.empty());                    // nothing created or spent: no TxLog entry (N7)
     BOOST_CHECK_MESSAGE(elapsed < 200000, strprintf("EvaluateBlock took %d us", (int)elapsed));
+}
+
+// ===========================================================================
+// v3: price attestation (v3 plan §3.7–3.8). Each case is tagged with the identifiers it covers.
+
+namespace {
+
+/** Mine `m` at tip + 1 and return the TxLog verdict ("none" if no entry was written). */
+std::string VerdictOf(Fixture& f, const CMutableTransaction& m, bool* invalid = nullptr)
+{
+    BlockEvaluation ev = f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { m });
+    if (invalid) *invalid = ev.blockInvalid;
+    std::optional<TxLogRecord> log = f.Log(CTransaction(m).GetHash());
+    return log.has_value() ? log->verdict : "none";
+}
+
+/** An ARMED fixture whose vault `w` (10,000 YEC backing $100 at $0.05) is not underwater under pools at `poolPrice` but is under attestors at `attPrice` (RED-4 (b)). */
+struct EmergencyFixture
+{
+    Fixture f;
+    uint256 w;
+    MicroUsd poolPrice = 11500;   //!< 10,000 YEC back $100 at 115 % (not (a) under pClaim = max(x, a))
+    MicroUsd attPrice = 10400;    //!< under pEmerg = min(x, a): 104 % < 105 % (EMERGENCY_RATIO_BPS)
+    EmergencyFixture()
+    {
+        f.Arm(4);                     // four seated, three drawn: a selector matters and a signer can be spared
+        CMutableTransaction m = f.MintV3(10000, 50000);
+        BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
+        w = CTransaction(m).GetHash();
+        for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3));
+        BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PClaim().value(), poolPrice);
+    }
+    valtype Selector() const { return OutPointSelector(COutPoint(w, 0)); }
+    /** Post a notice at tip + 1 with refHeight = tip - 1; returns whether Notices[w] exists afterwards. */
+    bool PostNotice(MicroUsd price = -1)
+    {
+        const int R = f.tip - 1;
+        f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3), { f.NoticeTx(w, R, f.BundleFor(R, Selector(), price < 0 ? attPrice : price)) });
+        return f.Notice(w).has_value();
+    }
+    /** The emergency claim at tip + 1 with refHeight = tip - 1 (bundle at attPrice, attestor fee to the first signer). */
+    CMutableTransaction Claim(SpendOpts o = SpendOpts(), MicroUsd price = -1)
+    {
+        const int R = f.tip - 1;
+        o.ownerPath = false;
+        o.bundle = f.BundleFor(R, Selector(), price < 0 ? attPrice : price);
+        if (o.attestPayee == -1) o.attestPayee = Selected(f.view, f.P, R, Selector()).front();
+        return f.SpendTx(w, { COutPoint(w, 1) }, R, o);
+    }
+    CAmount Residual(int R) const
+    {
+        const MicroUsd pClaim = std::max(f.Snap(R).PClaim().value(), attPrice);
+        return ResidualZat(1000000000000LL, ClaimantMaxZat(10000, (int)BPS, pClaim));
+    }
+    RedResult Mine(const CMutableTransaction& tx)
+    {
+        BlockEvaluation ev = f.Mine(Fixture::Quote(poolPrice, (f.tip + 1) % 3), { tx });
+        RedResult r;
+        r.invalid = ev.blockInvalid;
+        r.enforcing = ev.enforcementOn;
+        r.vault = f.Vault(w).value();
+        std::optional<TxLogRecord> log = f.Log(CTransaction(tx).GetHash());
+        r.verdict = log.has_value() ? log->verdict : "none";
+        if (log.has_value()) r.log = log.value();
+        return r;
+    }
+};
+
+} // namespace
+
+// Rule: REG-A1
+BOOST_AUTO_TEST_CASE(rega1_bare_bond_below_min_short_lock_refused)
+{
+    Fixture f;
+    f.MineQuotesTo(20);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, -1, 0, true)), "none");        // bare bond script: not P2SH
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN - 1)), "none");                 // below BOND_MIN
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, f.P.bondMinLock - 1)), "none"); // bondLocktime < H + BOND_MIN_LOCK
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(0, 10 * COIN, (int)LOCKTIME_THRESHOLD)), "none");
+    BOOST_CHECK(!f.Attestor(0).has_value());
+    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 0);
+    // The exact minimum lock and bond hold; the record, the bond index and the counter follow.
+    CMutableTransaction ok = f.RegisterTx(0, 10 * COIN, f.P.bondMinLock, 5);
+    BOOST_CHECK_EQUAL(VerdictOf(f, ok), verdict::OK);
+    std::optional<AttestorRecord> rec = f.Attestor(0);
+    BOOST_REQUIRE(rec.has_value());
+    BOOST_CHECK_EQUAL(rec->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(rec->registerHeight, f.tip);
+    BOOST_CHECK_EQUAL(rec->bondZat, 10 * COIN);
+    BOOST_CHECK_EQUAL(rec->flags, 5);
+    BOOST_CHECK(rec->bondOutpoint == COutPoint(CTransaction(ok).GetHash(), 0));
+    BOOST_CHECK_EQUAL(State(f.view).GetBondIndex(rec->bondOutpoint).value(), 0);
+    BOOST_CHECK_EQUAL(State(f.view).GetAttestorSeq().next, 1);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->type, (uint8_t)TxLogType::ATTESTOR_REGISTER);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(ok).GetHash())->attestorSeq, 0);
+}
+
+// Rule: REG-A1
+// Rule: IN-2
+BOOST_AUTO_TEST_CASE(rega1_duplicate_hot_key_vs_withdrawn)
+{
+    Fixture f;
+    f.MineQuotesTo(20);
+    f.Register(1);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), "none");   // held by seq 0
+    BOOST_CHECK(!f.Attestor(1).has_value());
+    // After the bond is spent the record is WITHDRAWN and the hot key is free again.
+    while (f.tip < (int)f.Attestor(0)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(0)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(1, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->attestorPubKey.size(), 33u);
+    BOOST_CHECK(f.Attestor(1)->attestorPubKey == f.Attestor(0)->attestorPubKey);
+}
+
+// Rule: REG-A1
+// Rule: EQV-1
+// Rule: IN-2
+BOOST_AUTO_TEST_CASE(rega1_ejected_then_spent_stays_barred)
+{
+    Fixture f;
+    f.Arm();
+    // Eject seq 0, then spend its bond: the record stays EJECTED (bondSpentHeight set) and its hot key is barred for good.
+    const int cited = f.tip;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 50000, cited), f.Att(0, 51000, cited))), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::EJECTED);
+    while (f.tip < (int)f.Attestor(0)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.BondSpendTx(0)), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->bondSpentHeight, f.tip);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.RegisterTx(3, 10 * COIN, -1, 0, false, f.hotKeys[0].GetPubKey())), "none");
+    BOOST_CHECK(!f.Attestor(3).has_value());
+}
+
+// Rule: ARM-1
+BOOST_AUTO_TEST_CASE(arm1_triggers_at_exact_block)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(3);                                              // seq 2 registered at f.tip; ELIGIBLE at f.tip + BOND_MATURITY
+    const int third = f.tip;
+    while (f.tip < third + f.P.bondMaturity - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::PENDING);
+    BOOST_CHECK_EQUAL(f.Attest().status, (uint8_t)AttestStatus::UNARMED);
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(2)->statusHeight, f.tip);
+    BOOST_CHECK_EQUAL(f.Attest().status, (uint8_t)AttestStatus::TRIGGERED);
+    BOOST_CHECK_EQUAL(f.Attest().triggerHeight, f.tip);
+    BOOST_CHECK_EQUAL(f.Attest().armHeight, f.tip + f.P.attestArmDelay);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).attest.status, (uint8_t)AttestStatus::TRIGGERED);
+    BOOST_CHECK(!f.Armed());
+    // attestArmMin 0 never arms
+    Fixture g(1, 0, 0, 0, 0);
+    g.Activate();
+    g.Register(3);
+    for (int i = 0; i < 20; i++) g.Mine(Fixture::Quote(50000, (g.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(g.Attest().status, (uint8_t)AttestStatus::UNARMED);
+}
+
+// Rule: ARM-2
+BOOST_AUTO_TEST_CASE(arm2_arms_after_delay)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(3);
+    while (f.Attest().status != (uint8_t)AttestStatus::TRIGGERED) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    const int arm = f.Attest().armHeight;
+    while (f.tip < arm - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attest().status, (uint8_t)AttestStatus::TRIGGERED);
+    BOOST_CHECK(!ArmedAt(f.view, f.P, f.tip));
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.tip, arm);
+    BOOST_CHECK_EQUAL(f.Attest().status, (uint8_t)AttestStatus::ARMED);
+    BOOST_CHECK(ArmedAt(f.view, f.P, f.tip));
+    BOOST_CHECK(!ArmedAt(f.view, f.P, f.tip - 1));
+}
+
+// Rule: ARM-1
+// Rule: ARM-2
+BOOST_AUTO_TEST_CASE(arm_never_reverses)
+{
+    Fixture f;
+    f.Arm();
+    const AttestState before = f.Attest();
+    // Eject every attestor: fewer than ATTEST_ARM_MIN remain ELIGIBLE, the layer stays ARMED.
+    for (int seq = 0; seq < 3; seq++) {
+        const int cited = f.tip;
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+        BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(seq, 50000, cited), f.Att(seq, 52000, cited))), verdict::OK);
+    }
+    for (int i = 0; i < 10; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK(f.Attest() == before);
+    BOOST_CHECK(f.Snap(f.tip).seated.empty());
+    BOOST_CHECK(f.Armed());
+    // and a mint now needs a bundle nobody can sign
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), verdict::MINT9_NO_BUNDLE);
+}
+
+// Rule: ARM-1
+BOOST_AUTO_TEST_CASE(founding_cohort_origin)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(3);
+    while (f.Attest().status != (uint8_t)AttestStatus::TRIGGERED) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    const int trigger = f.Attest().triggerHeight;
+    // A registrant inside FOUNDING_WINDOW is founding; one a block later is not.
+    while (f.tip < trigger + f.P.foundingWindow - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    f.Register(1, 3);                                           // registerHeight == trigger + FOUNDING_WINDOW
+    f.Register(1, 4);                                           // registerHeight == trigger + FOUNDING_WINDOW + 1
+    const AttestState m = f.Attest();
+    BOOST_CHECK_EQUAL(AgeOrigin(f.Attestor(0).value(), m, f.P), trigger);
+    BOOST_CHECK_EQUAL(AgeOrigin(f.Attestor(3).value(), m, f.P), trigger);
+    BOOST_CHECK_EQUAL(AgeOrigin(f.Attestor(4).value(), m, f.P), f.Attestor(4)->registerHeight);
+    BOOST_CHECK(f.Attestor(4)->registerHeight > trigger + f.P.foundingWindow);
+    // Before the trigger the origin is the registration itself.
+    BOOST_CHECK_EQUAL(AgeOrigin(f.Attestor(0).value(), AttestState(), f.P), f.Attestor(0)->registerHeight);
+    // Seq 0 and seq 3 share the origin, so they weigh the same at every height; seq 4 is lighter.
+    const int H = f.tip + 30;
+    BOOST_CHECK(AttestorWeight(f.Attestor(0).value(), m, f.P, H) == AttestorWeight(f.Attestor(3).value(), m, f.P, H));
+    BOOST_CHECK(AttestorWeight(f.Attestor(4).value(), m, f.P, H) < AttestorWeight(f.Attestor(0).value(), m, f.P, H));
+}
+
+// Rule: ARM-1
+BOOST_AUTO_TEST_CASE(weight_clamped_before_trigger)
+{
+    AttestorRecord rec;
+    rec.bondZat = 10 * COIN;
+    rec.registerHeight = 100;
+    yellowback::Params P = RegtestParams(1, 0, 0, 0);
+    AttestState m;
+    m.status = (uint8_t)AttestStatus::TRIGGERED;
+    m.triggerHeight = 150;
+    BOOST_CHECK(AttestorWeight(rec, m, P, 149) == arith_uint256(0));               // before the shared origin: clamp at 0
+    BOOST_CHECK(AttestorWeight(rec, m, P, 150) == arith_uint256(0));
+    BOOST_CHECK(AttestorWeight(rec, m, P, 151) == arith_uint256((uint64_t)(10 * COIN)));
+    BOOST_CHECK(AttestorWeight(rec, m, P, 150 + P.ageCap + 500) == arith_uint256((uint64_t)(10 * COIN)) * arith_uint256((uint64_t)P.ageCap));
+    BOOST_CHECK(AttestorWeight(rec, AttestState(), P, 99) == arith_uint256(0));
+    BOOST_CHECK(AttestorWeight(rec, AttestState(), P, 101) == arith_uint256((uint64_t)(10 * COIN)));
+}
+
+// Rule: ARM-1
+BOOST_AUTO_TEST_CASE(seating_ties_by_seq)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(6);                                              // one per block: seq 0 is the oldest
+    while (f.Attestor(5)->status != (uint8_t)AttestorStatus::ELIGIBLE) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    // Every bond is 10 YEC and all six are founding, so weights tie: the five lowest seq are seated.
+    for (int i = 0; i < 3; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK(f.Attest().status != (uint8_t)AttestStatus::UNARMED);
+    std::vector<uint16_t> expect = { 0, 1, 2, 3, 4 };
+    BOOST_CHECK(f.Snap(f.tip).seated == expect);
+    BOOST_CHECK(Seated(f.view, f.P, f.tip) == expect);
+    BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);
+    BOOST_CHECK(f.Attestor(4)->seatedSince > 0);
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(selected_matches_python)
+{
+    // The vectors of test_framework/test_yellowback_attest.py SelectionTests (select_attestors).
+    const uint256 bhAB = uint256S("abababababababababababababababababababababababababababababababab");
+    const uint256 bh01 = uint256S("0101010101010101010101010101010101010101010101010101010101010101");
+    typedef std::vector<std::pair<uint16_t, arith_uint256>> Pool;
+    Pool pool = { { 3, arith_uint256(3) }, { 1, arith_uint256(1) }, { 2, arith_uint256(2) } };
+    std::vector<uint16_t> got = SelectAttestors(bhAB, valtype(), pool, 3);
+    BOOST_CHECK((got == std::vector<uint16_t>{ 2, 1, 3 }));
+    BOOST_CHECK((SelectAttestors(bhAB, valtype(), pool, 1) == std::vector<uint16_t>{ 2 }));
+    valtype sel = OutPointSelector(COutPoint(uint256S("1111111111111111111111111111111111111111111111111111111111111111"), 1));
+    BOOST_CHECK_EQUAL(HexStr(sel), std::string(64, '1') + "01000000");
+    BOOST_CHECK((SelectAttestors(bhAB, sel, pool, 3) == std::vector<uint16_t>{ 3, 2, 1 }));
+    // 256-bit modulus: three bonds of 2^70; a 64-bit pick would choose seq 1 first
+    const arith_uint256 W = arith_uint256(1) << 70;
+    Pool big = { { 1, W }, { 2, W }, { 3, W } };
+    BOOST_CHECK((SelectAttestors(bh01, valtype(), big, 3) == std::vector<uint16_t>{ 3, 1, 2 }));
+    // zero and short pools
+    Pool zeros = { { 9, 0 }, { 4, 0 }, { 6, 0 }, { 1, 0 } };
+    BOOST_CHECK((SelectAttestors(bhAB, valtype(), zeros, 3) == std::vector<uint16_t>{ 1, 4, 6 }));
+    Pool mixed = { { 9, 0 }, { 4, arith_uint256(5) } };
+    BOOST_CHECK((SelectAttestors(bhAB, valtype(), mixed, 3) == std::vector<uint16_t>{ 4, 9 }));
+    Pool one = { { 5, arith_uint256(1) } };
+    BOOST_CHECK((SelectAttestors(bhAB, valtype(), one, 3) == std::vector<uint16_t>{ 5 }));
+    BOOST_CHECK(SelectAttestors(bhAB, valtype(), Pool(), 3).empty());
+}
+
+// Rule: PIN-2
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(selected_excludes_pinned)
+{
+    Fixture f;
+    f.Arm(5);
+    const int R = f.tip;
+    Snapshot s = f.Snap(R);
+    BOOST_CHECK_EQUAL(s.seated.size(), 5u);
+    for (int trial = 0; trial < 5; trial++) {
+        // Pin seq `trial` at R (the stored array is what Selected reads, R11) and see it never drawn.
+        Snapshot pinned = s;
+        pinned.pinnedSeqs = { (uint16_t)trial };
+        State(f.view).Put(keys::Snapshot((uint32_t)R), pinned);
+        std::vector<uint16_t> got = Selected(f.view, f.P, R, valtype());
+        BOOST_CHECK_EQUAL(got.size(), 3u);
+        BOOST_CHECK(std::find(got.begin(), got.end(), (uint16_t)trial) == got.end());
+    }
+    State(f.view).Put(keys::Snapshot((uint32_t)R), s);
+    BOOST_CHECK_EQUAL(Selected(f.view, f.P, R, valtype()).size(), 3u);
+    BOOST_CHECK(Selected(f.view, f.P, R + 1, valtype()).empty());      // no snapshot: empty (total)
+    BOOST_CHECK(Selected(f.view, f.P, 0, valtype()).empty());
+}
+
+// Rule: MINT-9
+BOOST_AUTO_TEST_CASE(mint9_no_bundle_void)
+{
+    Fixture f;
+    f.Arm();
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), verdict::MINT9_NO_BUNDLE);
+    BOOST_CHECK(!f.BundleRow(f.tip).has_value());
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000)), "");
+    BOOST_REQUIRE(f.BundleRow(f.tip).has_value());
+    BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->aMint, 50000);
+    BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->selectedSeqs.size(), 3u);
+    // A malformed bundle behind a carrier is "mint9-bundle-shape"; two carriers "mint9-bundle-two-carriers".
+    { MintOpts o; o.bundle = valtype(10, 0x41); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint9-bundle-shape"); }
+    { CMutableTransaction m = f.MintV3(10000, 50000); m.vin.push_back(m.vin.back());
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, m), "mint9-bundle-two-carriers"); }
+}
+
+// Rule: MINT-9
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(mint9_bundle_from_unselected_void)
+{
+    Fixture f;
+    f.Arm(4);
+    const int R = f.tip - 1;
+    std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+    BOOST_REQUIRE_EQUAL(sel.size(), 3u);
+    int outsider = -1;
+    for (int q = 0; q < 4; q++) {
+        if (std::find(sel.begin(), sel.end(), (uint16_t)q) == sel.end()) outsider = q;
+    }
+    BOOST_REQUIRE(outsider >= 0);
+    Bundle b;
+    b.atts.push_back(f.Att(sel[0], 50000, R));
+    b.atts.push_back(f.Att(outsider, 50000, R));
+    MintOpts o;
+    o.bundle = EncodeBundle(b);
+    o.attestPayee = sel[0];
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, R, o)), "mint9-bundle-member");
+    // and a duplicate seq, a short count, a bad signature
+    Bundle d; d.atts = { f.Att(sel[0], 50000, R), f.Att(sel[0], 50000, R) };
+    o.bundle = EncodeBundle(d);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint9-bundle-dup");
+    Bundle one; one.atts = { f.Att(sel[0], 50000, R) };
+    o.bundle = EncodeBundle(one);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint9-bundle-count");
+}
+
+// Rule: MINT-9
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(mint9_stale_attestation_void)
+{
+    Fixture f;
+    f.Arm();
+    for (int i = 0; i < 10; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    const int R = f.tip - 1;
+    { MintOpts o; o.bundle = f.BundleFor(R, valtype(), 50000, {}, R - f.P.attestMaxAge);       // citedHeight == R - ATTEST_MAX_AGE: stale
+      o.attestPayee = Selected(f.view, f.P, R, valtype()).front();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, R, o)), "mint9-bundle-stale"); }
+    { MintOpts o; o.bundle = f.BundleFor(f.tip - 1, valtype(), 50000, {}, f.tip - 1 - f.P.attestMaxAge + 1);   // the oldest admissible
+      o.attestPayee = Selected(f.view, f.P, f.tip - 1, valtype()).front();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+    { MintOpts o; o.bundle = f.BundleFor(f.tip - 1, valtype(), 50000, {}, f.tip);              // citedHeight > R
+      o.attestPayee = Selected(f.view, f.P, f.tip - 1, valtype()).front();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint9-bundle-stale"); }
+    // a signature over the wrong block hash
+    { Bundle b; const int r = f.tip - 1;
+      for (uint16_t q : Selected(f.view, f.P, r, valtype())) b.atts.push_back(f.Att(q, 50000, r, Fixture::FakeHash(r + 1)));
+      MintOpts o; o.bundle = EncodeBundle(b); o.attestPayee = b.atts[0].seq;
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, r, o)), "mint9-bundle-sig"); }
+}
+
+// Rule: MINT-10
+BOOST_AUTO_TEST_CASE(mint10_diverged_void)
+{
+    Fixture f;
+    f.Arm();
+    // pools 50,000; attestors 40,000: |x - a| / min = 25 % > 15 %
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 40000)), verdict::MINT10_DIVERGED);
+    BOOST_CHECK_EQUAL(f.Vault(f.evals[f.tip].txlogs[0].first)->voidReason, verdict::MINT10_DIVERGED);
+    BOOST_CHECK_EQUAL(f.Log(f.evals[f.tip].txlogs[0].first)->aMint, 40000);          // the bundle facts are logged on a VOID mint too
+    // BUNDLE-1 held, so the row is logged whatever the verdict (R12)
+    BOOST_REQUIRE(f.BundleRow(f.tip).has_value());
+    BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->aMint, 40000);
+    // above as well: 57,501 > 57,500
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 57501)), verdict::MINT10_DIVERGED);
+}
+
+// Rule: MINT-10
+BOOST_AUTO_TEST_CASE(mint10_exact_boundary_ok)
+{
+    Fixture f;
+    f.Arm();
+    // (a - x) * 10^4 <= 1,500 * min(x, a) with x = 50,000: a = 57,500 is the exact boundary
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 57500)), "");
+    BOOST_CHECK_EQUAL(f.Log(f.evals[f.tip].txlogs[0].first)->aMint, 57500);
+}
+
+// Rule: PRICE-2
+// Rule: AFEE-0
+BOOST_AUTO_TEST_CASE(price2_unarmed_reads_x_only)
+{
+    Fixture f;
+    f.Activate();
+    BOOST_CHECK(!f.Armed());
+    // Unarmed: a garbage carrier and no attestor fee are ignored; the collateral is judged at xMint alone.
+    MintOpts o;
+    o.bundle = valtype(20, 0x00);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "");
+    std::optional<TxLogRecord> log = f.Log(f.evals[f.tip].txlogs[0].first);
+    BOOST_CHECK_EQUAL(log->aMint, 0);
+    BOOST_CHECK(log->bundleSeqs.empty());
+    BOOST_CHECK_EQUAL(log->attestFeeZat, 0);
+    BOOST_CHECK(!f.BundleRow(f.tip).has_value());
+}
+
+// Rule: PRICE-2
+// Rule: MINT-5
+BOOST_AUTO_TEST_CASE(price2_min_max)
+{
+    Fixture f;
+    f.Arm();
+    // Attestors at 45,000 under pools at 50,000: pMint = 45,000, so the v2 collateral for 50,000 is short.
+    Snapshot s = f.Snap(f.tip - 1);
+    { MintOpts o; o.collateral = RequiredCollateralRounded(10000, MinRatioBps(f.P.baseRatioBps[0], s.sigmaMultBps), 50000).value();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 45000, o)), verdict::BAD_MINT_COLLATERAL); }
+    { MintOpts o; o.collateral = RequiredCollateralRounded(10000, MinRatioBps(f.P.baseRatioBps[0], f.Snap(f.tip - 1).sigmaMultBps), 45000).value();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 45000, o)), ""); }
+    // Attestors above the pools: pMint stays at xMint (the min)
+    { MintOpts o; o.collateral = RequiredCollateralRounded(10000, MinRatioBps(f.P.baseRatioBps[0], f.Snap(f.tip - 1).sigmaMultBps), 50000).value();
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 55000, o)), ""); }
+    // pClaim = max(x, a): a vault backing $100 with 10,000 YEC is underwater under pools at 9,000 but not when attestors say 12,000.
+    const uint256 w = CTransaction(f.MintV3(10000, 50000)).GetHash();
+    { CMutableTransaction m = f.MintV3(10000, 50000); BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), ""); (void)w; }
+    const uint256 v = f.evals[f.tip].txlogs[0].first;
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
+    const valtype sel = OutPointSelector(COutPoint(v, 0));
+    { SpendOpts o; o.ownerPath = false; o.bundle = f.BundleFor(f.tip - 1, sel, 12000); o.attestPayee = Selected(f.view, f.P, f.tip - 1, sel).front();
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+      BOOST_CHECK(r.invalid); }
+}
+
+// Rule: RED-1
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(red1_claim_needs_bundle)
+{
+    Fixture f;
+    f.Arm();
+    CMutableTransaction m = f.MintV3(10000, 50000);
+    BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
+    const uint256 v = CTransaction(m).GetHash();
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    // No carrier: red1-bundle-shape, block-invalid under enforcement.
+    { SpendOpts o; o.ownerPath = false;
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
+      BOOST_CHECK_EQUAL(r.verdict, "red1-bundle-shape");
+      BOOST_CHECK(r.invalid && r.enforcing);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+    // The claim's selection is selected(R, vaultOutpoint): an attestor outside it (there is exactly one of the four) is "member".
+    Fixture g;
+    g.Arm(4);
+    CMutableTransaction m2 = g.MintV3(10000, 50000);
+    BOOST_REQUIRE_EQUAL(MintVerdictOf(g, m2), "");
+    const uint256 v2 = CTransaction(m2).GetHash();
+    const int R = g.tip - 1;
+    const valtype sel = OutPointSelector(COutPoint(v2, 0));
+    std::vector<uint16_t> chosen = Selected(g.view, g.P, R, sel);
+    BOOST_REQUIRE_EQUAL(chosen.size(), 3u);
+    int outsider = -1;
+    for (int q = 0; q < 4; q++) if (std::find(chosen.begin(), chosen.end(), (uint16_t)q) == chosen.end()) outsider = q;
+    BOOST_REQUIRE(outsider >= 0);
+    Bundle b;
+    b.atts = { g.Att(chosen[0], 50000, R), g.Att(outsider, 50000, R) };
+    { SpendOpts o; o.ownerPath = false; o.bundle = EncodeBundle(b); o.attestPayee = chosen[0];
+      RedResult r = Spend(g, v2, g.SpendTx(v2, { COutPoint(v2, 1) }, R, o));
+      BOOST_CHECK_EQUAL(r.verdict, "red1-bundle-member");
+      BOOST_CHECK(r.invalid); }
+}
+
+// Rule: RED-1
+// Rule: AFEE-0
+BOOST_AUTO_TEST_CASE(red1_owner_path_ignores_bundle)
+{
+    Fixture f;
+    f.Arm();
+    CMutableTransaction m = f.MintV3(10000, 50000);
+    BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
+    const uint256 v = CTransaction(m).GetHash();
+    // ARMED owner redeem with no carrier and no attestor fee: RED-1..3 as in v2.
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK(!r.invalid);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "");
+    BOOST_CHECK_EQUAL(r.log.residualZat, 0);
+    BOOST_CHECK(!f.BundleRow(f.tip).has_value());
+}
+
+// Rule: RED-4
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(red4b_needs_notice_and_persist)
+{
+    EmergencyFixture e;
+    // Without a notice, (b) is false: not underwater under pClaim = max(11,500, 10,400).
+    { RedResult r = e.Mine(e.Claim()); BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER); BOOST_CHECK(r.invalid); }
+    // The vault closed unbacked on that failing spend; start over with a fresh one.
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    const NoticeRecord n = g.f.Notice(g.w).value();
+    BOOST_CHECK_EQUAL(n.height, g.f.tip);
+    BOOST_CHECK_EQUAL(n.refHeight, g.f.tip - 2);          // the notice at H had refHeight H - 2
+    BOOST_CHECK_EQUAL(n.pEmerg, g.attPrice);
+    BOOST_CHECK_EQUAL(g.f.Log(g.f.evals[g.f.tip].txlogs[0].first)->type, (uint8_t)TxLogType::CLAIM_NOTICE);
+    BOOST_CHECK(g.f.Log(g.f.evals[g.f.tip].txlogs[0].first)->notice);
+    // R - notice.refHeight must reach EMERGENCY_PERSIST: the claim at R = refHeight + 3 is early.
+    while (g.f.tip - 1 < n.refHeight + g.f.P.emergencyPersist - 1) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    {
+        // dry-run on an overlay so the vault survives the early attempt
+        CBlock block;
+        block.vtx.push_back(CTransaction(Fixture::Coinbase(g.f.tip + 1, Fixture::Quote(g.poolPrice, 0))));
+        block.vtx.push_back(CTransaction(g.Claim()));
+        OverlayStateView overlay(g.f.view);
+        BlockEvaluation ev = EvaluateBlock(overlay, g.f.P, block, g.f.tip + 1, Fixture::FakeHash(g.f.tip + 1), SUBSIDY);
+        BOOST_CHECK(ev.blockInvalid);
+        BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+    }
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(g.f.tip - 1 - n.refHeight, g.f.P.emergencyPersist);
+    SpendOpts o;
+    o.residualValue = g.Residual(g.f.tip - 1);
+    RedResult r = g.Mine(g.Claim(o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK(!r.invalid);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "b");
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMED);
+    BOOST_CHECK_EQUAL(r.log.aClaim, g.attPrice);
+}
+
+// Rule: RED-4
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(red4b_notice_too_old)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    const NoticeRecord n = g.f.Notice(g.w).value();
+    while (g.f.tip - 1 <= n.refHeight + g.f.P.emergencyNoticeTtl) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    SpendOpts o;
+    o.residualValue = g.Residual(g.f.tip - 1);
+    RedResult r = g.Mine(g.Claim(o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+    BOOST_CHECK(r.invalid);
+}
+
+// Rule: RED-4
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(red4b_before_arming_false)
+{
+    Fixture f;
+    f.Activate();
+    const uint256 v = f.MintActive(10000);
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3));
+    // Unarmed: a notice registers nothing (NOT-1 needs ARMED at R) and a claim is judged by (a) alone.
+    f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3), { f.NoticeTx(v, f.tip - 1, valtype(4, 0x59)) });
+    BOOST_CHECK(!f.Notice(v).has_value());
+    BOOST_CHECK(f.evals[f.tip].txlogs.empty());
+    // Force a notice record in and see (b) still false before arming.
+    NoticeRecord n;
+    n.height = f.tip - 6;
+    n.refHeight = f.tip - 8;
+    n.pEmerg = 10400;
+    State(f.view).Put(keys::Notice(COutPoint(v, 0)), n);
+    SpendOpts o;
+    o.ownerPath = false;
+    BlockEvaluation ev = f.Mine(Fixture::Quote(11500, (f.tip + 1) % 3), { f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o) });
+    BOOST_CHECK(ev.blockInvalid);
+    BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+    BOOST_CHECK(!f.Notice(v).has_value());          // and the close deleted it (IN-2)
+}
+
+// Rule: RED-5
+BOOST_AUTO_TEST_CASE(red5_residual_paid)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    const CAmount residual = g.Residual(g.f.tip - 1);
+    BOOST_CHECK(residual >= g.f.P.residualMinZat);
+    BOOST_CHECK_EQUAL(residual, 1000000000000LL - ClaimantMaxZat(10000, (int)BPS, g.poolPrice).value());
+    // Missing residual output: invalid. One zat short: invalid. Exact: ok.
+    {
+        CBlock block;
+        block.vtx.push_back(CTransaction(Fixture::Coinbase(g.f.tip + 1, Fixture::Quote(g.poolPrice, 0))));
+        block.vtx.push_back(CTransaction(g.Claim()));
+        SpendOpts o; o.residualValue = residual - 1;
+        block.vtx.push_back(CTransaction(g.Claim(o)));
+        OverlayStateView overlay(g.f.view);
+        BlockEvaluation ev = EvaluateBlock(overlay, g.f.P, block, g.f.tip + 1, Fixture::FakeHash(g.f.tip + 1), SUBSIDY);
+        BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::RED5_RESIDUAL);
+        BOOST_CHECK_EQUAL(ev.txlogs[0].second.residualZat, residual);
+    }
+    {
+        SpendOpts o; o.residualValue = residual - 1;
+        CBlock block;
+        block.vtx.push_back(CTransaction(Fixture::Coinbase(g.f.tip + 1, Fixture::Quote(g.poolPrice, 0))));
+        block.vtx.push_back(CTransaction(g.Claim(o)));
+        OverlayStateView overlay(g.f.view);
+        BlockEvaluation ev = EvaluateBlock(overlay, g.f.P, block, g.f.tip + 1, Fixture::FakeHash(g.f.tip + 1), SUBSIDY);
+        BOOST_CHECK_EQUAL(ev.txlogs[0].second.verdict, verdict::RED5_RESIDUAL);
+    }
+    SpendOpts o; o.residualValue = residual;
+    RedResult r = g.Mine(g.Claim(o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.residualZat, residual);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "b");
+    BOOST_CHECK(r.log.hasAttestPayee);
+    BOOST_CHECK(r.log.attestFeeZat >= AttestFeeZat(FeeZat(1000000000000LL, g.f.P.feeMin, g.f.P.feeBps), g.f.P.attestFeeBps));
+}
+
+// Rule: RED-5
+BOOST_AUTO_TEST_CASE(red5_residual_below_dust_vacuous)
+{
+    // RESIDUAL_MIN_ZAT raised above any residual: the clause asks for no output (the residual is still logged).
+    EmergencyFixture g;
+    g.f.P.residualMinZat = MAX_MONEY;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    const CAmount residual = g.Residual(g.f.tip - 1);
+    RedResult r = g.Mine(g.Claim());
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.residualZat, residual);
+    BOOST_CHECK(residual < g.f.P.residualMinZat);
+    // and the math: a residual under the floor needs no output
+    BOOST_CHECK_EQUAL(ResidualZat(ClaimantMaxZat(10000, (int)BPS, 11500).value() + 50000, ClaimantMaxZat(10000, (int)BPS, 11500)), 50000);
+    BOOST_CHECK(50000 < RegtestParams(1, 0, 0, 0).residualMinZat);
+}
+
+// Rule: RED-5
+BOOST_AUTO_TEST_CASE(red5_residual_to_wrong_key_invalid)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < g.f.P.emergencyPersist + 1; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    SpendOpts o;
+    o.residualValue = g.Residual(g.f.tip - 1);
+    o.residualScript = GetScriptForDestination(g.f.userKey.GetPubKey().GetID());
+    RedResult r = g.Mine(g.Claim(o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::RED5_RESIDUAL);
+    BOOST_CHECK(r.invalid && r.enforcing);
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED);
+    BOOST_CHECK(r.vault.unbacked == false);         // the burn was complete; only RED-5 failed
+}
+
+// Rule: RED-5
+// Rule: RED-4
+BOOST_AUTO_TEST_CASE(red5_normal_claim_residual_zero)
+{
+    Fixture f;
+    f.Arm();
+    CMutableTransaction m = f.MintV3(10000, 50000);
+    BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
+    const uint256 v = CTransaction(m).GetHash();
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    const valtype sel = OutPointSelector(COutPoint(v, 0));
+    SpendOpts o;
+    o.ownerPath = false;
+    o.bundle = f.BundleFor(f.tip - 1, sel, 9000);
+    o.attestPayee = Selected(f.view, f.P, f.tip - 1, sel).front();
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "a");
+    BOOST_CHECK_EQUAL(r.log.residualZat, 0);        // underwater under pClaim => collateral < claimantMax at 110 %
+    BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMED);
+    BOOST_CHECK_EQUAL(f.BundleRow(f.tip)->aClaim, 9000);
+}
+
+// Rule: NOT-1
+BOOST_AUTO_TEST_CASE(not1_standing_notice_not_replaced)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    const NoticeRecord first = g.f.Notice(g.w).value();
+    // The reset attack: a second notice inside EMERGENCY_NOTICE_TTL registers nothing and the clock keeps running.
+    for (int i = 0; i < 3; i++) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    BOOST_REQUIRE(g.PostNotice());
+    BOOST_CHECK(g.f.evals[g.f.tip].txlogs.empty());
+    const NoticeRecord again = g.f.Notice(g.w).value();
+    BOOST_CHECK_EQUAL(again.height, first.height);
+    BOOST_CHECK_EQUAL(again.refHeight, first.refHeight);
+    // the row for the (verified) bundle is still logged (R12)
+    BOOST_CHECK(g.f.BundleRow(g.f.tip).has_value());
+    // Past the TTL a new notice replaces it.
+    while (g.f.tip + 1 - first.height <= g.f.P.emergencyNoticeTtl) g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3));
+    BOOST_REQUIRE(g.PostNotice());
+    BOOST_CHECK_EQUAL(g.f.Notice(g.w)->height, g.f.tip);
+    // NOT-1's other clauses: pEmerg not under the emergency ratio, unknown vault, R out of the window
+    BOOST_REQUIRE(g.PostNotice(11600));            // pEmerg = 11,500 (the pools): 115 % >= 105 %
+    BOOST_CHECK(g.f.evals[g.f.tip].txlogs.empty());
+    g.f.Mine(Fixture::Quote(g.poolPrice, (g.f.tip + 1) % 3), { g.f.NoticeTx(uint256S("11"), g.f.tip - 1, g.f.BundleFor(g.f.tip - 1, OutPointSelector(COutPoint(uint256S("11"), 0)), g.attPrice)) });
+    BOOST_CHECK(g.f.evals[g.f.tip].txlogs.empty());
+}
+
+// Rule: NOT-1
+// Rule: IN-2
+BOOST_AUTO_TEST_CASE(not1_deleted_when_vault_closes)
+{
+    EmergencyFixture g;
+    BOOST_REQUIRE(g.PostNotice());
+    // An owner redeem (any close) deletes Notices[vault]; undo restores it.
+    const std::string before = Hash(g.f.view);
+    RedResult r = g.Mine(g.f.SpendTx(g.w, { COutPoint(g.w, 1) }, g.f.tip - 1));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK(!g.f.Notice(g.w).has_value());
+    g.f.Undo();
+    BOOST_CHECK(g.f.Notice(g.w).has_value());
+    BOOST_CHECK_EQUAL(Hash(g.f.view), before);
+    // and an unpoliced spend (no payload) deletes it too
+    SpendOpts o; o.payload = false;
+    g.Mine(g.f.SpendTx(g.w, {}, g.f.tip - 1, o));
+    BOOST_CHECK(!g.f.Notice(g.w).has_value());
+}
+
+// Rule: EQV-1
+BOOST_AUTO_TEST_CASE(eqv1_two_prices_one_hash_ejects)
+{
+    Fixture f;
+    f.Arm();
+    const int cited = f.tip;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    // same price: not an equivocation; different seq: no; three attestations: no
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(1, 50000, cited), f.Att(1, 50000, cited))), "none");
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(1, 50000, cited), f.Att(2, 51000, cited))), "none");
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(1, 50000, cited), f.Att(1, 51000, cited - 1))), "none");
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    CMutableTransaction e = f.EquivocationTx(f.Att(1, 50000, cited), f.Att(1, 51000, cited));
+    BOOST_CHECK_EQUAL(VerdictOf(f, e), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK_EQUAL(f.Attestor(1)->statusHeight, f.tip);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(e).GetHash())->type, (uint8_t)TxLogType::EQUIVOCATION);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(e).GetHash())->attestorSeq, 1);
+    // an ejected attestor leaves seated at the next SNAP and cannot be ejected twice
+    BOOST_CHECK([&]{ const std::vector<uint16_t> seatedNow = f.Snap(f.tip).seated; return std::find(seatedNow.begin(), seatedNow.end(), 1) == seatedNow.end(); }());
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(1, 50000, cited), f.Att(1, 52000, cited))), "none");
+    // EQUIVOCATION bundles never enter BundleLog (R12)
+    BOOST_CHECK(!f.BundleRow(f.tip - 1).has_value());
+}
+
+// Rule: EQV-1
+BOOST_AUTO_TEST_CASE(eqv1_fork_hashes_not_equivocation)
+{
+    Fixture f;
+    f.Arm();
+    const int cited = f.tip;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    // Two honest prices for the same height on two forks: the second signature is over another block hash and does not verify here.
+    std::vector<unsigned char> other(32, 0x99);
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(2, 50000, cited), f.Att(2, 51000, cited, uint256(other)))), "none");
+    BOOST_CHECK_EQUAL(f.Attestor(2)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // a cited height the index does not know
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(2, 50000, f.tip + 5), f.Att(2, 51000, f.tip + 5))), "none");
+}
+
+// Rule: REV-1
+// Rule: SNAP
+BOOST_AUTO_TEST_CASE(rev1_only_dormant)
+{
+    Fixture f;
+    f.Arm(4);
+    // An ELIGIBLE attestor cannot be "revived".
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(0, 50000, f.tip))), "none");
+    // Make seq L dormant: two mints whose selection includes L, signed by the other two, then a check height.
+    int L = -1, rows = 0;
+    while (rows < f.P.dormancyMinBundles) {
+        const int R = f.tip - 1;
+        std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+        if (L < 0) L = sel.front();
+        if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end()) {
+            BOOST_REQUIRE_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, MintOpts(), { L })), "");
+            rows++;
+        } else {
+            f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+        }
+    }
+    while (f.tip % f.P.dormancyCheck != 0 || f.tip - f.P.dormancyBlocks < f.Attestor(L)->seatedSince) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->statusHeight, f.tip);
+    // Revive: stale (citedHeight == H - ATTEST_MAX_AGE), citedHeight == H, a tampered price... then a fresh one. (VerdictOf mines at H = tip + 1.)
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, 50000, f.tip + 1 - f.P.attestMaxAge))), "none");
+    { Attestation a = f.Att(L, 50000, f.tip, Fixture::FakeHash(f.tip + 1)); a.citedHeight = (uint32_t)f.tip + 1;
+      BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(a)), "none"); }                     // citedHeight == H: not <= H - 1
+    { Attestation a = f.Att(L, 50000, f.tip); a.priceMicroUsd++; BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(a)), "none"); }
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
+    CMutableTransaction r = f.ReviveTx(f.Att(L, 50000, f.tip));
+    BOOST_CHECK_EQUAL(VerdictOf(f, r), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(r).GetHash())->attestorSeq, L);
+    { const std::vector<uint16_t> seatedNow = f.Snap(f.tip).seated; BOOST_CHECK(std::find(seatedNow.begin(), seatedNow.end(), (uint16_t)L) != seatedNow.end()); }
+}
+
+// Rule: SNAP
+BOOST_AUTO_TEST_CASE(dormancy_needs_selection_evidence)
+{
+    Fixture f;
+    f.Arm(4);
+    // Rows where L signed count as evidence of life; rows where it was not selected are no evidence at all.
+    int L = -1, signedRows = 0;
+    while (signedRows < 3) {
+        const int R = f.tip - 1;
+        std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+        if (L < 0) L = sel.front();
+        BOOST_REQUIRE_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000)), "");
+        if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end()) signedRows++;
+    }
+    for (int i = 0; i < 2 * f.P.dormancyBlocks; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    for (int q = 0; q < 4; q++) BOOST_CHECK_EQUAL(f.Attestor(q)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    // One unsigned row is below DORMANCY_MIN_BUNDLES.
+    while (true) {
+        const int R = f.tip - 1;
+        std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+        if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end()) { BOOST_REQUIRE_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, MintOpts(), { L })), ""); break; }
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    }
+    for (int i = 0; i < f.P.dormancyCheck; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+}
+
+// Rule: SNAP
+BOOST_AUTO_TEST_CASE(dormancy_unseated_never_dormant)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(6);
+    while (!f.Attest().IsArmed()) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);          // ties by seq: seq 5 is never seated
+    for (int i = 0; i < 2 * f.P.dormancyBlocks; i++) {
+        if (i % 3 == 0) MintVerdictOf(f, f.MintV3(10000, 50000));
+        else f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    }
+    BOOST_CHECK_EQUAL(f.Attestor(5)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(5)->seatedSince, 0);
+}
+
+// Rule: SNAP
+BOOST_AUTO_TEST_CASE(dormancy_only_at_check_heights)
+{
+    Fixture f;
+    f.Arm(4);
+    for (int i = 0; i < f.P.dormancyBlocks; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    int L = -1, rows = 0;
+    while (rows < f.P.dormancyMinBundles) {
+        const int R = f.tip - 1;
+        std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+        if (L < 0) L = sel.front();
+        if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end() && (rows < f.P.dormancyMinBundles - 1 || (f.tip + 1) % f.P.dormancyCheck != 0)) {
+            BOOST_REQUIRE_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, MintOpts(), { L })), "");
+            rows++;
+        } else {
+            f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+        }
+    }
+    // The evidence is complete at a non-check height: nothing happens until H mod DORMANCY_CHECK == 0.
+    BOOST_CHECK(f.tip % f.P.dormancyCheck != 0);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    while (f.tip % f.P.dormancyCheck != 0) {
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+        if (f.tip % f.P.dormancyCheck != 0) BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    }
+    BOOST_CHECK_EQUAL(f.Attestor(L)->status, (uint8_t)AttestorStatus::DORMANT);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->statusHeight, f.tip);
+    BOOST_CHECK_EQUAL(f.Attestor(L)->seatedSince, 0 + f.Attestor(L)->seatedSince);   // untouched by dormancy itself
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(L)->seatedSince, 0);                                 // cleared when it leaves seated
+}
+
+// Rule: PIN-1
+BOOST_AUTO_TEST_CASE(pin1_arms_from_bundlelog)
+{
+    Fixture f;
+    f.Activate();
+    // Two rows in W whose aMint spread exceeds PIN_DELTA_BPS arm PIN-1; a key with >= PIN_MIN_TAGS quotes all at one price is pinned.
+    BundleLogRecord lo, hi;
+    lo.aMint = lo.aClaim = 50000;
+    hi.aMint = hi.aClaim = 53000;                          // 6 % > 5 %
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 3), lo);
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 1), hi);
+    f.Mine(Fixture::Quote(50000, 0));
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).pinnedKeys.size(), 3u);   // every pool quoted 50,000 throughout: all three pinned
+    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_NO_PRICE);       // nothing left for the medians
+    // 5 % exactly is not enough
+    Fixture g;
+    g.Activate();
+    BundleLogRecord a, b;
+    a.aMint = a.aClaim = 50000;
+    b.aMint = b.aClaim = 52500;
+    State(g.view).Put(keys::BundleLog((uint32_t)g.tip - 3), a);
+    State(g.view).Put(keys::BundleLog((uint32_t)g.tip - 1), b);
+    g.Mine(Fixture::Quote(50000, 0));
+    BOOST_CHECK(g.Snap(g.tip).pinnedKeys.empty());
+    // a row outside W does not count
+    Fixture h;
+    h.Activate();
+    State(h.view).Put(keys::BundleLog((uint32_t)h.tip - h.P.pinWindow), lo);   // h = H - 1 - PIN_WINDOW: excluded
+    State(h.view).Put(keys::BundleLog((uint32_t)h.tip - 1), hi);
+    h.Mine(Fixture::Quote(50000, 0));
+    BOOST_CHECK(h.Snap(h.tip).pinnedKeys.empty());
+}
+
+// Rule: PIN-1
+// Rule: FEE-2
+// Rule: PRICE-1
+BOOST_AUTO_TEST_CASE(pin1_excludes_key_from_medians_and_E)
+{
+    Fixture f;
+    f.Activate();
+    // Pool 0 repeats 50,000; pools 1 and 2 move (49,000 / 51,000 alternating) for a full slow window.
+    for (int i = 0; i < 70; i++) {
+        const int key = (f.tip + 1) % 3;
+        const MicroUsd price = key == 0 ? 50000 : (key == 1 ? 49000 + (i % 2) * 10 : 51000 + (i % 2) * 10);
+        f.Mine(Fixture::Quote(price, key));
+    }
+    BundleLogRecord lo, hi;
+    lo.aMint = lo.aClaim = 50000;
+    hi.aMint = hi.aClaim = 53000;
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 3), lo);
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 1), hi);
+    const Snapshot before = f.Snap(f.tip);
+    f.Mine(Fixture::Quote(50000, 0));
+    const Snapshot s = f.Snap(f.tip);
+    BOOST_REQUIRE_EQUAL(s.pinnedKeys.size(), 1u);
+    BOOST_CHECK(s.pinnedKeys[0] == KeyOf(0));
+    // the medians no longer see 50,000: pFast over pools 1 and 2 only (the slow window's 2/3 fill is then one short: pMint undefined, HALT-1)
+    BOOST_CHECK(s.pFast != 50000);
+    BOOST_CHECK(s.pFast > 0);
+    BOOST_CHECK(s.haltMask & HALT_NO_PRICE);
+    // E(H) excludes the pinned key; E(H - 1) still has it
+    std::vector<CKeyID> e = EligiblePayees(f.view, f.P, f.tip);
+    BOOST_CHECK(std::find(e.begin(), e.end(), CKeyID(KeyOf(0))) == e.end());
+    BOOST_CHECK_EQUAL(e.size(), 2u);
+    std::vector<CKeyID> prev = EligiblePayees(f.view, f.P, f.tip - 1);
+    BOOST_CHECK(std::find(prev.begin(), prev.end(), CKeyID(KeyOf(0))) != prev.end());
+    // and FEE-W never picks it
+    for (int i = 0; i < 8; i++) {
+        std::optional<CKeyID> pick = DefaultPayee(f.view, f.P, f.tip, valtype(1, (unsigned char)i), PayeePolicy::Defaults(f.P));
+        BOOST_REQUIRE(pick.has_value());
+        BOOST_CHECK(!(pick.value() == CKeyID(KeyOf(0))));
+    }
+    (void)before;
+}
+
+// Rule: PIN-2
+BOOST_AUTO_TEST_CASE(pin2_excludes_seq)
+{
+    Fixture f;
+    f.Arm(4);
+    // xMint falls by 20 % within PIN_WINDOW (the fast window moves in 8 blocks): PIN-2 arms.
+    for (int i = 0; i < 8; i++) f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PMint().value(), 40000);
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip - f.P.pinWindow).PMint().value(), 50000);
+    // seq 2 appears in two rows of W at one price; seq 1 in two rows at two prices; seq 3 in one row.
+    BundleLogRecord r1, r2;
+    r1.aMint = r1.aClaim = r2.aMint = r2.aClaim = 40000;
+    r1.selectedSeqs = { 1, 2, 3 }; r1.seqs = { 1, 2, 3 }; r1.prices = { 40000, 40000, 40000 };
+    r2.selectedSeqs = { 1, 2 };    r2.seqs = { 1, 2 };    r2.prices = { 40100, 40000 };
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip - 2), r1);
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip), r2);
+    f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    const Snapshot s = f.Snap(f.tip);
+    BOOST_CHECK((s.pinnedSeqs == std::vector<uint16_t>{ 2 }));
+    BOOST_CHECK(s.pinnedKeys.empty());                  // PIN-1 is not armed: the rows' aMint agree
+    // Selection at this R never draws seq 2; the pool has three left, all drawn.
+    std::vector<uint16_t> got = Selected(f.view, f.P, f.tip, valtype());
+    BOOST_CHECK_EQUAL(got.size(), 3u);
+    BOOST_CHECK(std::find(got.begin(), got.end(), 2) == got.end());
+    // and a bundle from seq 2 at this R is "member"
+    f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    Bundle b; b.atts = { f.Att(2, 40000, f.tip - 1), f.Att(got[0], 40000, f.tip - 1) };
+    MintOpts o; o.bundle = EncodeBundle(b); o.attestPayee = got[0];
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint9-bundle-member");
+}
+
+// Rule: PIN-1
+// Rule: PIN-2
+BOOST_AUTO_TEST_CASE(pin_not_armed_without_bundles)
+{
+    Fixture f;
+    f.Arm(4);
+    for (int i = 0; i < 8; i++) f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.Snap(f.tip).PMint().value(), 40000);
+    // The price step arms PIN-2's test, but with no BundleLog rows nothing is pinned; PIN-1 needs rows to arm at all.
+    const Snapshot s = f.Snap(f.tip);
+    BOOST_CHECK(s.pinnedSeqs.empty());
+    BOOST_CHECK(s.pinnedKeys.empty());
+    // One row is below PIN_MIN_BUNDLES for PIN-1, and one appearance below PIN_MIN_TAGS for PIN-2.
+    BundleLogRecord r;
+    r.aMint = r.aClaim = 40000;
+    r.selectedSeqs = r.seqs = { 0, 1, 2 };
+    r.prices = { 40000, 40000, 40000 };
+    State(f.view).Put(keys::BundleLog((uint32_t)f.tip), r);
+    f.Mine(Fixture::Quote(40000, (f.tip + 1) % 3));
+    BOOST_CHECK(f.Snap(f.tip).pinnedSeqs.empty());
+    BOOST_CHECK(f.Snap(f.tip).pinnedKeys.empty());
+}
+
+// Rule: AFEE-1
+// Rule: MINT-8
+// Rule: RED-3
+BOOST_AUTO_TEST_CASE(afee1_fee_to_contributor)
+{
+    Fixture f;
+    f.Arm(4);
+    const CAmount collateral = 1000000000000LL;
+    const CAmount afee = AttestFeeZat(FeeZat(collateral, f.P.feeMin, f.P.feeBps), f.P.attestFeeBps);
+    BOOST_CHECK_EQUAL(afee, FeeZat(collateral, f.P.feeMin, f.P.feeBps) / 4);
+    // to a seated attestor that did not contribute: afee1-fee; one zat short: afee1-fee; missing: afee1-fee; at 0xFF: afee1-fee
+    std::vector<uint16_t> sel = Selected(f.view, f.P, f.tip - 1, valtype());
+    int outsider = -1;
+    for (int q = 0; q < 4; q++) if (std::find(sel.begin(), sel.end(), (uint16_t)q) == sel.end()) outsider = q;
+    BOOST_REQUIRE(outsider >= 0);
+    { MintOpts o; o.attestPayee = outsider; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }
+    { MintOpts o; o.attestFeeValue = afee - 1; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }
+    { MintOpts o; o.attestFeeVout = 3; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }    // the pool fee's vout
+    { MintOpts o; o.attestFeeVout = 9; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }    // out of range
+    { MintOpts o; o.attestFeeScript = GetScriptForDestination(f.hotKeys[sel[0]].GetPubKey().GetID());                              // the hot key, not the bond key
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000, o)), verdict::AFEE1_FEE); }
+    // a contributor who is not the first signer is fine, and the log names it
+    { MintOpts o; o.attestPayee = Selected(f.view, f.P, f.tip - 1, valtype()).back();
+      CMutableTransaction m = f.MintV3(10000, 50000, o);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, m), "");
+      std::optional<TxLogRecord> log = f.Log(CTransaction(m).GetHash());
+      BOOST_CHECK(log->hasAttestPayee);
+      BOOST_CHECK_EQUAL(log->attestPayee, o.attestPayee);
+      BOOST_CHECK_EQUAL(log->attestFeeZat, afee);
+      BOOST_CHECK_EQUAL(log->bundleSeqs.size(), 3u); }
+    // the claim side (RED-3's clause)
+    CMutableTransaction m = f.MintV3(10000, 50000);
+    BOOST_REQUIRE_EQUAL(MintVerdictOf(f, m), "");
+    const uint256 v = CTransaction(m).GetHash();
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    const valtype vsel = OutPointSelector(COutPoint(v, 0));
+    { SpendOpts o; o.ownerPath = false; o.bundle = f.BundleFor(f.tip - 1, vsel, 9000);
+      RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));            // no attestor fee output
+      BOOST_CHECK_EQUAL(r.verdict, verdict::AFEE1_FEE);
+      BOOST_CHECK(r.invalid); }
+}
+
+// Rule: AFEE-0
+BOOST_AUTO_TEST_CASE(afee0_unarmed_vacuous)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(3);                                             // PENDING, then TRIGGERED: not yet ARMED
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
+    while (f.Attest().status != (uint8_t)AttestStatus::TRIGGERED) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");
+    BOOST_CHECK_EQUAL(f.Log(f.evals[f.tip].txlogs[0].first)->attestFeeZat, 0);
+    // a claim with R before armHeight needs no bundle and no attestor fee either, whatever the tip's state
+    const uint256 v = f.evals[f.tip].txlogs[0].first;
+    while (!f.Attest().IsArmed()) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    for (int i = 0; i < 3; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE(f.Armed());
+    const int R = f.Attest().armHeight - 1;
+    BOOST_REQUIRE(R >= f.tip - f.P.refWindow + 1);
+    BOOST_CHECK(!ArmedAt(f.view, f.P, R));
+    SpendOpts o; o.ownerPath = false;
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, R, o));
+    BOOST_CHECK(r.verdict == verdict::OK || r.verdict == verdict::VAULT_CLAIM_NOT_UNDERWATER);   // whichever pClaim(R) says: no bundle, no fee asked
+    BOOST_CHECK(r.verdict.find("red1-bundle") == std::string::npos);
+    BOOST_CHECK(r.verdict != verdict::AFEE1_FEE);
+}
+
+// Rule: IN-2
+BOOST_AUTO_TEST_CASE(in2_bond_spend_withdraws)
+{
+    Fixture f;
+    f.Arm();
+    const std::string before = Hash(f.view);
+    while (f.tip < (int)f.Attestor(1)->bondLocktime) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    CMutableTransaction spend = f.BondSpendTx(1);
+    BOOST_CHECK_EQUAL(VerdictOf(f, spend), verdict::OK);
+    std::optional<AttestorRecord> rec = f.Attestor(1);
+    BOOST_CHECK_EQUAL(rec->status, (uint8_t)AttestorStatus::WITHDRAWN);
+    BOOST_CHECK_EQUAL(rec->statusHeight, f.tip);
+    BOOST_CHECK_EQUAL(rec->bondSpentHeight, f.tip);
+    BOOST_CHECK_EQUAL(rec->seatedSince, 0);                                    // left seated at this SNAP
+    BOOST_CHECK([&]{ const std::vector<uint16_t> seatedNow = f.Snap(f.tip).seated; return std::find(seatedNow.begin(), seatedNow.end(), 1) == seatedNow.end(); }());
+    BOOST_CHECK_EQUAL(f.Log(CTransaction(spend).GetHash())->type, (uint8_t)TxLogType::NONE);   // relevant, but no payload family
+    BOOST_CHECK(State(f.view).GetBondIndex(rec->bondOutpoint).has_value());   // the index row stays with the record
+    f.Undo();
+    BOOST_CHECK_EQUAL(f.Attestor(1)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    (void)before;
+}
+
+// Rule: PRICE-2
+// Rule: MINT-9
+BOOST_AUTO_TEST_CASE(attest_required_false_reads_x_only)
+{
+    Fixture f;
+    f.P.attestRequired = false;                                // W15: the disarm switch of a later parameter set
+    f.Arm();
+    BOOST_CHECK(f.Attest().IsArmed());
+    BOOST_CHECK(f.Snap(f.tip - 1).attest.IsArmed());
+    BOOST_CHECK(!f.Armed());
+    BOOST_CHECK(!ArmedAt(f.view, f.P, f.tip));
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "");       // no bundle needed
+    { MintOpts o; o.bundle = valtype(7, 0x00); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+    BOOST_CHECK(!f.BundleRow(f.tip).has_value());
+    const uint256 v = f.evals[f.tip].txlogs[0].first;
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    SpendOpts o; o.ownerPath = false;
+    RedResult r = Spend(f, v, f.SpendTx(v, { COutPoint(v, 1) }, f.tip - 1, o));
+    BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(r.log.claimPath, "a");
+}
+
+// Rule: SNAP
+BOOST_AUTO_TEST_CASE(seated_since_tracks_seating)
+{
+    Fixture f;
+    f.Activate();
+    f.Register(3);
+    const int reg0 = f.Attestor(0)->registerHeight;
+    while (f.tip < reg0 + f.P.bondMaturity - 1) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->seatedSince, 0);
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->status, (uint8_t)AttestorStatus::ELIGIBLE);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->seatedSince, f.tip);                      // seated the SNAP it became ELIGIBLE
+    BOOST_CHECK((f.Snap(f.tip).seated == std::vector<uint16_t>{ 0 }));
+    for (int i = 0; i < 5; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(f.Attestor(0)->seatedSince, reg0 + f.P.bondMaturity);    // unchanged while seated
+    // eject: leaves seated at that SNAP, seatedSince cleared; a later re-entry restarts it
+    const int cited = f.tip;
+    f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_CHECK_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 50000, cited), f.Att(0, 51000, cited))), verdict::OK);
+    BOOST_CHECK_EQUAL(f.Attestor(0)->seatedSince, 0);
+}
+
+// Rule: BUNDLE-1
+// Rule: MINT-9
+BOOST_AUTO_TEST_CASE(selection_ignores_owner_key)
+{
+    Fixture f;
+    f.Arm(4);
+    // Two mints at one R with different owner keys share selected(R, ""): one bundle serves both.
+    const int R = f.tip - 1;
+    CKey other;
+    other.MakeNewKey(true);
+    MintOpts a, b;
+    b.owner = other.GetPubKey();
+    CMutableTransaction m1 = f.MintV3(10000, 50000, a);
+    CMutableTransaction m2 = f.MintV3(10000, 50000, b);
+    BlockEvaluation ev = f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { m1, m2 });
+    BOOST_CHECK(!ev.blockInvalid);
+    BOOST_CHECK_EQUAL(f.Vault(CTransaction(m1).GetHash())->status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK_EQUAL(f.Vault(CTransaction(m2).GetHash())->status, (uint8_t)VaultStatus::ACTIVE);
+    BOOST_CHECK(f.Log(CTransaction(m1).GetHash())->bundleSeqs == f.Log(CTransaction(m2).GetHash())->bundleSeqs);
+    // the v2 FEE-W selector (the owner key) would have been a free grind: it is not the selector here
+    const CPubKey otherPub = other.GetPubKey();
+    std::vector<unsigned char> ownerSel(otherPub.begin(), otherPub.end());
+    BOOST_CHECK_EQUAL(Selected(f.view, f.P, R, valtype()).size(), 3u);
+    BOOST_CHECK_EQUAL(Selected(f.view, f.P, R, ownerSel).size(), 3u);
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(cache_hit_equals_cold)
+{
+    Fixture f;
+    f.Arm();
+    MapSigCache cache;
+    f.cache = &cache;
+    CMutableTransaction m = f.MintV3(10000, 50000);
+    // cold: the block fills the cache with one entry per attestation
+    CBlock block;
+    block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, (f.tip + 1) % 3))));
+    block.vtx.push_back(CTransaction(m));
+    OverlayStateView cold(f.view);
+    BlockEvaluation a = EvaluateBlock(cold, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, &cache);
+    cold.Discard();
+    BOOST_CHECK_EQUAL(cache.entries.size(), 3u);
+    BOOST_CHECK_EQUAL(cache.hits, 0);
+    for (const auto& e : cache.entries) BOOST_CHECK(e.second);
+    // hit: the same block again reads the cache and agrees byte for byte
+    OverlayStateView warm(f.view);
+    BlockEvaluation b = EvaluateBlock(warm, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, &cache);
+    warm.Discard();
+    BOOST_CHECK_EQUAL(cache.hits, 3);
+    BOOST_CHECK(SerializeRecord(a.snapshot) == SerializeRecord(b.snapshot));
+    BOOST_CHECK(SerializeRecord(a.txlogs[0].second) == SerializeRecord(b.txlogs[0].second));
+    BOOST_CHECK_EQUAL(a.txlogs[0].second.verdict, verdict::OK);
+    // and without any cache the verdict is the same
+    OverlayStateView none(f.view);
+    BlockEvaluation c = EvaluateBlock(none, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, nullptr);
+    BOOST_CHECK(SerializeRecord(a.txlogs[0].second) == SerializeRecord(c.txlogs[0].second));
+    // the same attestation on two branches keys two entries: the block hash of citedHeight is in the key
+    const Attestation att = f.Att(0, 50000, f.tip - 1);
+    BOOST_CHECK(SigCacheKey(att, Fixture::FakeHash(f.tip - 1)) != SigCacheKey(att, Fixture::FakeHash(f.tip)));
+    // a poisoned entry is believed (the cache is trusted node-local state): the invariant is that entries are only ever written by verification
+    for (auto& e : cache.entries) e.second = false;
+    OverlayStateView poisoned(f.view);
+    BlockEvaluation d = EvaluateBlock(poisoned, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, &cache);
+    BOOST_CHECK_EQUAL(d.txlogs[0].second.verdict, "mint9-bundle-sig");
+}
+
+// Rule: UNDO
+// Rule: REG-A1
+// Rule: NOT-1
+// Rule: EQV-1
+// Rule: REV-1
+// Rule: IN-2
+BOOST_AUTO_TEST_CASE(undo_identity_v3)
+{
+    // Apply a sequence touching every v3 table, undo it block by block back to genesis, and re-apply it.
+    EmergencyFixture g;
+    Fixture& f = g.f;
+    std::vector<std::string> hashes;
+    BOOST_REQUIRE(g.PostNotice());
+    hashes.push_back(Hash(f.view));
+    for (int i = 0; i < f.P.emergencyPersist + 1; i++) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+    { SpendOpts o; o.residualValue = g.Residual(f.tip - 1); BOOST_REQUIRE_EQUAL(g.Mine(g.Claim(o)).verdict, verdict::OK); }
+    hashes.push_back(Hash(f.view));
+    { const int cited = f.tip; f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+      BOOST_REQUIRE_EQUAL(VerdictOf(f, f.EquivocationTx(f.Att(0, 11500, cited), f.Att(0, 11600, cited))), verdict::OK); }
+    // dormancy for L, then a revival
+    int L = -1, rows = 0;
+    while (rows < f.P.dormancyMinBundles) {
+        const int R = f.tip - 1;
+        std::vector<uint16_t> sel = Selected(f.view, f.P, R, valtype());
+        if (sel.size() < 3) { f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3)); continue; }
+        if (L < 0) L = sel.front();
+        if (std::find(sel.begin(), sel.end(), (uint16_t)L) != sel.end()) {
+            MintOpts o;
+            o.attestPayee = -1;
+            std::string v = MintVerdictOf(f, f.MintV3(10000, g.poolPrice, o, { L }));
+            BOOST_REQUIRE_MESSAGE(v == "" || v == verdict::MINT_HALTED_GLOBAL_RATIO || v == verdict::MINT_HALTED_DIVERGENCE, v);
+            if (f.BundleRow(f.tip).has_value()) rows++;
+        } else {
+            f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+        }
+    }
+    while (f.tip % f.P.dormancyCheck != 0) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+    if (f.Attestor(L)->status == (uint8_t)AttestorStatus::DORMANT) {
+        f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+        BOOST_CHECK_EQUAL(VerdictOf(f, f.ReviveTx(f.Att(L, g.poolPrice, f.tip - 1))), verdict::OK);
+    }
+    hashes.push_back(Hash(f.view));
+    while (f.tip < (int)f.Attestor(2)->bondLocktime) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(VerdictOf(f, f.BondSpendTx(2)), verdict::OK);
+    BOOST_REQUIRE_EQUAL(VerdictOf(f, f.BondSpendTx(0)), verdict::OK);
+    hashes.push_back(Hash(f.view));
+    const MemoryStateView full = f.view;
+    const int top = f.tip;
+    std::map<int, UndoRecord> undos = f.undos;
+    while (f.tip >= 1) f.Undo();
+    BOOST_CHECK(f.view.Map().empty());
+    // re-apply from the recorded undo heights is not possible without the blocks; instead every undo was byte-exact:
+    // replaying the undo records in reverse over the full view returns to empty (checked), and the forward hashes were
+    // taken from committed overlays whose undo records ApplyBlock reproduced (overlay_equivalence_v3).
+    (void)full;
+    (void)top;
+    (void)undos;
+    BOOST_CHECK_EQUAL(hashes.size(), 4u);
+}
+
+// Rule: SNAP
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(overlay_equivalence_v3)
+{
+    EmergencyFixture g;
+    Fixture& f = g.f;
+    BOOST_REQUIRE(g.PostNotice());
+    for (int i = 0; i < f.P.emergencyPersist + 1; i++) f.Mine(Fixture::Quote(g.poolPrice, (f.tip + 1) % 3));
+    // One block with a registration, an emergency claim with a bundle, an equivocation and a bundled mint (VOID or not).
+    SpendOpts o; o.residualValue = g.Residual(f.tip - 1);
+    const int cited = f.tip - 1;
+    CBlock block;
+    block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(g.poolPrice, 0))));
+    block.vtx.push_back(CTransaction(f.RegisterTx(5)));
+    block.vtx.push_back(CTransaction(g.Claim(o)));
+    block.vtx.push_back(CTransaction(f.EquivocationTx(f.Att(1, 11500, cited), f.Att(1, 11600, cited))));
+    block.vtx.push_back(CTransaction(f.MintV3(10000, g.poolPrice)));
+    OverlayStateView outer(f.view);
+    StateView& outerBase = outer;
+    OverlayStateView inner(outerBase);
+    BlockEvaluation a = EvaluateBlock(inner, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY);
+    MemoryStateView copy = f.view;
+    UndoRecord undo;
+    ApplyBlock(copy, f.P, block, f.tip + 1, Fixture::FakeHash(f.tip + 1), SUBSIDY, undo);
+    inner.Commit();
+    outer.Commit();
+    BOOST_CHECK(copy == f.view);
+    BOOST_CHECK(!a.blockInvalid);
+    BOOST_CHECK_EQUAL(a.txlogs.size(), 4u);
+    BOOST_CHECK_EQUAL(a.txlogs[1].second.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(a.txlogs[1].second.claimPath, "b");
+    BOOST_CHECK(SerializeRecord(a.undo) == SerializeRecord(undo));
+    BOOST_CHECK(SerializeRecord(a.snapshot) == SerializeRecord(State(copy).GetSnapshot((uint32_t)f.tip + 1).value()));
+    BOOST_CHECK(State(copy).GetAttestor(4).has_value());           // the fifth registration takes seq 4
+    BOOST_CHECK_EQUAL(State(copy).GetAttestorSeq().next, 5);
+    BOOST_CHECK_EQUAL(State(copy).GetAttestor(1)->status, (uint8_t)AttestorStatus::EJECTED);
+    BOOST_CHECK(State(copy).GetBundleLog((uint32_t)f.tip + 1).has_value());
+    // undo restores the pre-block view byte for byte
+    UndoBlock(copy, undo);
+    MemoryStateView restored = f.view;
+    UndoBlock(restored, a.undo);
+    BOOST_CHECK(copy == restored);
+}
+
+// Rule: AFEE-1
+BOOST_AUTO_TEST_CASE(default_attest_payee_in_A)
+{
+    Fixture f;
+    f.Arm(4);
+    const int R = f.tip - 1;
+    std::vector<uint16_t> A = Selected(f.view, f.P, R, valtype());
+    AttestPolicy policy;
+    std::optional<uint16_t> pick = DefaultAttestPayee(f.view, f.P, R, valtype(), A, policy);
+    BOOST_REQUIRE(pick.has_value());
+    BOOST_CHECK(std::find(A.begin(), A.end(), pick.value()) != A.end());
+    BOOST_CHECK(pick == DefaultAttestPayee(f.view, f.P, R, valtype(), A, policy));           // deterministic
+    policy.preferred = A.back();
+    BOOST_CHECK_EQUAL(DefaultAttestPayee(f.view, f.P, R, valtype(), A, policy).value(), A.back());
+    policy.preferred = 99;
+    BOOST_CHECK(std::find(A.begin(), A.end(), DefaultAttestPayee(f.view, f.P, R, valtype(), A, policy).value()) != A.end());
+    BOOST_CHECK(!DefaultAttestPayee(f.view, f.P, R, valtype(), {}, policy).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

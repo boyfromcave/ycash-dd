@@ -488,6 +488,34 @@ def evaluate_corpus():
     over_tx = tx_v4([(fill(0x81), 0, b"", 0xFFFFFFFF)], [(10000, p2pkh(key20(1))), (0, opret(transfer([(0, 9000)])))])
     plain_tx = tx_v4([(fill(0x60), 0, b"", 0xFFFFFFFF)], [(1000, p2pkh(key20(5)))])
     garbage_tx = tx_v4([(fill(0x61), 0, b"", 0xFFFFFFFF)], [(0, opret(rnd("garbage", 80)))])
+    # v3 (v3 plan §3.3-3.5): carriers and the four attestation payload types. The seeded view holds no
+    # attestors and is unarmed, so every rule is exercised on its refusal path; the fuzzer mutates from here.
+    bond_script = push_num(H + 200) + op(OP_CLTV, OP_DROP) + push(KEY2) + op(OP_CHECKSIG)
+    bundle = b"YA\x01\x02" + bytes(range(74)) + bytes(range(74, 148))
+    carrier_script = op(0x7C, 0xA8) + push(hashlib.sha256(bundle).digest()) + op(0x88) + push(KEY) + op(OP_CHECKSIG)
+    carrier_sig = push(bundle) + push(FAKE_SIG) + push(carrier_script)
+    bad_carrier_sig = push(bundle[:-1]) + push(FAKE_SIG) + push(carrier_script)          # hash mismatch
+    register_tx = tx_v4([(fill(0x62), 0, b"", 0xFFFFFFFF)],
+                        [(10 ** 9, p2sh(bond_script)), (0, opret(register(KEY, KEY2, H + 200))), (1000, p2pkh(key20(5)))])
+    register_bare_tx = tx_v4([(fill(0x62), 0, b"", 0xFFFFFFFF)],
+                             [(10 ** 9, bond_script), (0, opret(register(KEY, KEY2, H + 200)))])
+    mint_carrier_tx = tx_v4([(fill(0x50), 0, b"", 0xFFFFFFFF), (fill(0x63), 0, carrier_sig, 0xFFFFFFFF)],
+                            [(10 ** 12, p2sh(vault(lock=56, claim=56 + GRACE))), (10000, p2pkh(KEY[1:21])),
+                             (0, opret(mint(term=0, cents=10000, lock=8 + 48, ref=8, key=KEY, fee=3, attest_fee=4))),
+                             (2500000000, fee), (625000000, p2pkh(KEY2[1:21]))])
+    mint_two_carriers_tx = tx_v4([(fill(0x50), 0, b"", 0xFFFFFFFF), (fill(0x63), 0, carrier_sig, 0xFFFFFFFF), (fill(0x64), 0, carrier_sig, 0xFFFFFFFF)],
+                                 [(10 ** 12, p2sh(vault(lock=56, claim=56 + GRACE))), (10000, p2pkh(KEY[1:21])),
+                                  (0, opret(mint_pl))])
+    claim_carrier_tx = tx_v4([(fill(1), 0, claim_sig_, 0xFFFFFFFE), (fill(0x80), 0, b"", 0xFFFFFFFF), (fill(0x65), 0, carrier_sig, 0xFFFFFFFF)],
+                             [(10 ** 12 - 1000, p2pkh(bytes(20))), (2500000000, fee), (0, opret(redeem(8, 1, [], attest_fee=3))),
+                              (625000000, p2pkh(KEY2[1:21])), (10 ** 9, p2pkh(KEY[1:21]))], lock_time=124)
+    notice_tx = tx_v4([(fill(0x66), 0, b"", 0xFFFFFFFF), (fill(0x67), 0, carrier_sig, 0xFFFFFFFF)],
+                      [(0, opret(notice(fill(1), 0, 8))), (1000, p2pkh(key20(5)))])
+    notice_bad_hash_tx = tx_v4([(fill(0x66), 0, b"", 0xFFFFFFFF), (fill(0x67), 0, bad_carrier_sig, 0xFFFFFFFF)],
+                               [(0, opret(notice(fill(1), 0, 8))), (1000, p2pkh(key20(5)))])
+    equivocation_tx = tx_v4([(fill(0x68), 0, carrier_sig, 0xFFFFFFFF)], [(0, opret(equivocation())), (1000, p2pkh(key20(5)))])
+    revive_tx = tx_v4([(fill(0x69), 0, b"", 0xFFFFFFFF)], [(0, opret(revive(seq=0, price=50000, cited=8))), (1000, p2pkh(key20(5)))])
+    bond_spend_tx = tx_v4([(fill(0x6A), 0, push(FAKE_SIG) + push(bond_script), 0xFFFFFFFE)], [(10 ** 9 - 1000, p2pkh(key20(5)))], lock_time=H + 200)
     base = dict(tags=quotes, vaults=[active, void], tokens=tokens, prev=ev_prev(), act=ev_act(), hsel=hsel)
 
     def mk(name, blk=None, **kw):
@@ -519,6 +547,18 @@ def evaluate_corpus():
         mk("top_of_range", hsel=74),                                                # H = START + VOL_WINDOW + 8
         mk("hsel_wraps", hsel=255),
         mk("no_coinbase_first", blk=block([plain_tx])),
+        mk("register", blk=block([cb, register_tx])),
+        mk("register_bare_bond", blk=block([cb, register_bare_tx])),
+        mk("register_twice", blk=block([cb, register_tx, register_tx])),
+        mk("mint_with_carrier", blk=block([cb, mint_carrier_tx])),
+        mk("mint_two_carriers", blk=block([cb, mint_two_carriers_tx])),
+        mk("claim_with_carrier", blk=block([cb, claim_carrier_tx]), prev=ev_prev(p_fast=9000, p_mid=9000, p_slow=9000)),
+        mk("notice", blk=block([cb, notice_tx])),
+        mk("notice_bad_hash", blk=block([cb, notice_bad_hash_tx])),
+        mk("equivocation", blk=block([cb, equivocation_tx])),
+        mk("revive", blk=block([cb, revive_tx])),
+        mk("bond_spend_shape", blk=block([cb, bond_spend_tx])),
+        mk("everything_v3", blk=block([cb, register_tx, mint_carrier_tx, notice_tx, equivocation_tx, revive_tx, claim_carrier_tx, bond_spend_tx])),
         mk("max_tags_and_vaults", tags=[ev_tag(i, 100 + i, i % 5, flags=i & 1) for i in range(64)],
            vaults=[ev_vault(i % 4, i % 3, 60 + i, 10 ** 12, 10000, 5) for i in range(16)], tokens=[ev_token(100 + i) for i in range(16)]),
         mk("inconsistent_totals_seed", tokens=[ev_token(-5)]),

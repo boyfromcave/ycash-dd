@@ -83,6 +83,9 @@ namespace keys {
 const char PREFIX_UNDO = 'U';
 const char PREFIX_REJECTED = 'X';
 const char PREFIX_TXLOG = 'L';
+const char PREFIX_ATTESTOR = 'A';
+const char PREFIX_BUNDLELOG = 'W';
+const char PREFIX_NOTICE = 'E';
 
 static std::string U32BE(uint32_t v)
 {
@@ -119,6 +122,31 @@ std::string Totals() { return "G"; }
 std::string Rejected(const uint256& blockHash) { return HashKey(PREFIX_REJECTED, blockHash); }
 std::string Params() { return "P"; }
 std::string Undo(const uint256& blockHash) { return HashKey(PREFIX_UNDO, blockHash); }
+std::string Attestor(uint16_t seq)
+{
+    std::string s(1, PREFIX_ATTESTOR);
+    s.push_back((char)((seq >> 8) & 0xff));
+    s.push_back((char)(seq & 0xff));
+    return s;
+}
+std::string BondIndex(const COutPoint& out) { return OutPointKey('B', out); }
+std::string AttestorSeq() { return "N"; }
+std::string Attest() { return "M"; }
+std::string BundleLog(uint32_t height) { return std::string(1, PREFIX_BUNDLELOG) + U32BE(height); }
+std::string Notice(const COutPoint& out) { return OutPointKey(PREFIX_NOTICE, out); }
+
+uint16_t SeqOf(const std::string& key)
+{
+    if (key.size() < 3) return 0;
+    return (uint16_t)(((uint16_t)(unsigned char)key[1] << 8) | (uint16_t)(unsigned char)key[2]);
+}
+
+uint32_t HeightOf(const std::string& key)
+{
+    if (key.size() < 5) return 0;
+    return ((uint32_t)(unsigned char)key[1] << 24) | ((uint32_t)(unsigned char)key[2] << 16) |
+           ((uint32_t)(unsigned char)key[3] << 8) | (uint32_t)(unsigned char)key[4];
+}
 
 uint256 OutPointHashOf(const std::string& key)
 {
@@ -174,6 +202,12 @@ YB_RECORD(Snapshot)
 YB_RECORD(RejectedRecord)
 YB_RECORD(ParamsRecord)
 YB_RECORD(UndoRecord)
+YB_RECORD(AttestorRecord)
+YB_RECORD(BondIndexRecord)
+YB_RECORD(AttestorSeqRecord)
+YB_RECORD(AttestState)
+YB_RECORD(BundleLogRecord)
+YB_RECORD(NoticeRecord)
 #undef YB_RECORD
 
 const char* ActivationStatusName(ActivationStatus s)
@@ -204,6 +238,32 @@ const char* TxLogTypeName(TxLogType t)
     case TxLogType::MINT: return "MINT";
     case TxLogType::TRANSFER: return "TRANSFER";
     case TxLogType::REDEEM: return "REDEEM";
+    case TxLogType::ATTESTOR_REGISTER: return "ATTESTOR_REGISTER";
+    case TxLogType::CLAIM_NOTICE: return "CLAIM_NOTICE";
+    case TxLogType::EQUIVOCATION: return "EQUIVOCATION";
+    case TxLogType::ATTESTOR_REVIVE: return "ATTESTOR_REVIVE";
+    }
+    return "UNKNOWN";
+}
+
+const char* AttestorStatusName(AttestorStatus s)
+{
+    switch (s) {
+    case AttestorStatus::PENDING: return "PENDING";
+    case AttestorStatus::ELIGIBLE: return "ELIGIBLE";
+    case AttestorStatus::DORMANT: return "DORMANT";
+    case AttestorStatus::EJECTED: return "EJECTED";
+    case AttestorStatus::WITHDRAWN: return "WITHDRAWN";
+    }
+    return "UNKNOWN";
+}
+
+const char* AttestStatusName(AttestStatus s)
+{
+    switch (s) {
+    case AttestStatus::UNARMED: return "UNARMED";
+    case AttestStatus::TRIGGERED: return "TRIGGERED";
+    case AttestStatus::ARMED: return "ARMED";
     }
     return "UNKNOWN";
 }
@@ -325,6 +385,59 @@ std::optional<ParamsRecord> State::GetParamsRecord() const
     return p;
 }
 
+std::optional<AttestorRecord> State::GetAttestor(uint16_t seq) const
+{
+    AttestorRecord a;
+    if (!Get(keys::Attestor(seq), a)) return std::nullopt;
+    return a;
+}
+
+std::optional<uint16_t> State::GetBondIndex(const COutPoint& out) const
+{
+    BondIndexRecord b;
+    if (!Get(keys::BondIndex(out), b)) return std::nullopt;
+    return b.seq;
+}
+
+AttestorSeqRecord State::GetAttestorSeq() const
+{
+    AttestorSeqRecord n;
+    if (!Get(keys::AttestorSeq(), n)) return AttestorSeqRecord();
+    return n;
+}
+
+AttestState State::GetAttest() const
+{
+    AttestState a;
+    if (!Get(keys::Attest(), a)) return AttestState();
+    return a;
+}
+
+std::optional<BundleLogRecord> State::GetBundleLog(uint32_t height) const
+{
+    BundleLogRecord b;
+    if (!Get(keys::BundleLog(height), b)) return std::nullopt;
+    return b;
+}
+
+std::optional<NoticeRecord> State::GetNotice(const COutPoint& out) const
+{
+    NoticeRecord n;
+    if (!Get(keys::Notice(out), n)) return std::nullopt;
+    return n;
+}
+
+std::vector<std::pair<uint16_t, AttestorRecord>> State::Attestors() const
+{
+    std::vector<std::pair<uint16_t, AttestorRecord>> out;
+    view.Iterate(std::string(1, keys::PREFIX_ATTESTOR), [&](const std::string& k, const std::string& raw) {
+        AttestorRecord a;
+        if (k.size() == 3 && DeserializeRecord(raw, a)) out.push_back(std::make_pair(keys::SeqOf(k), a));
+        return true;
+    });
+    return out;
+}
+
 uint256 StateHash(const StateView& view, const std::string& network)
 {
     CSHA256 hasher;
@@ -344,7 +457,8 @@ uint256 StateHash(const StateView& view, const std::string& network)
     }
     // Then the tables in the §3.6 order; each Iterate visits its keys in ascending order,
     // which is ascending height (big-endian keys) or ascending outpoint.
-    for (const char* prefix : { "Q", "J", "C", "V", "K", "G", "S", "P" }) {
+    // v3 appends Attestors (A), AttestorSeq (N), Attest (M), BundleLog (W) and Notices (E); BondIndex (B) is derived.
+    for (const char* prefix : { "Q", "J", "C", "V", "K", "G", "S", "P", "A", "N", "M", "W", "E" }) {
         view.Iterate(prefix, [&](const std::string& k, const std::string& v) {
             feed(k, v);
             return true;

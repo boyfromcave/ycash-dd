@@ -5,9 +5,11 @@
 #ifndef YCASH_YELLOWBACK_STATE_H
 #define YCASH_YELLOWBACK_STATE_H
 
+#include "arith_uint256.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "pubkey.h"
+#include "yellowback/bundle.h"
 #include "yellowback/params.h"
 #include "yellowback/payload.h"
 #include "yellowback/tag.h"
@@ -22,7 +24,11 @@
  * The Yellowback v2 state machine (plan §3.7–3.9): IN-1..3, TX-0, MINT-1..8,
  * XFER-1..3, RED-1..4, REG-4, ACT-1..6, PRICE-1..2, SIGMA-1, HALT-1..4, SNAP
  * and UNDO as pure functions of (block, state view, height, params, block
- * subsidy). Nothing here reads the clock, the transaction pool, the wallet or
+ * subsidy), extended by the v3 price-attestation rules (v3 plan §3.7–3.8):
+ * REG-A1, the IN-2 bond spend, BUNDLE-1 (through bundle.h), MINT-9/10,
+ * AFEE-0/1, RED-5, NOT-1, EQV-1, REV-1, ARM-1/2, PIN-1/2, seating, dormancy
+ * and the revised SNAP order. The one input a v3 rule takes beyond the view
+ * is the optional signature cache (W8), passed by the caller and nullable. Nothing here reads the clock, the transaction pool, the wallet or
  * configuration (§3.10); the block subsidy is an argument so this file links
  * against nothing in main.cpp (N22).
  *
@@ -91,6 +97,14 @@ extern const char* const VAULT_SPEND_BAD_FEE;
 extern const char* const VAULT_SPEND_BAD_PAYEE;
 // RED-4
 extern const char* const VAULT_CLAIM_NOT_UNDERWATER;
+// v3 (v3 plan §4.2a). The bundle failures carry BUNDLE-1's reason: "mint9-bundle-<reason>", "red1-bundle-<reason>".
+extern const char* const MINT9_NO_BUNDLE;        //!< ARMED and no carrier-shaped input at all
+extern const char* const MINT9_BUNDLE_PREFIX;    //!< "mint9-bundle-"
+extern const char* const MINT10_DIVERGED;
+extern const char* const RED1_BUNDLE_PREFIX;     //!< "red1-bundle-"
+extern const char* const RED5_RESIDUAL;
+extern const char* const AFEE1_FEE;
+extern const char* const BUNDLE_STAT;            //!< the reason suffix when BUNDLE-1 held but the statistic is undefined
 } // namespace verdict
 
 /** The result of EvaluateBlock (§4.2a). */
@@ -123,7 +137,7 @@ struct TxOutcome
  * TX-0: nothing happens and `relevant` is false. Writes the TxLog entry
  * when relevant. Total.
  */
-TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int height);
+TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int height, SigCache* cache = nullptr);
 
 /**
  * Evaluate a whole block into `overlay` without committing it (§3.8, §3.9
@@ -136,7 +150,7 @@ TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int
  * yed_getblockverdict.
  */
 BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, const CBlock& block, int height,
-                              const uint256& blockHash, CAmount subsidyZat);
+                              const uint256& blockHash, CAmount subsidyZat, SigCache* cache = nullptr);
 
 /**
  * EvaluateBlock over an overlay of `view`, then Commit(): the block is
@@ -145,17 +159,21 @@ BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, c
  * storage layer, which reports its own errors).
  */
 std::optional<std::string> ApplyBlock(StateView& view, const Params& params, const CBlock& block, int height,
-                                      const uint256& blockHash, CAmount subsidyZat, UndoRecord& undo);
+                                      const uint256& blockHash, CAmount subsidyZat, UndoRecord& undo, SigCache* cache = nullptr);
 
 /** Restore every key recorded in `undo` to its pre-block value (byte-identical, UNDO). */
 void UndoBlock(StateView& view, const UndoRecord& undo);
 
 /**
- * SNAP for height H after the block's transactions (§3.7, §3.8): performs
- * the REG-4 judgement for the tag at H - PEER_LAG (writes Judgements),
- * advances Activation (ACT-2/3; writes it) and returns Snapshots[H] with
- * the medians, σ, issuance (prev.issuedZat + subsidyZat), totals and halts.
- * `tag` is the block's own tag, if any (tagged/quote fields). Total.
+ * SNAP for height H after the block's transactions (§3.7, §3.8; v3 §3.8
+ * order): the REG-4 judgement for the tag at H - PEER_LAG (writes
+ * Judgements), Activation (ACT-2/3; writes it), then the v3 passes —
+ * maturity, ARM-1/2 (writes Attest), PIN-1/2, seating (writes seatedSince) —
+ * the medians over the quote tags of keys not pinned at H, σ, issuance
+ * (prev.issuedZat + subsidyZat), totals, halts, dormancy (writes Attestors
+ * status) — and returns Snapshots[H]. BundleLog[H] must already be written
+ * (EvaluateBlock does so before calling); dormancy reads it. `tag` is the
+ * block's own tag, if any (tagged/quote fields). Total.
  */
 Snapshot ComputeSnapshot(State& st, const Params& params, int height, const uint256& blockHash, CAmount subsidyZat,
                          const std::optional<CoinbaseTag>& tag);
@@ -173,7 +191,7 @@ bool EnforcementOn(const State& st, const Params& params, int height);
 /** ACT-1: valid tags with the signal bit in (H - SIGNAL_WINDOW, H]. */
 uint32_t SignalCount(const State& st, const Params& params, int height);
 
-/** E(R) (FEE-2): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated; empty => FEE-0. */
+/** E(R) (FEE-2): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated, minus Snapshots[R].pinnedKeys (PIN-1); empty => FEE-0. */
 std::vector<CKeyID> EligiblePayees(const StateView& view, const Params& params, int refHeight);
 
 /** REG-1 (informational): some quote tag with this payoutKey exists in (R - N_REG, R]. */
@@ -214,6 +232,68 @@ struct PayeePolicy
  */
 std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, int refHeight,
                                    const std::vector<unsigned char>& selector, const PayeePolicy& policy);
+
+// ---------------------------------------------------------------------------
+// v3: attestors, arming, selection (v3 plan §3.7, W9)
+
+/** "ARMED" as every v3 rule reads it for refHeight R: Snapshots[R].attest.status == ARMED and the set's ATTEST_REQUIRED (W15). */
+bool ArmedAt(const StateView& view, const Params& params, int refHeight);
+
+/** The 36-byte serialised COutPoint (txid internal bytes ‖ vout LE32): the selector of REDEEM claims and CLAIM_NOTICE (R13). */
+std::vector<unsigned char> OutPointSelector(const COutPoint& out);
+
+/** ageOrigin (§3.7): Attest.triggerHeight for a founding member (registerHeight <= triggerHeight + FOUNDING_WINDOW, status != UNARMED), else registerHeight. */
+int64_t AgeOrigin(const AttestorRecord& rec, const AttestState& attest, const Params& params);
+
+/** weight(seq, H) = bondZat * clamp(H - ageOrigin, 0, AGE_CAP) (§3.7), with the Attest state given. */
+arith_uint256 AttestorWeight(const AttestorRecord& rec, const AttestState& attest, const Params& params, int64_t height);
+
+/**
+ * seated(H) over the current Attestors and the carried Attest: the N_SLOTS ELIGIBLE seq with the
+ * greatest weight(seq, H), ties by seq ascending; returned ascending. SNAP calls it after ARM-1/2,
+ * so Snapshots[H].seated is Seated(view, params, H) at that point.
+ */
+std::vector<uint16_t> Seated(const StateView& view, const Params& params, int height);
+
+/**
+ * W9 over an explicit pool (seq, weight): for round i in 0 .. rounds - 1 while the pool is non-empty,
+ * seed_i = UintToArith256(SHA256(blockHash ‖ selector ‖ "S" ‖ u8 i)), pick = seed_i mod Σ weight
+ * (256-bit, R10), chosen = the first seq in ascending order whose cumulative weight exceeds pick;
+ * removed. Σ weight = 0 over the remaining pool => the remaining draws are the lowest seq first.
+ * The Python reference is test_framework/yellowback_attest.py:select_attestors.
+ */
+std::vector<uint16_t> SelectAttestors(const uint256& blockHash, const std::vector<unsigned char>& selector,
+                                      const std::vector<std::pair<uint16_t, arith_uint256>>& pool, int rounds);
+
+/**
+ * selected(R, selector): SelectAttestors over pool = Snapshots[R].seated \ Snapshots[R].pinnedSeqs (the
+ * stored arrays, R11) with weight(s, R) under Snapshots[R].attest, M_SELECT + K_SLACK rounds, seeded by
+ * Snapshots[R].blockHash. Empty when Snapshots[R] is missing or virtual.
+ */
+std::vector<uint16_t> Selected(const StateView& view, const Params& params, int refHeight, const std::vector<unsigned char>& selector);
+
+/**
+ * BUNDLE-1 for a transaction with refHeight R (bundle.h VerifyBundle with selected(R, selector), the
+ * set's limits, Attestors' keys and Snapshots' block hashes), plus the bundle statistic under weight(s, R)
+ * (aMint/aClaim of the verdict). `selectedOut`, when given, receives selected(R, selector). Total.
+ */
+BundleVerdict VerifyTxBundle(const StateView& view, const Params& params, const CTransaction& tx, int refHeight,
+                             const std::vector<unsigned char>& selector, bool skipVin0, SigCache* cache,
+                             std::vector<uint16_t>* selectedOut = nullptr);
+
+/** The L6-style knob of AFEE-W (policy, never a validity rule). */
+struct AttestPolicy
+{
+    std::optional<uint16_t> preferred;   //!< -yellowbackpreferredattestor: replaces the pick when in A
+};
+
+/**
+ * AFEE-W, the wallet's default attestor payee (policy): `preferred` when it is in A; else A sorted
+ * ascending and A[UintToArith256(SHA256(blockHash(R) ‖ selector ‖ "A")) mod |A|]. nullopt iff A is empty.
+ */
+std::optional<uint16_t> DefaultAttestPayee(const StateView& view, const Params& params, int refHeight,
+                                           const std::vector<unsigned char>& selector, const std::vector<uint16_t>& A,
+                                           const AttestPolicy& policy);
 
 } // namespace yellowback
 

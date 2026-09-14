@@ -294,15 +294,11 @@ jobs:
           done
           exit $rc
 
-      - name: Rule -> test tags, v3 identifiers (soft until Phase A1 lands; then blocking, v3 plan §7)
+      - name: Rule -> test tags, v3 identifiers (blocking since Phase A1, v3 plan §7)
         # The v3 rules of plan §3.8 (ARM-1/2, REG-A1, BUNDLE-1, MINT-9/10, NOT-1, EQV-1, REV-1, PIN-1/2,
-        # AFEE-0/1, RED-5) are implemented in Phase A1 (state machine) on top of A0's bundle/attest
-        # library, so most of them have no test to tag yet. continue-on-error keeps CI green for rules
-        # that do not exist; the step still prints every missing tag. REMOVE continue-on-error at A1's
-        # exit (the plan's "rule-tag loop over the v3 identifiers" is blocking from then on), and fold
-        # the list into the loop above when the v3 series merges into feature/yellowback-sf.
+        # AFEE-0/1, RED-5) landed with Phase A1 (yellowback_state_tests.cpp); every identifier must be
+        # tagged. Fold the list into the loop above when the v3 series merges into feature/yellowback-sf.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: |
           set -e
           rc=0
