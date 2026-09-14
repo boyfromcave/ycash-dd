@@ -4,22 +4,326 @@
 
 #include "yellowback/wallet.h"
 
+#include "init.h"
 #include "script/ismine.h"
+#include "streams.h"
 #include "util.h"
 #include "wallet/wallet.h"
+#include "main.h"
 #include "yellowback/payload.h"
 #include "yellowback/state.h"
+#include "yellowback/txbuilder.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
 
 namespace yellowback {
 
 YellowbackWallet* g_yellowbackWallet = nullptr;
 
-YellowbackWallet::YellowbackWallet(CWallet* wallet, YellowbackIndex* index) : wallet(wallet), index(index) {}
+YellowbackWallet::YellowbackWallet(CWallet* wallet, YellowbackIndex* index) : wallet(wallet), index(index), stopThread(false), wake(false), startupSweepDone(false) {}
+
+YellowbackWallet::~YellowbackWallet()
+{
+    StopThread();
+}
 
 void YellowbackWallet::Attach()
 {
     index->onSyncTransaction = [this](const CTransaction& tx) { PreLock(tx); };
-    index->onReconcile = [this]() { Reconcile(); };
+    index->onReconcile = [this]() {
+        Reconcile();
+        // Wake the completion thread (W7 wait=false, the startup sweep): the notifier thread itself
+        // may not take cs_main (validationinterface.cpp), so the work runs elsewhere.
+        {
+            std::lock_guard<std::mutex> g(pendingMutex);
+            wake = true;
+        }
+        pendingCv.notify_all();
+    };
+    LoadCarriers();
+    LoadSigned();
+    // The startup sweep (contract: yed_sweepcarriers "also run at startup"): once, after IBD, for lapsed carriers only.
+    onIdle = [this]() { StartupSweep(); };
+    if (!thread.joinable()) thread = std::thread([this]() { CompletionLoop(); });
+}
+
+void YellowbackWallet::StartupSweep()
+{
+    if (startupSweepDone) return;
+    if (!index->IsHealthy() || IsInitialBlockDownload(::Params().GetConsensus())) return;
+    int tip;
+    {
+        LOCK(cs_main);
+        tip = chainActive.Height();
+    }
+    std::vector<CarrierRecord> lapsed = LapsedCarriers(tip);
+    startupSweepDone = true;   // one attempt per start; yed_sweepcarriers is the manual path
+    if (lapsed.empty()) return;
+    LOCK2(cs_main, wallet->cs_wallet);
+    if (wallet->IsLocked()) {
+        LogPrintf("yellowback: %u lapsed carrier(s) outstanding; the wallet is locked, run yed_sweepcarriers after walletpassphrase\n", lapsed.size());
+        return;
+    }
+    LOCK(index->cs_yellowback);
+    try {
+        BuiltTx b = BuildSweepCarriers(*this, lapsed);
+        CWalletTx wtx(wallet, CTransaction(b.tx));
+        if (wallet->CommitTransaction(wtx, std::nullopt)) {
+            for (const CarrierRecord& c : b.sweptRecords) SpendCarrier(c.outpoint);
+            LogPrintf("yellowback: startup sweep reclaimed %u lapsed carrier(s) in %s\n", b.sweptRecords.size(), wtx.GetHash().ToString());
+        }
+        for (const CarrierRecord& c : b.staleRecords) SpendCarrier(c.outpoint);
+    } catch (const std::exception& e) {
+        LogPrintf("yellowback: startup sweep skipped: %s\n", e.what());
+    }
+}
+
+// ---------------------------------------------------------------- v3: the files under <datadir>/yellowback (W7, S16)
+
+namespace {
+
+/** Write `data` to `path` atomically: a temporary beside it, fsync, rename. */
+bool WriteFileSynced(const fs::path& path, const std::vector<unsigned char>& data)
+{
+    TryCreateDirectory(path.parent_path());
+    const fs::path tmp = path.string() + ".tmp";
+    FILE* f = fopen(tmp.string().c_str(), "wb");
+    if (!f) return false;
+    bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size();
+    FileCommit(f);   // fflush + fsync
+    fclose(f);
+    if (!ok) return false;
+    return RenameOver(tmp, path);
+}
+
+bool ReadWholeFile(const fs::path& path, std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (!fs::exists(path)) return false;
+    FILE* f = fopen(path.string().c_str(), "rb");
+    if (!f) return false;
+    unsigned char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + n);
+    fclose(f);
+    return true;
+}
+
+const unsigned char CARRIERS_MAGIC[4] = { 'Y', 'B', 'C', 1 };
+const unsigned char SIGNED_MAGIC[4] = { 'Y', 'B', 'S', 1 };
+
+} // namespace
+
+fs::path YellowbackWallet::CarriersFile() { return GetDataDir() / "yellowback" / "carriers.dat"; }
+fs::path YellowbackWallet::SignedFile() { return GetDataDir() / "yellowback" / "attest-signed.dat"; }
+
+void YellowbackWallet::LoadCarriers()
+{
+    std::vector<unsigned char> raw;
+    if (!ReadWholeFile(CarriersFile(), raw)) return;
+    try {
+        CDataStream ss(raw, SER_DISK, CLIENT_VERSION);
+        unsigned char magic[4];
+        ss.read((char*)magic, 4);
+        if (memcmp(magic, CARRIERS_MAGIC, 4) != 0) throw std::runtime_error("bad magic");
+        std::vector<CarrierRecord> loaded;
+        ss >> loaded;
+        LOCK(wallet->cs_wallet);
+        carriers = loaded;
+        LogPrintf("yellowback: %u outstanding carrier(s) loaded from %s\n", carriers.size(), CarriersFile().string());
+    } catch (const std::exception& e) {
+        LogPrintf("yellowback: cannot read %s (%s); outstanding carriers are forgotten (W7)\n", CarriersFile().string(), e.what());
+    }
+}
+
+bool YellowbackWallet::SaveCarriers() const
+{
+    AssertLockHeld(wallet->cs_wallet);
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss.write((const char*)CARRIERS_MAGIC, 4);
+    ss << carriers;
+    return WriteFileSynced(CarriersFile(), std::vector<unsigned char>(ss.begin(), ss.end()));
+}
+
+void YellowbackWallet::RecordCarrier(const CarrierRecord& c)
+{
+    LOCK(wallet->cs_wallet);
+    for (CarrierRecord& e : carriers) {
+        if (e.outpoint == c.outpoint) { e = c; SaveCarriers(); return; }
+    }
+    carriers.push_back(c);
+    if (!SaveCarriers()) LogPrintf("yellowback: WARNING: cannot write %s; carrier %s would be lost on restart\n", CarriersFile().string(), c.outpoint.ToString());
+}
+
+void YellowbackWallet::SpendCarrier(const COutPoint& out)
+{
+    LOCK(wallet->cs_wallet);
+    const size_t before = carriers.size();
+    carriers.erase(std::remove_if(carriers.begin(), carriers.end(), [&](const CarrierRecord& c) { return c.outpoint == out; }), carriers.end());
+    if (carriers.size() != before) SaveCarriers();
+}
+
+std::optional<CarrierRecord> YellowbackWallet::GetCarrier(const COutPoint& out) const
+{
+    LOCK(wallet->cs_wallet);
+    for (const CarrierRecord& c : carriers) if (c.outpoint == out) return c;
+    return std::nullopt;
+}
+
+std::vector<CarrierRecord> YellowbackWallet::OutstandingCarriers() const
+{
+    LOCK(wallet->cs_wallet);
+    return carriers;
+}
+
+std::vector<CarrierRecord> YellowbackWallet::LapsedCarriers(int tipHeight) const
+{
+    std::vector<CarrierRecord> out;
+    for (const CarrierRecord& c : OutstandingCarriers()) if (c.Lapsed(tipHeight)) out.push_back(c);
+    return out;
+}
+
+std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::Bonds() const
+{
+    AssertLockHeld(index->cs_yellowback);
+    std::vector<std::pair<uint16_t, AttestorRecord>> out;
+    LOCK(wallet->cs_wallet);
+    for (const auto& kv : State(index->View()).Attestors()) {
+        const CPubKey k = kv.second.BondKey();
+        if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
+    }
+    return out;
+}
+
+std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::HotKeys() const
+{
+    AssertLockHeld(index->cs_yellowback);
+    std::vector<std::pair<uint16_t, AttestorRecord>> out;
+    LOCK(wallet->cs_wallet);
+    for (const auto& kv : State(index->View()).Attestors()) {
+        const CPubKey k = kv.second.AttestorKey();
+        if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
+    }
+    return out;
+}
+
+void YellowbackWallet::LoadSigned()
+{
+    std::vector<unsigned char> raw;
+    if (!ReadWholeFile(SignedFile(), raw)) return;
+    try {
+        CDataStream ss(raw, SER_DISK, CLIENT_VERSION);
+        unsigned char magic[4];
+        ss.read((char*)magic, 4);
+        if (memcmp(magic, SIGNED_MAGIC, 4) != 0) throw std::runtime_error("bad magic");
+        LOCK(wallet->cs_wallet);
+        while (!ss.empty()) {
+            SignedAttestation r;
+            ss >> r;
+            signedGuard[std::make_pair(r.seq, r.citedHeight)] = r;
+        }
+        LogPrintf("yellowback: %u signed attestation(s) loaded from %s (S16)\n", signedGuard.size(), SignedFile().string());
+    } catch (const std::exception& e) {
+        // A torn tail keeps what was read before it: the guard never loses an earlier line.
+        LogPrintf("yellowback: %s is damaged (%s); the signing guard keeps %u line(s)\n", SignedFile().string(), e.what(), signedGuard.size());
+    }
+}
+
+std::optional<SignedAttestation> YellowbackWallet::LookupSigned(uint16_t seq, uint32_t citedHeight) const
+{
+    LOCK(wallet->cs_wallet);
+    auto it = signedGuard.find(std::make_pair(seq, citedHeight));
+    if (it == signedGuard.end()) return std::nullopt;
+    return it->second;
+}
+
+bool YellowbackWallet::RecordSigned(const SignedAttestation& rec)
+{
+    LOCK(wallet->cs_wallet);
+    const fs::path path = SignedFile();
+    TryCreateDirectory(path.parent_path());
+    const bool fresh = !fs::exists(path);
+    FILE* f = fopen(path.string().c_str(), "ab");
+    if (!f) return false;
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    if (fresh) ss.write((const char*)SIGNED_MAGIC, 4);
+    ss << rec;
+    bool ok = fwrite(&ss[0], 1, ss.size(), f) == ss.size();
+    FileCommit(f);   // fsync before the RPC returns (S16)
+    fclose(f);
+    if (!ok) return false;
+    signedGuard[std::make_pair(rec.seq, rec.citedHeight)] = rec;
+    return true;
+}
+
+// ---------------------------------------------------------------- v3: the completion thread (W7 wait=false, the startup sweep)
+
+void YellowbackWallet::AddPendingCompletion(const COutPoint& carrier, std::function<bool()> complete)
+{
+    std::lock_guard<std::mutex> g(pendingMutex);
+    pending[carrier] = complete;
+}
+
+size_t YellowbackWallet::PendingCompletions() const
+{
+    std::lock_guard<std::mutex> g(pendingMutex);
+    return pending.size();
+}
+
+void YellowbackWallet::StopThread()
+{
+    stopThread = true;
+    pendingCv.notify_all();
+    if (thread.joinable() && thread.get_id() != std::this_thread::get_id()) thread.join();
+}
+
+void YellowbackWallet::CompletionLoop()
+{
+    RenameThread("yellowback-wallet");
+    while (!stopThread) {
+        {
+            std::unique_lock<std::mutex> lk(pendingMutex);
+            pendingCv.wait_for(lk, std::chrono::milliseconds(1000), [this]() { return wake || stopThread.load(); });
+            wake = false;
+        }
+        if (stopThread || ShutdownRequested() || index->IsStopped()) break;
+        // Snapshot the pending set, run each completion outside pendingMutex (a completion takes
+        // cs_main, cs_wallet and cs_yellowback itself), then drop the finished ones.
+        std::vector<std::pair<COutPoint, std::function<bool()>>> work;
+        {
+            std::lock_guard<std::mutex> g(pendingMutex);
+            for (const auto& kv : pending) work.push_back(kv);
+        }
+        for (const auto& kv : work) {
+            bool done = false;
+            try {
+                done = kv.second();
+            } catch (const std::exception& e) {
+                LogPrintf("yellowback: pending completion for carrier %s failed: %s\n", kv.first.ToString(), e.what());
+                done = true;
+            } catch (...) {
+                LogPrintf("yellowback: pending completion for carrier %s failed\n", kv.first.ToString());
+                done = true;
+            }
+            if (done) {
+                std::lock_guard<std::mutex> g(pendingMutex);
+                pending.erase(kv.first);
+            }
+            if (stopThread) return;
+        }
+        if (onIdle) {
+            try {
+                onIdle();
+            } catch (const std::exception& e) {
+                LogPrintf("yellowback: wallet idle work failed: %s\n", e.what());
+            } catch (...) {
+                LogPrintf("yellowback: wallet idle work failed\n");
+            }
+        }
+    }
 }
 
 bool YellowbackWallet::IsMineScript(const CScript& scriptPubKey) const

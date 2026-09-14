@@ -11,9 +11,15 @@
 #include "yellowback/index.h"
 #include "yellowback/view.h"
 
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <thread>
 #include <vector>
 
 class CWallet;
@@ -33,6 +39,62 @@ struct YedCoin
 {
     COutPoint outpoint;
     TokenRecord token;
+};
+
+/**
+ * An outstanding carrier of this wallet (v3 plan W7, R6): the funding output
+ * P2SH(CarrierScript(pk, SHA256(bundle))) of CARRIER_VALUE that a MINT / CLAIM /
+ * CLAIM_NOTICE / EQUIVOCATION spends. Persisted in <datadir>/yellowback/carriers.dat
+ * (never wallet.dat; the carrier is not IsMine, R6) so a carrier whose main
+ * transaction never confirmed can be swept back after its window lapses. The key
+ * `pk` is an ordinary keypool key of the wallet, so the sweep can sign after a
+ * restart; the bundle is needed because the redeem script demands a push that
+ * hashes to its commitment.
+ */
+struct CarrierRecord
+{
+    COutPoint outpoint;
+    int32_t refHeight;                        //!< R fixed at the carrier step; the main transaction's refHeight
+    std::vector<unsigned char> selector;      //!< empty (MINT) or the 36-byte vault outpoint (CLAIM / NOTICE); empty for EQUIVOCATION
+    std::vector<unsigned char> bundle;        //!< the bundle committed by the redeem script (may be empty before arming)
+    CPubKey pk;                               //!< the carrier key (held by the wallet)
+    int32_t createdHeight;                    //!< chain height when the carrier was broadcast
+
+    CarrierRecord() : refHeight(0), createdHeight(0) {}
+
+    /** The window has lapsed: tip > R + REF_WINDOW (both transactions expired together). */
+    bool Lapsed(int tipHeight) const { return (int64_t)tipHeight > (int64_t)refHeight + REF_WINDOW; }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(outpoint);
+        READWRITE(refHeight);
+        READWRITE(selector);
+        READWRITE(bundle);
+        READWRITE(pk);
+        READWRITE(createdHeight);
+    }
+};
+
+/** One line of the signing guard <datadir>/yellowback/attest-signed.dat (S16): what this node signed for (seq, citedHeight). */
+struct SignedAttestation
+{
+    uint16_t seq;
+    uint32_t citedHeight;
+    uint32_t priceMicroUsd;
+    std::array<unsigned char, 64> sig;
+
+    SignedAttestation() : seq(0), citedHeight(0), priceMicroUsd(0) { sig.fill(0); }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(seq);
+        READWRITE(citedHeight);
+        READWRITE(priceMicroUsd);
+        READWRITE(FLATDATA(sig));
+    }
 };
 
 class YellowbackWallet
@@ -79,10 +141,60 @@ public:
     CWallet* Wallet() const { return wallet; }
     YellowbackIndex* Index() const { return index; }
 
+    // ---- v3: carriers (W7). All take cs_wallet themselves; the file is rewritten and fsynced on every change.
+    /** Persist a carrier the wallet just broadcast. */
+    void RecordCarrier(const CarrierRecord& c);
+    /** Forget a carrier whose spending transaction was committed (or swept). */
+    void SpendCarrier(const COutPoint& out);
+    std::optional<CarrierRecord> GetCarrier(const COutPoint& out) const;
+    /** Every recorded carrier, oldest first. */
+    std::vector<CarrierRecord> OutstandingCarriers() const;
+    /** The outstanding carriers whose window has lapsed at `tipHeight` (the sweep's input set). */
+    std::vector<CarrierRecord> LapsedCarriers(int tipHeight) const;
+    /** <datadir>/yellowback/carriers.dat */
+    static fs::path CarriersFile();
+
+    // ---- v3: bonds (R6). Attestors records whose bondPubKey this wallet holds; cs_yellowback held by the caller.
+    std::vector<std::pair<uint16_t, AttestorRecord>> Bonds() const;
+    /** The attestor hot keys this wallet holds: every Attestors record whose attestorPubKey it has (cs_yellowback held by the caller). */
+    std::vector<std::pair<uint16_t, AttestorRecord>> HotKeys() const;
+
+    // ---- v3: the signing guard (S16). In memory and in <datadir>/yellowback/attest-signed.dat (append, fsync before returning).
+    std::optional<SignedAttestation> LookupSigned(uint16_t seq, uint32_t citedHeight) const;
+    /** Append and fsync; false when the write failed (the caller then returns nothing). */
+    bool RecordSigned(const SignedAttestation& rec);
+    static fs::path SignedFile();
+
+    // ---- v3: the two-step flow under wait=false (§4.6). A completion runs on the wallet's own
+    // completion thread (never the notifier thread, which may not take cs_main) after every
+    // applied block and every second; it returns true once it is finished (or has given up).
+    void AddPendingCompletion(const COutPoint& carrier, std::function<bool()> complete);
+    size_t PendingCompletions() const;
+    /** The startup sweep and the completion thread's idle work: set by the RPC layer; runs under no lock of ours. */
+    std::function<void()> onIdle;
+    /** Stop the completion thread (idempotent; the destructor does the same). */
+    void StopThread();
+    ~YellowbackWallet();
+
 private:
+    void CompletionLoop();
+    void StartupSweep();
+    void LoadCarriers();
+    bool SaveCarriers() const;
+    void LoadSigned();
+
     CWallet* wallet;
     YellowbackIndex* index;
     std::set<COutPoint> ourLocks; //!< cs_wallet
+    std::vector<CarrierRecord> carriers;                                           //!< cs_wallet
+    std::map<std::pair<uint16_t, uint32_t>, SignedAttestation> signedGuard;         //!< cs_wallet
+    std::map<COutPoint, std::function<bool()>> pending;                            //!< pendingMutex
+    mutable std::mutex pendingMutex;
+    std::condition_variable pendingCv;
+    std::atomic<bool> stopThread;
+    bool wake;
+    bool startupSweepDone;
+    std::thread thread;
 };
 
 /**
