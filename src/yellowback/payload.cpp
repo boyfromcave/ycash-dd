@@ -435,10 +435,10 @@ const char* PayloadTypeName(PayloadType type)
     case PayloadType::MINT: return "mint";
     case PayloadType::TRANSFER: return "transfer";
     case PayloadType::REDEEM: return "redeem";
-    case PayloadType::ATTESTOR_REGISTER: return "attestor_register";
-    case PayloadType::CLAIM_NOTICE: return "claim_notice";
+    case PayloadType::ATTESTOR_REGISTER: return "register";
+    case PayloadType::CLAIM_NOTICE: return "notice";
     case PayloadType::EQUIVOCATION: return "equivocation";
-    case PayloadType::ATTESTOR_REVIVE: return "attestor_revive";
+    case PayloadType::ATTESTOR_REVIVE: return "revive";
     }
     return "unknown";
 }

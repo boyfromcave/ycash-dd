@@ -9,6 +9,7 @@
 #include "pubkey.h"
 #include "uint256.h"
 #include "yellowback/attest.h"
+#include "yellowback/math.h"
 #include "yellowback/params.h"
 
 #include <cstdint>
@@ -51,10 +52,7 @@ std::vector<unsigned char> EncodeBundle(const Bundle& b);
 // A1: read maxCount's default from Params (BUNDLE_MAX = 6).
 std::optional<Bundle> DecodeBundle(const std::vector<unsigned char>& data, size_t maxCount = 6);
 
-/** Where a bundle rides. */
-// A1: replace with Params' BundleCarrier once params.h has it.
-enum class BundleCarrierMode { SCRIPTSIG, OP_RETURN, EITHER };
-
+/** Where a bundle rides: params.h BundleCarrier (BUNDLE_CARRIER, W2). */
 enum class BundleSource { SCRIPTSIG, OP_RETURN };
 
 /**
@@ -64,7 +62,7 @@ enum class BundleSource { SCRIPTSIG, OP_RETURN };
  * bytes are not decoded here. skipVin0 excludes a REDEEM's vault input.
  */
 std::optional<std::pair<std::vector<unsigned char>, BundleSource>>
-ExtractBundle(const CTransaction& tx, BundleCarrierMode mode, bool skipVin0,
+ExtractBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
               const std::vector<unsigned char>& payloadTail, std::string* reason = nullptr);
 
 /**
@@ -112,7 +110,7 @@ struct BundleVerdict
  * "sig"); blockHashAt(height) is the index's block hash (nullopt -> "sig").
  * Every check is total; the first failure names the reason.
  */
-BundleVerdict VerifyBundle(const CTransaction& tx, BundleCarrierMode mode, bool skipVin0,
+BundleVerdict VerifyBundle(const CTransaction& tx, BundleCarrier mode, bool skipVin0,
                            const std::vector<unsigned char>& payloadTail,
                            int R, const std::vector<uint16_t>& selected, const BundleLimits& limits,
                            const std::function<std::optional<CPubKey>(uint16_t)>& pubkeyOf,

@@ -875,10 +875,12 @@ void YellowbackIndex::SyncTransaction(const CTransaction& tx, const CBlock* pblo
 
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& out)
 {
-    // The four regtest-only flags of §3.1 (M13): -yellowbackstartheight (required) and the three
-    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil. Every value
-    // is hashed into the state hash so mismatched test nodes fail loudly.
-    static const char* const REGTEST_FLAGS[] = { "-yellowbackstartheight", "-yellowbacksigmaref", "-yellowbacksupplycapbps", "-yellowbackenforceuntil" };
+    // The six regtest-only flags of §3.1 (M13): -yellowbackstartheight (required), the three v2
+    // overrides -yellowbacksigmaref, -yellowbacksupplycapbps, -yellowbackenforceuntil, and v3's
+    // -yellowbackattestarmmin, -yellowbackbundlecarrier. Every value is hashed into the state hash
+    // so mismatched test nodes fail loudly.
+    static const char* const REGTEST_FLAGS[] = { "-yellowbackstartheight", "-yellowbacksigmaref", "-yellowbacksupplycapbps", "-yellowbackenforceuntil",
+                                                 "-yellowbackattestarmmin", "-yellowbackbundlecarrier" };
     if (networkId != "regtest") {
         for (const char* f : REGTEST_FLAGS) {
             if (mapArgs.count(f)) return std::string(f) + " is regtest-only";
@@ -895,7 +897,11 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, Params& 
     if (capBps < 0 || capBps > 10000) return std::string("-yellowbacksupplycapbps must be between 0 and 10000");
     int64_t until = GetArg("-yellowbackenforceuntil", 0);
     if (until < 0 || until > 0x7FFFFFFF) return std::string("-yellowbackenforceuntil must be >= 0");
-    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until);
+    int64_t armMin = GetArg("-yellowbackattestarmmin", 3);
+    if (armMin < 0 || armMin > 0x7FFFFFFF) return std::string("-yellowbackattestarmmin must be >= 0");
+    std::optional<BundleCarrier> carrier = ParseBundleCarrier(GetArg("-yellowbackbundlecarrier", "scriptsig"));
+    if (!carrier.has_value()) return std::string("-yellowbackbundlecarrier must be scriptsig, opreturn or either");
+    out = RegtestParams((int)startHeight, (int)sigmaRef, (int)capBps, (int)until, (int)armMin, carrier.value());
     return std::nullopt;
 }
 

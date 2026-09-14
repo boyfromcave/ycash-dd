@@ -36,9 +36,9 @@ from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
 GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_golden.json')
 
-# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0}).  The C++ unit test
+# The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig}).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = '6eb05394317a8c1d6f3cd23a5a824eaf55d45605deb774e0d5d70f3a55638682'
+GOLDEN_STATE_HASH = 'bf4e41ff50326919fc0da42d352fb8e96efd2f0dd6aede3c028db1283d9a97a7'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -255,20 +255,39 @@ class PayloadTests(unittest.TestCase):
 
     # Rule: MINT-1
     def test_mint_roundtrip(self):
-        b = ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3)
-        self.assertEqual(len(b), 51)
+        b = ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3, 4)
+        self.assertEqual(len(b), 52)
         p = ym.decode_payload(b)
-        self.assertEqual((p.type, p.term_class, p.cents, p.lock_height, p.ref_height, p.owner_pubkey, p.fee_vout),
-                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_PUBKEY, 3))
+        self.assertEqual((p.type, p.term_class, p.cents, p.lock_height, p.ref_height, p.owner_pubkey, p.fee_vout, p.attest_fee_vout),
+                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_PUBKEY, 3, 4))
+        self.assertEqual(ym.decode_payload(ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3)).attest_fee_vout, 0xFF)
 
     # Rule: XFER-1
     def test_transfer_and_redeem_roundtrip(self):
         t = ym.decode_payload(ym.encode_transfer([(0, 100), (1, 200)]))
         self.assertEqual((t.type, t.assignments), (ym.PAYLOAD_TRANSFER, [(0, 100), (1, 200)]))
-        r = ym.decode_payload(ym.encode_redeem(99, 0xFF, [(3, 5)]))
-        self.assertEqual((r.type, r.ref_height, r.fee_vout, r.assignments), (ym.PAYLOAD_REDEEM, 99, 0xFF, [(3, 5)]))
+        r = ym.decode_payload(ym.encode_redeem(99, 0xFF, [(3, 5)], 2))
+        self.assertEqual((r.type, r.ref_height, r.fee_vout, r.attest_fee_vout, r.assignments), (ym.PAYLOAD_REDEEM, 99, 0xFF, 2, [(3, 5)]))
         self.assertEqual(len(ym.encode_transfer([(0, 1)] * 1)), 10)
-        self.assertEqual(len(ym.encode_redeem(1, 1, [])), 10)
+        self.assertEqual(len(ym.encode_redeem(1, 1, [])), 11)
+
+    # Rule: MINT-1
+    def test_v3_types_decode_by_name(self):
+        # The four v3 types decode (shape only; no rule reads them until A1) and round-trip their fields.
+        reg = ym.decode_payload(b'YB\x03\x05' + G_PUBKEY + G2_PUBKEY + (301).to_bytes(4, 'little') + b'\x05')
+        self.assertEqual((reg.type_name, reg.attestor_pubkey, reg.bond_pubkey, reg.bond_locktime, reg.flags),
+                         ('ATTESTOR_REGISTER', G_PUBKEY, G2_PUBKEY, 301, 5))
+        txid = 'ab' * 31 + 'cd'
+        notice = ym.decode_payload(b'YB\x03\x06' + bytes.fromhex(txid)[::-1] + b'\x02' + (200).to_bytes(4, 'little'))
+        self.assertEqual((notice.type_name, notice.vault_txid, notice.vault_vout, notice.ref_height), ('CLAIM_NOTICE', txid, 2, 200))
+        self.assertEqual(ym.decode_payload(b'YB\x03\x07').type_name, 'EQUIVOCATION')
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x07\x00'))
+        rev = ym.decode_payload(b'YB\x03\x08' + (7).to_bytes(2, 'little') + (1_000_000).to_bytes(4, 'little') + (9).to_bytes(4, 'little') + b'\x11' * 64)
+        self.assertEqual((rev.type_name, rev.seq, rev.price_micro_usd, rev.cited_height, rev.sig), ('ATTESTOR_REVIVE', 7, 1_000_000, 9, b'\x11' * 64))
+        for t in (ym.PAYLOAD_ATTESTOR_REGISTER, ym.PAYLOAD_CLAIM_NOTICE, ym.PAYLOAD_ATTESTOR_REVIVE):
+            self.assertIsNone(ym.decode_payload(bytes([0x59, 0x42, 3, t]) + b'\x00' * 10))
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x04'))
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x09' + b'\x00'))
 
     # Rule: MINT-1
     def test_malformed(self):
@@ -277,11 +296,12 @@ class PayloadTests(unittest.TestCase):
         self.assertIsNone(ym.decode_payload(good + b'\x00'))            # trailing
         self.assertIsNone(ym.decode_payload(b'YA' + good[2:]))          # magic
         self.assertIsNone(ym.decode_payload(b'YB\x01' + good[3:]))      # version 1 ignored (V23)
-        self.assertIsNone(ym.decode_payload(b'YB\x03' + good[3:]))      # later version ignored
-        self.assertIsNone(ym.decode_payload(b'YB\x02\x10' + good[4:]))  # retired type
-        self.assertIsNone(ym.decode_payload(b'YB\x02\x20'))             # other family, short
-        self.assertIsNone(ym.decode_payload(b'YB\x02'))                 # < 4 bytes
-        self.assertIsNone(ym.decode_payload(b'YB\x02\x02' + b'\x0f' + b'\x00' * 75 + b'\x00'))  # 81 bytes
+        self.assertIsNone(ym.decode_payload(b'YB\x02' + good[3:]))      # version 2 ignored (V23)
+        self.assertIsNone(ym.decode_payload(b'YB\x04' + good[3:]))      # later version ignored
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x10' + good[4:]))  # retired type
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x20'))             # other family, short
+        self.assertIsNone(ym.decode_payload(b'YB\x03'))                 # < 4 bytes
+        self.assertIsNone(ym.decode_payload(b'YB\x03\x02' + b'\x0f' + b'\x00' * 75 + b'\x00'))  # 81 bytes
         self.assertIsNone(ym.decode_payload(ym.encode_transfer([(0, 0)])))          # cents == 0
         self.assertIsNone(ym.decode_payload(ym.encode_transfer([(0, 1), (0, 2)])))  # duplicate vout
         self.assertIsNone(ym.decode_payload(ym.encode_transfer([(5, 1)]), n_vout=3))          # out of range
@@ -1233,11 +1253,13 @@ def build_golden():
 
 def golden_document(c):
     return {
-        'description': 'Yellowback v2 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
-                       'supplyCapBps 0, enforceUntil 0}; 224 synthetic blocks (see test_yellowback_model.build_golden). '
+        'description': 'Yellowback v3 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
+                       'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig)}; payload version 3; '
+                       '224 synthetic blocks (see test_yellowback_model.build_golden). '
                        'txs[0] of every block is the coinbase; the model reads its scriptSig only. '
                        'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.',
-        'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0},
+        'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0,
+                   'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG},
         'stateHash': c.model.state_hash(),
         'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
         'totals': c.model.totals.as_dict(),
@@ -1260,7 +1282,12 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[49:59], b'C' + b'\x00' + bytes(8))
         self.assertEqual(pre[59:60], b'G')
         self.assertEqual(pre[60:100], bytes(40))
-        self.assertEqual(pre[100:], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00')
+        # P: the four v2 i32 fields, then v3's attestArmMin u32 (3) and bundleCarrier u8 (0 = scriptsig) (M13)
+        self.assertEqual(pre[100:], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
+                         + b'\x03\x00\x00\x00' + b'\x00')
+        m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
+        self.assertEqual(m2.state_hash_preimage()[117:], b'\x00\x00\x00\x00' + b'\x02')
+        self.assertNotEqual(m2.state_hash(), m.state_hash())
         self.assertEqual(m.state_hash(), ym.sha256(pre).hex())
 
     # Rule: N18

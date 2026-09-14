@@ -461,10 +461,10 @@ BOOST_AUTO_TEST_CASE(tx0_find_payload_in_transaction)
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::MINT)), "mint");
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::TRANSFER)), "transfer");
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::REDEEM)), "redeem");
-    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::ATTESTOR_REGISTER)), "attestor_register");
-    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::CLAIM_NOTICE)), "claim_notice");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::ATTESTOR_REGISTER)), "register");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::CLAIM_NOTICE)), "notice");
     BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::EQUIVOCATION)), "equivocation");
-    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::ATTESTOR_REVIVE)), "attestor_revive");
+    BOOST_CHECK_EQUAL(std::string(PayloadTypeName(PayloadType::ATTESTOR_REVIVE)), "revive");
 }
 
 // ---------------------------------------------------------------------------

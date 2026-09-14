@@ -13,6 +13,7 @@
 #include "uint256.h"
 #include "yellowback/params.h"
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <optional>
@@ -40,7 +41,7 @@
  *   S<u32 height>         Snapshot
  *   G                     Totals
  *   X<blockhash>          RejectedRecord    (node-local, V13; not part of the state hash)
- *   P                     ParamsRecord      (the four hashed regtest values, N18)
+ *   P                     ParamsRecord      (the six hashed regtest values, N18, M13)
  *   U<blockhash>          Undo              (not part of the state hash)
  *
  * The federation prototype's A (anchor), Rc/R<u32> (signer set), P<u32> (price
@@ -461,17 +462,23 @@ struct RejectedRecord
     }
 };
 
-/** Params: the four regtest values in the state-hash preimage (M13, N18); written by the first applied block. */
+/**
+ * Params: the regtest values in the state-hash preimage (M13, N18); written by the first applied
+ * block. v3 appends attestArmMin (u32) and bundleCarrier (u8, the BundleCarrier enum value).
+ */
 struct ParamsRecord
 {
     int32_t startHeight;
     int32_t sigmaRefBps;
     int32_t supplyCapBps;
     int32_t enforceUntil;
+    uint32_t attestArmMin;
+    uint8_t bundleCarrier;
 
-    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), enforceUntil(0) {}
+    ParamsRecord() : startHeight(0), sigmaRefBps(0), supplyCapBps(0), enforceUntil(0), attestArmMin(0), bundleCarrier(0) {}
     explicit ParamsRecord(const Params& p)
-        : startHeight(p.startHeight), sigmaRefBps(p.sigmaRefBps), supplyCapBps(p.supplyCapBps), enforceUntil(p.enforceUntilHeight) {}
+        : startHeight(p.startHeight), sigmaRefBps(p.sigmaRefBps), supplyCapBps(p.supplyCapBps), enforceUntil(p.enforceUntilHeight),
+          attestArmMin((uint32_t)std::max(0, p.attestArmMin)), bundleCarrier((uint8_t)p.bundleCarrier) {}
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
@@ -480,6 +487,8 @@ struct ParamsRecord
         READWRITE(sigmaRefBps);
         READWRITE(supplyCapBps);
         READWRITE(enforceUntil);
+        READWRITE(attestArmMin);
+        READWRITE(bundleCarrier);
     }
 };
 

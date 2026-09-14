@@ -926,8 +926,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
         mtx.vout.push_back(CTxOut(vaultValue, vaultSpk));
         mtx.vout.push_back(CTxOut(TOKEN_VALUE, userP2PKH));
-        // A1: the v3 MINT payload gains attestFeeVout (= 4 here); the v2 factory is used until payload.h has it.
-        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3)))));
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, lockHeight, refHeight, ownerKey.GetPubKey(), 3, 4)))));
         mtx.vout.push_back(CTxOut(feeZat, payeeP2PKH));
         mtx.vout.push_back(CTxOut(attestFeeZat, attestorP2PKH));
         mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - vaultValue - TOKEN_VALUE - feeZat - attestFeeZat - DEFAULT_YELLOWBACK_FEE, userP2PKH));
@@ -965,7 +964,7 @@ void CheckCarrierTemplatesStandard(uint32_t branchId, const char* upgrade)
         CMutableTransaction mtx = newTx(0);
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 3)));
         mtx.vin.push_back(CTxIn(COutPoint(fundHash, 0)));
-        mtx.vout.push_back(CTxOut(0, CScript() << OP_RETURN << valtype(41 + 4, 0x06)));   // A1: Payload::ClaimNotice
+        mtx.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::ClaimNotice(COutPoint(fundHash, 2), refHeight)))));
         mtx.vout.push_back(CTxOut(10000 * COIN + carrierValue - DEFAULT_YELLOWBACK_FEE, userP2PKH));
         BOOST_REQUIRE(SignSignature(keystore, userP2PKH, mtx, 1, 10000 * COIN, SIGHASH_ALL, branchId));
         signCarrier(mtx, 0);

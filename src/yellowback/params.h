@@ -171,8 +171,8 @@ struct Params
     int payeeTiltBps;                    //!< 10,000
 
     // Price attestation (v3 plan §3.1). Regtest reads attestArmMin and bundleCarrier from
-    // -yellowbackattestarmmin / -yellowbackbundlecarrier (ParamsFromArgs, index.cpp); the
-    // state-hash preimage gains both in A1 (M13), not here.
+    // -yellowbackattestarmmin / -yellowbackbundlecarrier (ParamsFromArgs, index.cpp); both are
+    // in the state-hash preimage's Params record (view.h ParamsRecord, M13).
     int attestArmMin;                    //!< ATTEST_ARM_MIN 5 (ARM-1); 0 = never arms (regtest)
     int attestArmDelay;                  //!< ATTEST_ARM_DELAY 1,152 (ARM-2)
     bool attestRequired;                 //!< ATTEST_REQUIRED (W15): false => PRICE-2 reads x only, bundles ignored
@@ -237,8 +237,7 @@ const Params& TestParams();
  * v2 regtest-only flags -yellowbackstartheight, -yellowbacksigmaref (0 = multiplier
  * fixed at 1), -yellowbacksupplycapbps (0 = no cap) and -yellowbackenforceuntil
  * (0 = no sunset); v3 adds -yellowbackattestarmmin (0 = never arms) and
- * -yellowbackbundlecarrier. All six are hashed into the state hash (M13; the
- * two v3 values join the preimage in A1).
+ * -yellowbackbundlecarrier. All six are hashed into the state hash (M13).
  */
 Params RegtestParams(int startHeight, int sigmaRefBps, int supplyCapBps, int enforceUntil,
                      int attestArmMin = 3, BundleCarrier bundleCarrier = BundleCarrier::SCRIPTSIG);

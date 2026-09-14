@@ -79,7 +79,7 @@ struct Fixture
             return it->second;
         };
     }
-    BundleVerdict Verify(const CTransaction& tx, BundleCarrierMode mode = BundleCarrierMode::SCRIPTSIG, bool skipVin0 = false,
+    BundleVerdict Verify(const CTransaction& tx, BundleCarrier mode = BundleCarrier::SCRIPTSIG, bool skipVin0 = false,
                          const std::vector<unsigned char>& tail = {}, SigCache* cache = nullptr) const
     {
         return VerifyBundle(tx, mode, skipVin0, tail, R, selected, limits, PubkeyOf(), BlockHashAt(), cache);
@@ -209,7 +209,7 @@ BOOST_AUTO_TEST_CASE(extract_positions_and_modes)
 
     // Carrier at vin[0].
     {
-        auto r = ExtractBundle(TxWith({ CarrierIn(bundle), PlainIn() }), BundleCarrierMode::SCRIPTSIG, false, {}, &reason);
+        auto r = ExtractBundle(TxWith({ CarrierIn(bundle), PlainIn() }), BundleCarrier::SCRIPTSIG, false, {}, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->first == bundle);
         BOOST_CHECK(r->second == BundleSource::SCRIPTSIG);
@@ -218,7 +218,7 @@ BOOST_AUTO_TEST_CASE(extract_positions_and_modes)
     // Carrier at vin[2].
     {
         CTransaction tx = TxWith({ PlainIn(0), PlainIn(1), CarrierIn(bundle), PlainIn(2) });
-        auto r = ExtractBundle(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &reason);
+        auto r = ExtractBundle(tx, BundleCarrier::SCRIPTSIG, false, {}, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->first == bundle);
         BOOST_CHECK(FindCarrierInput(tx, false) == std::optional<size_t>(2));
@@ -227,35 +227,35 @@ BOOST_AUTO_TEST_CASE(extract_positions_and_modes)
     // Two carriers.
     {
         CTransaction tx = TxWith({ CarrierIn(bundle), PlainIn(), CarrierIn(bundle, std::nullopt, 1) });
-        BOOST_CHECK(!ExtractBundle(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(tx, BundleCarrier::SCRIPTSIG, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "two-carriers");
         BOOST_CHECK(!FindCarrierInput(tx, false, &reason));
         BOOST_CHECK_EQUAL(reason, "two-carriers");
         // ... but with vin[0] skipped there is exactly one.
         BOOST_CHECK(FindCarrierInput(tx, true) == std::optional<size_t>(2));
-        BOOST_CHECK(ExtractBundle(tx, BundleCarrierMode::SCRIPTSIG, true, {}, &reason));
+        BOOST_CHECK(ExtractBundle(tx, BundleCarrier::SCRIPTSIG, true, {}, &reason));
         BOOST_CHECK_EQUAL(f.Verify(tx).reason, "two-carriers");
-        BOOST_CHECK(f.Verify(tx, BundleCarrierMode::EITHER).reason == "two-carriers");
+        BOOST_CHECK(f.Verify(tx, BundleCarrier::EITHER).reason == "two-carriers");
     }
     // A REDEEM whose vin[0] looks like a carrier: with skipVin0 the vault input is never considered.
     {
         CTransaction tx = TxWith({ CarrierIn(bundle), PlainIn() });
-        BOOST_CHECK(!ExtractBundle(tx, BundleCarrierMode::SCRIPTSIG, true, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(tx, BundleCarrier::SCRIPTSIG, true, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
         BOOST_CHECK(!FindCarrierInput(tx, true, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
         CTransaction tx2 = TxWith({ CarrierIn(bundle), CarrierIn(bundle, std::nullopt, 1) });
-        auto r = ExtractBundle(tx2, BundleCarrierMode::SCRIPTSIG, true, {}, &reason);
+        auto r = ExtractBundle(tx2, BundleCarrier::SCRIPTSIG, true, {}, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(FindCarrierInput(tx2, true) == std::optional<size_t>(1));
     }
     // No carrier at all, or no inputs.
     {
-        BOOST_CHECK(!ExtractBundle(TxWith({ PlainIn() }), BundleCarrierMode::SCRIPTSIG, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(TxWith({ PlainIn() }), BundleCarrier::SCRIPTSIG, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
-        BOOST_CHECK(!ExtractBundle(TxWith({}), BundleCarrierMode::SCRIPTSIG, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(TxWith({}), BundleCarrier::SCRIPTSIG, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
-        BOOST_CHECK(!ExtractBundle(TxWith({}), BundleCarrierMode::SCRIPTSIG, true, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(TxWith({}), BundleCarrier::SCRIPTSIG, true, {}, &reason));
     }
     // Hash mismatch: the redeem script commits to something else (the malleation case, R2).
     {
@@ -263,7 +263,7 @@ BOOST_AUTO_TEST_CASE(extract_positions_and_modes)
         *other.begin() ^= 1;
         CTransaction tx = TxWith({ PlainIn(), CarrierIn(bundle, other) });
         BOOST_CHECK(FindCarrierInput(tx, false) == std::optional<size_t>(1));   // shape is fine
-        BOOST_CHECK(!ExtractBundle(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(tx, BundleCarrier::SCRIPTSIG, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "hash");
         BOOST_CHECK_EQUAL(f.Verify(tx).reason, "hash");
     }
@@ -271,33 +271,33 @@ BOOST_AUTO_TEST_CASE(extract_positions_and_modes)
     {
         CTransaction carrierTx = TxWith({ CarrierIn(bundle) });
         CTransaction plainTx = TxWith({ PlainIn() });
-        auto r = ExtractBundle(plainTx, BundleCarrierMode::OP_RETURN, false, bundle, &reason);
+        auto r = ExtractBundle(plainTx, BundleCarrier::OP_RETURN, false, bundle, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->first == bundle);
         BOOST_CHECK(r->second == BundleSource::OP_RETURN);
-        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrierMode::OP_RETURN, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrier::OP_RETURN, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
-        r = ExtractBundle(carrierTx, BundleCarrierMode::OP_RETURN, false, bundle, &reason);
+        r = ExtractBundle(carrierTx, BundleCarrier::OP_RETURN, false, bundle, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->second == BundleSource::OP_RETURN);
-        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrierMode::SCRIPTSIG, false, bundle, &reason));
+        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrier::SCRIPTSIG, false, bundle, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
         // EITHER: exactly one of the two.
-        r = ExtractBundle(carrierTx, BundleCarrierMode::EITHER, false, {}, &reason);
+        r = ExtractBundle(carrierTx, BundleCarrier::EITHER, false, {}, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->second == BundleSource::SCRIPTSIG);
-        r = ExtractBundle(plainTx, BundleCarrierMode::EITHER, false, bundle, &reason);
+        r = ExtractBundle(plainTx, BundleCarrier::EITHER, false, bundle, &reason);
         BOOST_REQUIRE(r);
         BOOST_CHECK(r->second == BundleSource::OP_RETURN);
-        BOOST_CHECK(!ExtractBundle(carrierTx, BundleCarrierMode::EITHER, false, bundle, &reason));
+        BOOST_CHECK(!ExtractBundle(carrierTx, BundleCarrier::EITHER, false, bundle, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
-        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrierMode::EITHER, false, {}, &reason));
+        BOOST_CHECK(!ExtractBundle(plainTx, BundleCarrier::EITHER, false, {}, &reason));
         BOOST_CHECK_EQUAL(reason, "shape");
         // The extractor does not decode: garbage rides through, VerifyBundle calls it "shape".
         std::vector<unsigned char> junk = { 1, 2, 3 };
-        BOOST_CHECK(ExtractBundle(TxWith({ CarrierIn(junk) }), BundleCarrierMode::SCRIPTSIG, false, {}, &reason));
+        BOOST_CHECK(ExtractBundle(TxWith({ CarrierIn(junk) }), BundleCarrier::SCRIPTSIG, false, {}, &reason));
         BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(junk) })).reason, "shape");
-        BOOST_CHECK_EQUAL(f.Verify(plainTx, BundleCarrierMode::OP_RETURN, false, junk).reason, "shape");
+        BOOST_CHECK_EQUAL(f.Verify(plainTx, BundleCarrier::OP_RETURN, false, junk).reason, "shape");
     }
 }
 
@@ -314,8 +314,8 @@ BOOST_AUTO_TEST_CASE(verify_order_every_reason)
         for (size_t i = 0; i < 6; i++) BOOST_CHECK(v.C[i] == f.atts[i]);
         BOOST_CHECK(!v.aMint && !v.aClaim);   // BundleStat fills these
         // The same through the OP_RETURN and EITHER modes.
-        BOOST_CHECK(f.Verify(TxWith({ PlainIn() }), BundleCarrierMode::OP_RETURN, false, Enc(f.atts)).ok);
-        BOOST_CHECK(f.Verify(TxWith({ PlainIn(), CarrierIn(Enc(f.atts)) }), BundleCarrierMode::EITHER).ok);
+        BOOST_CHECK(f.Verify(TxWith({ PlainIn() }), BundleCarrier::OP_RETURN, false, Enc(f.atts)).ok);
+        BOOST_CHECK(f.Verify(TxWith({ PlainIn(), CarrierIn(Enc(f.atts)) }), BundleCarrier::EITHER).ok);
         // Exactly mSelect is enough.
         BOOST_CHECK(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[0], f.atts[1] })) })).ok);
     }
@@ -426,7 +426,7 @@ BOOST_AUTO_TEST_CASE(verify_order_every_reason)
         *k.blockHashes[1001].begin() ^= 1;
         BOOST_CHECK_EQUAL(k.Verify(TxWith({ CarrierIn(Enc({ k.atts[0], k.atts[2] })) })).reason, "sig");
         // Nullary callbacks are "sig", never a crash.
-        BundleVerdict v = VerifyBundle(TxWith({ CarrierIn(Enc({ f.atts[0], f.atts[1] })) }), BundleCarrierMode::SCRIPTSIG, false, {},
+        BundleVerdict v = VerifyBundle(TxWith({ CarrierIn(Enc({ f.atts[0], f.atts[1] })) }), BundleCarrier::SCRIPTSIG, false, {},
                                        f.R, f.selected, f.limits, nullptr, nullptr, nullptr);
         BOOST_CHECK_EQUAL(v.reason, "sig");
     }
@@ -441,7 +441,7 @@ BOOST_AUTO_TEST_CASE(sig_cache_contract)
     RecordingCache cache;
     const CTransaction tx = TxWith({ CarrierIn(Enc(f.atts)) });
     // Cold: six lookups miss, six inserts, all valid.
-    BundleVerdict v = f.Verify(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &cache);
+    BundleVerdict v = f.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache);
     BOOST_CHECK(v.ok);
     BOOST_CHECK_EQUAL(cache.lookups, 6);
     BOOST_CHECK_EQUAL(cache.inserts, 6);
@@ -458,24 +458,24 @@ BOOST_AUTO_TEST_CASE(sig_cache_contract)
     // Warm: no verification, no insert, same verdict (cache_hit_equals_cold). pubkeyOf is not even consulted.
     Fixture noKeys;
     noKeys.keys.clear();
-    v = noKeys.Verify(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &cache);
+    v = noKeys.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache);
     BOOST_CHECK(v.ok);
     BOOST_CHECK_EQUAL(cache.inserts, 6);
     // A negative entry is honoured too, and a cold negative is inserted as false.
     Attestation bad = f.atts[0];
     bad.sig[0] ^= 1;
     const CTransaction badTx = TxWith({ CarrierIn(Enc({ bad, f.atts[1] })) });
-    BOOST_CHECK_EQUAL(f.Verify(badTx, BundleCarrierMode::SCRIPTSIG, false, {}, &cache).reason, "sig");
+    BOOST_CHECK_EQUAL(f.Verify(badTx, BundleCarrier::SCRIPTSIG, false, {}, &cache).reason, "sig");
     BOOST_CHECK_EQUAL(cache.inserts, 7);
     BOOST_CHECK(cache.entries.at(SigCacheKey(bad, f.blockHashes[1000])) == false);
     // The key binds the block hash: a reorged hash is a fresh cache line, not a stale hit.
     Fixture k;
     *k.blockHashes[1000].begin() ^= 1;
-    BOOST_CHECK_EQUAL(k.Verify(tx, BundleCarrierMode::SCRIPTSIG, false, {}, &cache).reason, "sig");
+    BOOST_CHECK_EQUAL(k.Verify(tx, BundleCarrier::SCRIPTSIG, false, {}, &cache).reason, "sig");
     BOOST_CHECK_EQUAL(cache.inserts, 8);
     // The cache is behind the cheap checks: a "count" failure touches it not at all.
     const int before = cache.lookups;
-    BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[0] })) }), BundleCarrierMode::SCRIPTSIG, false, {}, &cache).reason, "count");
+    BOOST_CHECK_EQUAL(f.Verify(TxWith({ CarrierIn(Enc({ f.atts[0] })) }), BundleCarrier::SCRIPTSIG, false, {}, &cache).reason, "count");
     BOOST_CHECK_EQUAL(cache.lookups, before);
 }
 
