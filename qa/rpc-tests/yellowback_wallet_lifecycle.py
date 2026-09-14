@@ -6,6 +6,7 @@
 """Transparent v2 wallet lifecycle: mint, send, and owner-path redeem."""
 
 from test_framework.util import assert_equal
+from test_framework.yellowback_attest import wallet_mint, wallet_claim
 from test_framework.yellowback_util import (
     POOLS,
     REF_LAG,
@@ -20,7 +21,7 @@ class YellowbackWalletLifecycleTest(YellowbackTestFramework):
         self.activate(quote_usd=50)
         self.mine(POOLS[0], REF_LAG + 1)
 
-        mint = nodes[0].yed_mint(10000, 48)
+        mint = wallet_mint(self, nodes[0], 10000, 48)   # v3: the carrier step (W7)
         assert_equal(mint['termClass'], 'A')
         assert_equal(mint['fundedFrom'], 'transparent')
         assert mint['feeZat'] > 0

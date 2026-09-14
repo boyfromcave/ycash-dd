@@ -42,6 +42,7 @@ from test_framework.yellowback_util import (
     term_class_of,
 )
 from test_framework import yellowback_model as ym
+from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint, attested_micro
 
 SUPPLY_CAP_BPS = 60
 
@@ -55,7 +56,7 @@ def assert_rpc_error(substr, fn, *args):
     raise AssertionError('expected an error containing %r' % substr)
 
 
-class YellowbackVoidMintTest(YellowbackTestFramework):
+class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
 
     initial_blocks = 112     # eleven mature coinbases (68.75 YEC) fund the pre-activation raw mint
 
@@ -101,6 +102,14 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         signed = node.signrawtransaction(bytes_to_hex_str(raw))
         assert_equal(signed['complete'], True)
         return signed['hex']
+
+    def raw_mint_v3(self, node, cents, lock_blocks, ref, collateral, fee_addr=None):
+        """``raw_mint`` for a case whose verdict lies past MINT-9 in the armed order (R15: MINT-5 and
+        the ACTIVE case): under --armed the carrier is mined first and the bundle and attestor fee
+        ride along, so the verdict under test is reached; unarmed it is ``raw_mint``."""
+        if not self.armed:
+            return self.raw_mint(node, cents, lock_blocks, ref, collateral, fee_addr=fee_addr)
+        return armed_raw_mint(self, node, cents, lock_blocks, ref, collateral, self.price_at(node, ref, 'pMint'), fee_addr=fee_addr)[0]
 
     def send_and_mine(self, node, hex_, miner):
         """Mine ``hex_`` in a block of its own, assembled in Python on ``miner``.  TPL-2 (strict,
@@ -149,6 +158,7 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, REF_LAG + 1)
         assert_equal(user.yed_getstats()['mintingAllowed'], True)
         assert_equal(user.yed_getstats()['supplyCapCents'] > 20000, True)
+        self.arm()
 
 # Rule: MINT-4 HALT-1 MINTPOL-1
         print('mintpol-no-price: eight untagged blocks empty the fast window')
@@ -204,14 +214,16 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         print('mint5_bad_collateral: 0.00001 YEC short of the requirement')
         r = self.ref()
         req = self.collateral()
-        void_col = self.send_and_mine(user, self.raw_mint(user, 10000, 48, r, req - 1000), POOLS[2])
+        # armed (R15): MINT-8 precedes MINT-5, so the shape carries the pool fee too; unarmed the v2 order stands
+        col_fee = user.yed_getfeepayee(r, req - 1000)['eligible'][0] if self.armed else None
+        void_col = self.send_and_mine(user, self.raw_mint_v3(user, 10000, 48, r, req - 1000, fee_addr=col_fee), POOLS[2])
         self.expect_void(void_col, 'bad-mint-collateral')
         void_col_vault = user.yed_getvault(void_col)
         assert_equal(void_col_vault['collateralZat'], req - 1000)
         assert_equal(void_col_vault['mintedCents'], 10000)     # recorded from the payload; a VOID vault carries no debt
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 0)
         print('the wallet never under-collateralises: yed_mint at the same snapshot is ACTIVE')
-        good = user.yed_mint(10000, 48)
+        good = self.mint(user, 10000, 48)
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(good['txid'])['status'], 'ACTIVE')
@@ -234,9 +246,10 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         self.expect_void(void_short, 'bad-mint-fee')
         print('and the same shape with the right fee is ACTIVE')
         r = self.ref()
-        col = self.collateral()
+        # armed: pMint = min(xMint, aMint) is the attested price, so the requirement is sized at it
+        col = self.collateral()          # armed too: the attestors track xMint, so pMint = xMint
         eligible = user.yed_getfeepayee(r, col)['eligible'][0]
-        ok = self.send_and_mine(user, self.raw_mint(user, 10000, 48, r, col, fee_addr=eligible), POOLS[1])
+        ok = self.send_and_mine(user, self.raw_mint_v3(user, 10000, 48, r, col, fee_addr=eligible), POOLS[1])
         assert_equal(user.yed_getvault(ok)['status'], 'ACTIVE')
         assert_equal(user.yed_getvault(ok)['feePaidZat'], fee_zat(col))
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000)
@@ -270,13 +283,13 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         assert_greater_than(m, 10000)
         void_before = stats['voidVaults']
         self.split_network()
-        mint_x = user.yed_mint(m, 48)
+        mint_x = self.mint(user, m, 48)                    # the carrier's block, then the mint's
         sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_x['txid'])['status'], 'ACTIVE')
-        mint_y = observer.yed_mint(m, 48)
+        mint_y = self.mint(observer, m, 48, miner=STOCK)   # the observer sits on the stock half
         sync_mempools([nodes[1], nodes[5]])
-        stock.generate(2)
+        stock.generate(2)                                  # three stock blocks against the enforcing half's two
         self.join_network()
         assert_equal(user.getbestblockhash(), stock.getbestblockhash())
         assert_equal(user.yed_getvault(mint_y['txid'])['status'], 'ACTIVE')
@@ -285,14 +298,21 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         # On the joined chain X is over the cap, so its verdict is VOID and TPL-2 (strict) keeps
         # it out of every template — including the one that would confirm the race.  Its block is
         # assembled in Python, and the stock half never held X so its mempool is not synced here
-        # (plan 6.0 item 4, docs/mapping.md section 13.5).
-        result, _ = mine_block_raw(nodes[POOLS[1]], [user.getrawtransaction(mint_x['txid'])])
+        # (plan 6.0 item 4, docs/mapping.md section 13.5).  v3: X's carrier came back with it and
+        # must confirm first (a pool template carries the carrier and skips X).
+        x_hex = user.getrawtransaction(mint_x['txid'])
+        nodes[POOLS[1]].generate(1)
+        self.sync_all(blocks_only=True)
+        sync_mempools([nodes[i] for i in (0, 2, 3, 4)])
+        assert mint_x['txid'] in user.getrawmempool()
+        result, _ = mine_block_raw(nodes[POOLS[1]], [x_hex])
         assert result is None, result
         self.sync_all(blocks_only=True)
         self.expect_void(mint_x['txid'], 'mint-supply-cap')
         assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 1)
         assert_equal(nodes[2].yed_getstats()['supplyCents'], 20000 + m)
-        assert_rpc_error('mintpol-cap', user.yed_mint, headroom - m + 100, 48)
+        stats = user.yed_getstats()      # v3: the carrier blocks added issuance, so the cap moved; provoke it from the current numbers
+        assert_rpc_error('mintpol-cap', user.yed_mint, stats['supplyCapCents'] - stats['supplyCents'] + 100, 48)
         self.checkpoint('cap race')
 
 # Rule: MINT-4 HALT-2 MINTPOL-1
@@ -339,7 +359,7 @@ class YellowbackVoidMintTest(YellowbackTestFramework):
         rows = {r_['txid']: r_ for r_ in user.yed_listtransactions()}
         assert_equal(rows[released['txid']]['unbacked'], False)
         assert_rpc_error('vault-not-active', user.yed_redeem, void_col)
-        ym.assert_model_matches(nodes[2], full=True)
+        self.model_check(nodes[2])
         self.checkpoint('release')
 
 

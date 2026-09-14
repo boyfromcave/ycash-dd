@@ -53,6 +53,8 @@ from test_framework.yellowback_util import (
     set_quote,
 )
 from test_framework import yellowback_model as ym
+from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_claim
+from test_framework.yellowback_util import CARRIER_VALUE
 
 SWEEP_ACK = 'I understand this leaves YED unbacked'
 OVERLAY = [0, 2, 3, 4, 5]
@@ -78,7 +80,7 @@ def coin_of(node, cents):
     raise AssertionError('no %d-cent coin on the node' % cents)
 
 
-class YellowbackClaimTest(YellowbackTestFramework):
+class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
 
     def sync_all(self, blocks_only=False):
         """Blocks everywhere; mempools among the overlay nodes only — the stock node keeps the raw
@@ -94,9 +96,13 @@ class YellowbackClaimTest(YellowbackTestFramework):
         """A claim-path spend from ``node``'s YED with the FEE-W default payee for the vault's selector."""
         coin = coin_of(node, burn_cents)
         payees = node.yed_getfeepayee(ref_height, vault['collateralZat'], outpoint_selector(vault['txid']))
+        fee = (payees['default']['payoutAddress'], payees['feeZat'])
+        if self.armed:
+            # v3: the carrier (mined first) as vin[last], the bundle at R and the attestor fee (AFEE-1)
+            return armed_raw_claim(self, node, vault, [(coin['txid'], coin['vout'])], ref_height, self.price_at(node, ref_height, 'pClaim'), fee)
         payload = ym.encode_redeem(ref_height, 1, [])
         return build_vault_spend_raw(node, vault, 'claim', [(coin['txid'], coin['vout'])], payload=payload,
-                                     fee=(payees['default']['payoutAddress'], payees['feeZat']), ref_height=ref_height)
+                                     fee=fee, ref_height=ref_height)
 
     def price(self, usd):
         """Set the same quote on all three pools (framework `quote` takes a node index)."""
@@ -119,12 +125,13 @@ class YellowbackClaimTest(YellowbackTestFramework):
         user.sendtoaddress(claimant.getnewaddress(), 5)
         self.sync_all()
         self.mine(POOLS[0])
+        self.arm()
 
 # Rule: MINT-1 MINT-5
         print('mint the vaults U (healthy refusals, sweep), V (raw claim), W (owner path), T (sunset sweep) and a VOID Z')
         mints = {}
         for name in ('U', 'V', 'W', 'T'):
-            mints[name] = user.yed_mint(10000, 48)
+            mints[name] = self.mint(user, 10000, 48)
         r = user.yed_getinfo()['height'] - REF_LAG
         z_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
         z_txid = user.decoderawtransaction(z_hex)['txid']
@@ -150,7 +157,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
         assert_rpc_error('claim-not-yet', claimant.yed_claim, mints['U']['txid'])
         self.mine_round_robin(POOLS, claim_height - user.getblockcount())
         assert_equal(user.yed_listclaimable(), [])
-        assert_rpc_error('claim-not-underwater', claimant.yed_claim, mints['U']['txid'])
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['U']['txid']))
         assert_rpc_error('vault-not-active', claimant.yed_claim, z_txid)
         assert_rpc_error('vault-not-found', claimant.yed_claim, '11' * 32)
 
@@ -173,7 +180,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
 
 # Rule: PRICE-1 PRICE-2 HALT-3 RED-4
         print('mint V3 just before the crash, then every pool quotes $0.01 for 64 blocks')
-        mint_v3 = user.yed_mint(10000, 48)
+        mint_v3 = self.mint(user, 10000, 48)
         self.sync_all()
         self.mine(POOLS[0])
         v3_claim_height = user.yed_getvault(mint_v3['txid'])['claimHeight']
@@ -228,16 +235,20 @@ class YellowbackClaimTest(YellowbackTestFramework):
         payees = user.yed_getfeepayee(r, vault_v3['collateralZat'], outpoint_selector(mint_v3['txid']))
         yec_before = claimant.getbalance()
         supply_before = nodes[2].yed_getstats()['supplyCents']
-        claimed = claimant.yed_claim(mint_v3['txid'])
+        claimed = self.claim(claimant, mint_v3['txid'])
         assert_equal(claimed['burnedCents'], 10000)
         assert_equal(claimed['feeZat'], payees['feeZat'])
         assert_equal(claimed['payee'], payees['default']['payoutAddress'])
-        assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] + 2 * TOKEN_VALUE - YELLOWBACK_FEE - claimed['feeZat'] - TOKEN_VALUE)
+        # v3: the carrier's CARRIER_VALUE joins the inputs; armed, the attestor fee leaves (clause (a): no residual)
+        assert_equal(claimed['collateralOut'], vault_v3['collateralZat'] + CARRIER_VALUE + 2 * TOKEN_VALUE - YELLOWBACK_FEE - claimed['feeZat']
+                     - claimed['attestFeeZat'] - claimed['residualZat'] - TOKEN_VALUE)
+        assert_equal((claimed['claimPath'], claimed['residualZat'], claimed['pending']), ('a', 0, False))
         raw = claimant.getrawtransaction(claimed['txid'], 1)
         assert_equal(raw['locktime'], v3_claim_height)
         assert_equal(raw['vin'][0]['txid'], mint_v3['txid'])
-        assert_equal(len(raw['vin']), 3)                               # the vault, 1 YED, 100.50 YED
-        assert_equal(len(raw['vout']), 4)                              # collateral, fee, 1.50 YED change, payload
+        assert_equal(len(raw['vin']), 4)                               # the vault, 1 YED, 100.50 YED, the carrier (never vin[0])
+        assert_equal(raw['vin'][3]['txid'], claimed['carrierTxid'])
+        assert_equal(len(raw['vout']), 4 + (1 if self.armed else 0))   # collateral, fee, 1.50 YED change, [attestor fee], payload
         assert_equal(nodes[2].yed_validaterawtransaction(raw['hex'])['verdict'], 'ok')
         self.sync_all()
         self.mine(POOLS[2])
@@ -280,7 +291,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
         assert_equal(user.yed_getprice()['pClaim'], 50000000)         # pMid recovered
         assert_equal(user.yed_getvault(mints['V']['txid'])['claimable'], False)
         assert mints['V']['txid'] + ':0' not in {c['vault'] for c in user.yed_listclaimable()}
-        assert_rpc_error('claim-not-underwater', claimant.yed_claim, mints['V']['txid'])
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, *self.claim_args(claimant, mints['V']['txid']))
         v = nodes[2].yed_validaterawtransaction(hex_v)
         assert_equal((v['verdict'], v['blockValid'], v['wouldBeRejected'], v['mempoolExpiryOk']), ('ok', True, False, True))
         late_txid = nodes[2].sendrawtransaction(hex_v)
@@ -384,7 +395,7 @@ class YellowbackClaimTest(YellowbackTestFramework):
         print('the Python model over the whole chain (P8)')
         # node 0 never had a sunset: ENFORCE_UNTIL_HEIGHT is one of the four hashed regtest values,
         # so the pools' state hashes differ from node 0's by design after the sunset restart
-        ym.assert_model_matches(nodes[0], full=True)
+        self.model_check(nodes[0])
         self.sync_all(blocks_only=True)
         assert_best_hash(self.enforcing_nodes(), 'end')
         assert_same_statehash([nodes[2], nodes[3], nodes[4]], 'end')

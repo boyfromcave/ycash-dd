@@ -43,6 +43,7 @@ from test_framework.yellowback_util import (
     set_quote,
 )
 from test_framework import yellowback_model as ym
+from test_framework.yellowback_attest import ArmedModeMixin, attested_micro
 
 SWEEP_ACK = 'I understand this leaves YED unbacked'
 
@@ -68,7 +69,7 @@ def coin_of(node, cents):
     raise AssertionError('no %d-cent coin on the node' % cents)
 
 
-class YellowbackLifecycleTest(YellowbackTestFramework):
+class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
 
     def owner_wif(self, node, vault):
         return node.dumpprivkey(pubkey_to_address(hex_str_to_bytes(vault['ownerPubKey'])))
@@ -94,6 +95,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         user.sendtoaddress(observer.getnewaddress(), 30)
         self.sync_all()
         self.mine(POOLS[0])
+        self.arm()
 
 # Rule: MINT-1 MINT-2 MINT-3 MINT-5 MINT-8 MINTPOL-1 FEE-1 FEE-W
         print('mint_class_a: 107 YED locked 48 blocks; collateral fixed at the reference snapshot')
@@ -101,7 +103,8 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         est = user.yed_estimatecollateral(10700, 48)
         assert_equal(est['termClass'], 'A')
         assert_equal(est['refHeight'], ref)
-        mint_a = user.yed_mint(10700, 48)
+        # armed, the attestors track xMint (ArmedModeMixin.price_at), so pMint = min(xMint, aMint) = xMint: the estimate stands
+        mint_a = self.mint(user, 10700, 48)          # v3: two transactions (the carrier step, W7)
         assert_equal(mint_a['termClass'], 'A')
         assert_equal(mint_a['vault'], mint_a['txid'] + ':0')
         assert_equal(mint_a['collateralZat'], max(est['requiredZat'], 4 * FEE_MIN))
@@ -138,12 +141,12 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
 # Rule: MINT-2 UNDO
         print('two_block_reorg_tolerance: the mint confirms again two blocks later after a reorg')
         self.split_network()
-        mint_b = user.yed_mint(10000, 48)
+        mint_b = self.mint(user, 10000, 48)           # the carrier's block is the enforcing half's first
         sync_mempools([nodes[0], nodes[2], nodes[3], nodes[4]])
         first = pool.generate(1)[0]
         self.sync_all(blocks_only=True)
         assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'ACTIVE')
-        stock.generate(2)
+        stock.generate(3)                             # carrier + mint block on the enforcing half: three to reorg both
         self.join_network()
         assert_equal(user.getbestblockhash(), stock.getbestblockhash())
         assert user.getblock(first)['confirmations'] < 0
@@ -156,8 +159,8 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         self.checkpoint('mint B after reorg')
 
         print('mint C (user) and mint D (observer)')
-        mint_c = user.yed_mint(10000, 48)
-        mint_d = observer.yed_mint(10000, 48)
+        mint_c = self.mint(user, 10000, 48)
+        mint_d = self.mint(observer, 10000, 48)
         self.sync_all()
         self.mine(POOLS[2])
         assert_equal(user.yed_getvault(mint_c['txid'])['status'], 'ACTIVE')
@@ -339,7 +342,7 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
 # Rule: MINT-2
         print('expired_transaction_display: an observer mint left unmined past nExpiryHeight')
         self.split_network()
-        expired = observer.yed_mint(10000, 48)
+        expired = self.mint(observer, 10000, 48, miner=STOCK)   # the observer sits on the stock half of the split
         assert expired['txid'] in observer.getrawmempool()
         self.mine_round_robin(POOLS, REF_WINDOW + 1)
         self.join_network()
@@ -375,8 +378,8 @@ class YellowbackLifecycleTest(YellowbackTestFramework):
         self.checkpoint('FEE-0 redeem of C')
 
         print('the Python model over the whole chain (P8)')
-        ym.assert_model_matches(nodes[2], full=True)
-        ym.assert_model_matches(observer, full=True)
+        self.model_check(nodes[2])
+        self.model_check(observer)
         self.checkpoint('end')
 
 
