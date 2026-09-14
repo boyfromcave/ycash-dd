@@ -44,9 +44,21 @@
  *   P                     ParamsRecord      (the six hashed regtest values, N18, M13)
  *   U<blockhash>          Undo              (not part of the state hash)
  *
+ * v3 (price attestation, v3 plan §3.6):
+ *
+ *   A<u16 seq>            AttestorRecord    (registered attestors; REG-A1)
+ *   B<outpoint>           BondIndexRecord   (bond outpoint -> seq; derived, not hashed)
+ *   N                     AttestorSeqRecord (the next seq)
+ *   M                     AttestState       (the carried ARM-1/2 state; copied into Snapshots)
+ *   W<u32 height>         BundleLogRecord   (one row per height with >= 1 verified bundle)
+ *   E<outpoint>           NoticeRecord      (a standing CLAIM_NOTICE per ACTIVE vault; NOT-1)
+ *
+ * The plan names the v3 prefixes T/B/N/M/L/E; T (Tip) and L (TxLog) were
+ * already taken, so Attestors live under A and BundleLog under W.
+ *
  * The federation prototype's A (anchor), Rc/R<u32> (signer set), P<u32> (price
- * table) and O (volatility) keys are gone; SCHEMA_VERSION 2 makes a v1
- * database wipe itself on start (index.cpp).
+ * table) and O (volatility) keys are gone; SCHEMA_VERSION 3 makes a v1 or v2
+ * database wipe itself on start (index.cpp SyncToChain).
  *
  * Canonical serialisation (§3.6 *State hash*): Ycash's READWRITE encoding —
  * fixed-width little-endian integers, u8 booleans and enumerations,
@@ -56,7 +68,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 2;
+static const uint32_t SCHEMA_VERSION = 3;
 
 /** Abstract ordered byte-string store. */
 class StateView
@@ -297,8 +309,12 @@ struct AssignedOutput
     }
 };
 
-/** TxLog.type: the payload family a transaction was processed as (M3: any ACTIVE-vault spend is REDEEM). */
-enum class TxLogType : uint8_t { NONE = 0, MINT = 1, TRANSFER = 2, REDEEM = 3 };
+/**
+ * TxLog.type: the payload family a transaction was processed as (M3: any ACTIVE-vault spend is
+ * REDEEM). v3 adds the four attestation types; a TxLog entry of those types is written only when
+ * the rule held (REG-A1 / NOT-1 / EQV-1 / REV-1), a failing one is non-Yellowback (N7).
+ */
+enum class TxLogType : uint8_t { NONE = 0, MINT = 1, TRANSFER = 2, REDEEM = 3, ATTESTOR_REGISTER = 4, CLAIM_NOTICE = 5, EQUIVOCATION = 6, ATTESTOR_REVIVE = 7 };
 const char* TxLogTypeName(TxLogType t);
 
 /**
@@ -320,10 +336,24 @@ struct TxLogRecord
     std::vector<AssignedOutput> assigned;
     std::vector<AssignedOutput> spentTokens;   //!< Tokens consumed by this tx (scriptPubKey kept for wallet filtering, N21)
     std::vector<COutPoint> closedVaults;
+    // v3 (plan §3.6 TxLog; history, never hashed)
+    int64_t aMint;               //!< the bundle statistic when BUNDLE-1 held (0 = undefined / no bundle)
+    int64_t aClaim;
+    std::vector<uint16_t> bundleSeqs;   //!< the seq values of the verified bundle (A), bundle order
+    CAmount attestFeeZat;        //!< the attestor fee paid (0 under AFEE-0 or on failure)
+    bool hasAttestPayee;
+    uint16_t attestPayee;        //!< the seq whose bondPubKey received the attestor fee
+    CAmount residualZat;         //!< RED-5's residual (0 when none was due)
+    std::string claimPath;       //!< "a" | "b" | "" (the RED-4 clause that opened a passing claim)
+    bool notice;                 //!< this transaction wrote a Notices record (NOT-1)
+    uint16_t attestorSeq;        //!< the seq REG-A1 assigned, EQV-1 ejected or REV-1 revived
 
-    TxLogRecord() : height(0), type((uint8_t)TxLogType::NONE), yedIn(0), yedOut(0), burned(0), feeZat(0), hasPayee(false) {}
+    TxLogRecord() : height(0), type((uint8_t)TxLogType::NONE), yedIn(0), yedOut(0), burned(0), feeZat(0), hasPayee(false),
+                    aMint(0), aClaim(0), attestFeeZat(0), hasAttestPayee(false), attestPayee(0), residualZat(0), notice(false), attestorSeq(0) {}
 
     TxLogType Type() const { return (TxLogType)type; }
+    std::optional<MicroUsd> AMint() const { return aMint > 0 ? std::optional<MicroUsd>(aMint) : std::nullopt; }
+    std::optional<MicroUsd> AClaim() const { return aClaim > 0 ? std::optional<MicroUsd>(aClaim) : std::nullopt; }
 
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
@@ -341,6 +371,16 @@ struct TxLogRecord
         READWRITE(assigned);
         READWRITE(spentTokens);
         READWRITE(closedVaults);
+        READWRITE(aMint);
+        READWRITE(aClaim);
+        READWRITE(bundleSeqs);
+        READWRITE(attestFeeZat);
+        READWRITE(hasAttestPayee);
+        READWRITE(attestPayee);
+        READWRITE(residualZat);
+        READWRITE(claimPath);
+        READWRITE(notice);
+        READWRITE(attestorSeq);
     }
 };
 
@@ -366,6 +406,156 @@ struct Totals
         READWRITE(closedVaults);
         READWRITE(claimedVaults);
         READWRITE(unbackedCents);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// v3 records (v3 plan §3.6)
+
+/** Attestors.status, declaration order. */
+enum class AttestorStatus : uint8_t { PENDING = 0, ELIGIBLE = 1, DORMANT = 2, EJECTED = 3, WITHDRAWN = 4 };
+const char* AttestorStatusName(AttestorStatus s);
+
+/** Attestors[seq] (REG-A1). Hashed. */
+struct AttestorRecord
+{
+    std::vector<unsigned char> attestorPubKey;   //!< the 33 payload bytes (REG-A1 admitted them as a valid key)
+    std::vector<unsigned char> bondPubKey;
+    COutPoint bondOutpoint;                      //!< txid:0 of the registration
+    CAmount bondZat;
+    uint32_t bondLocktime;
+    uint8_t flags;
+    int32_t registerHeight;
+    uint8_t status;                              //!< AttestorStatus
+    int32_t statusHeight;
+    int32_t bondSpentHeight;                     //!< 0 = unspent
+    int32_t seatedSince;                         //!< the SNAP height at which the attestor entered seated[]; 0 = not seated
+
+    AttestorRecord() : bondZat(0), bondLocktime(0), flags(0), registerHeight(0), status((uint8_t)AttestorStatus::PENDING),
+                       statusHeight(0), bondSpentHeight(0), seatedSince(0) {}
+
+    AttestorStatus Status() const { return (AttestorStatus)status; }
+    CPubKey AttestorKey() const { return CPubKey(attestorPubKey.begin(), attestorPubKey.end()); }
+    CPubKey BondKey() const { return CPubKey(bondPubKey.begin(), bondPubKey.end()); }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(attestorPubKey);
+        READWRITE(bondPubKey);
+        READWRITE(bondOutpoint);
+        READWRITE(bondZat);
+        READWRITE(bondLocktime);
+        READWRITE(flags);
+        READWRITE(registerHeight);
+        READWRITE(status);
+        READWRITE(statusHeight);
+        READWRITE(bondSpentHeight);
+        READWRITE(seatedSince);
+    }
+};
+
+/** BondIndex[bondOutpoint] -> seq (derived from Attestors; excluded from the state hash, undo-covered). */
+struct BondIndexRecord
+{
+    uint16_t seq;
+
+    BondIndexRecord() : seq(0) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) { READWRITE(seq); }
+};
+
+/** AttestorSeq: the next seq REG-A1 assigns. */
+struct AttestorSeqRecord
+{
+    uint16_t next;
+
+    AttestorSeqRecord() : next(0) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) { READWRITE(next); }
+};
+
+/** Attest.status, declaration order (ARM-1/2; never moves backward). */
+enum class AttestStatus : uint8_t { UNARMED = 0, TRIGGERED = 1, ARMED = 2 };
+const char* AttestStatusName(AttestStatus s);
+
+/** The carried arming state (ARM-1/2), copied into every snapshot. */
+struct AttestState
+{
+    uint8_t status;              //!< AttestStatus
+    int32_t triggerHeight;
+    int32_t armHeight;
+
+    AttestState() : status((uint8_t)AttestStatus::UNARMED), triggerHeight(0), armHeight(0) {}
+
+    AttestStatus Status() const { return (AttestStatus)status; }
+    /** The snapshot's own status; "ARMED" in a rule is Params::IsArmed(IsArmed()) (W15). */
+    bool IsArmed() const { return Status() == AttestStatus::ARMED; }
+
+    friend bool operator==(const AttestState& a, const AttestState& b)
+    {
+        return a.status == b.status && a.triggerHeight == b.triggerHeight && a.armHeight == b.armHeight;
+    }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(status);
+        READWRITE(triggerHeight);
+        READWRITE(armHeight);
+    }
+};
+
+/**
+ * BundleLog[height] (R12): one row per height with at least one MINT, REDEEM or CLAIM_NOTICE
+ * bundle for which BUNDLE-1 held, whatever the transaction's final verdict (EQUIVOCATION bundles
+ * excluded). aMint/aClaim are the lowerMedian over those bundles' statistics; selectedSeqs is the
+ * sorted union of their selected sets; (seqs[i], prices[i]) are the sorted, deduplicated union of
+ * the (seq, price) pairs of their attestations, parallel arrays ordered by (seq, price).
+ */
+struct BundleLogRecord
+{
+    int64_t aMint;
+    int64_t aClaim;
+    std::vector<uint16_t> selectedSeqs;
+    std::vector<uint16_t> seqs;
+    std::vector<int64_t> prices;
+
+    BundleLogRecord() : aMint(0), aClaim(0) {}
+
+    std::optional<MicroUsd> AMint() const { return aMint > 0 ? std::optional<MicroUsd>(aMint) : std::nullopt; }
+    std::optional<MicroUsd> AClaim() const { return aClaim > 0 ? std::optional<MicroUsd>(aClaim) : std::nullopt; }
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(aMint);
+        READWRITE(aClaim);
+        READWRITE(selectedSeqs);
+        READWRITE(seqs);
+        READWRITE(prices);
+    }
+};
+
+/** Notices[vaultOutpoint] (NOT-1); deleted when the vault leaves ACTIVE (IN-2). */
+struct NoticeRecord
+{
+    int32_t height;
+    int32_t refHeight;
+    int64_t pEmerg;
+
+    NoticeRecord() : height(0), refHeight(0), pEmerg(0) {}
+
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(height);
+        READWRITE(refHeight);
+        READWRITE(pEmerg);
     }
 };
 
@@ -404,6 +594,12 @@ struct Snapshot
     CAmount collateralZat;
     int64_t globalRatioBps;
     uint32_t haltMask;
+    // v3 (v3 plan §3.6). pMint/pClaim above are the cross-section medians (the plan's xMint/xClaim);
+    // PRICE-2's combination with a bundle statistic is per transaction and never stored here.
+    AttestState attest;                   //!< the carried Attest after ARM-1/2 at this height
+    std::vector<uint16_t> seated;         //!< the N_SLOTS highest-weighted ELIGIBLE seq, ascending
+    std::vector<uint160> pinnedKeys;      //!< PIN-1: payoutKeys excluded from the medians and E(H)
+    std::vector<uint16_t> pinnedSeqs;     //!< PIN-2: seq excluded from selection at this height
 
     Snapshot() : tagged(false), quote(false), signalCount(0), pFast(0), pMid(0), pSlow(0), pMint(0), pClaim(0),
                  sigmaMultBps(10000), issuedZat(0), supplyCents(0), collateralZat(0), globalRatioBps(0), haltMask(0) {}
@@ -443,6 +639,10 @@ struct Snapshot
         READWRITE(collateralZat);
         READWRITE(globalRatioBps);
         READWRITE(haltMask);
+        READWRITE(attest);
+        READWRITE(seated);
+        READWRITE(pinnedKeys);
+        READWRITE(pinnedSeqs);
     }
 };
 
@@ -541,6 +741,18 @@ std::string Totals();
 std::string Rejected(const uint256& blockHash);
 std::string Params();
 std::string Undo(const uint256& blockHash);
+std::string Attestor(uint16_t seq);
+std::string BondIndex(const COutPoint& out);
+std::string AttestorSeq();
+std::string Attest();
+std::string BundleLog(uint32_t height);
+std::string Notice(const COutPoint& out);
+extern const char PREFIX_ATTESTOR;
+extern const char PREFIX_BUNDLELOG;
+extern const char PREFIX_NOTICE;
+/** The seq of an Attestors key; the height of a BundleLog key (0 if too short). */
+uint16_t SeqOf(const std::string& key);
+uint32_t HeightOf(const std::string& key);
 extern const char PREFIX_UNDO;
 extern const char PREFIX_REJECTED;
 extern const char PREFIX_TXLOG;
@@ -587,6 +799,14 @@ public:
     Totals GetTotals() const;
     std::optional<RejectedRecord> GetRejected(const uint256& blockHash) const;
     std::optional<ParamsRecord> GetParamsRecord() const;
+    std::optional<AttestorRecord> GetAttestor(uint16_t seq) const;
+    std::optional<uint16_t> GetBondIndex(const COutPoint& out) const;
+    AttestorSeqRecord GetAttestorSeq() const;                           //!< next 0 when absent
+    AttestState GetAttest() const;                                      //!< UNARMED/0/0 when absent
+    std::optional<BundleLogRecord> GetBundleLog(uint32_t height) const;
+    std::optional<NoticeRecord> GetNotice(const COutPoint& out) const;
+    /** Every Attestors record in seq order. */
+    std::vector<std::pair<uint16_t, AttestorRecord>> Attestors() const;
 
     StateView& View() { return view; }
     const StateView& View() const { return view; }
@@ -603,8 +823,10 @@ private:
  * The state hash (§3.6 *State hash*, N18): SHA-256 over the concatenation,
  * in this order, of key ‖ value for Tip, every Tags record (ascending
  * height), every Judgements record, Activation, every Vaults record
- * (ascending outpoint), every Tokens record, Totals, every Snapshots record
- * and the Params record. TxLog (L), Rejected (X) and Undo (U) are excluded.
+ * (ascending outpoint), every Tokens record, Totals, every Snapshots record,
+ * the Params record, then (v3) every Attestors record by seq, AttestorSeq,
+ * Attest, every BundleLog row by height and every Notices record by
+ * outpoint. TxLog (L), Rejected (X), Undo (U) and BondIndex (B) are excluded.
  * When no Tip has been written yet the preimage carries a zero tip with
  * `network` as given (the Python model's `{height 0, zero hash}`).
  */
