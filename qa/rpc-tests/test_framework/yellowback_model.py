@@ -2768,11 +2768,16 @@ def compare_history(model, node):
             _check(set(str(x).upper() for x in rpc_mask) == set(s.halt_names()), 'haltMask', h, 'model=%r rpc=%r' % (s.halt_names(), rpc_mask))
 
 
+# The contract's type strings for the model's v3 TxLog types (doc/yellowback-rpc.md, Conventions).
+_RPC_TYPE = {'ATTESTOR_REGISTER': 'register', 'CLAIM_NOTICE': 'notice', 'EQUIVOCATION': 'equivocation', 'ATTESTOR_REVIVE': 'revive'}
+
+
 def compare_txinfo(model, node):
     for txid, rec in model.txlog.items():
         info = node.yed_gettxinfo(txid)
         _check(int(info['height']) == rec.height, 'yed_gettxinfo.height', extra=txid)
-        _check(_norm_status(info['type']) == _norm_status(rec.type), 'yed_gettxinfo.type', rec.height, '%s model=%s rpc=%s' % (txid, rec.type, info['type']))
+        want_type = _RPC_TYPE.get(str(rec.type), str(rec.type))
+        _check(_norm_status(info['type']) == _norm_status(want_type), 'yed_gettxinfo.type', rec.height, '%s model=%s rpc=%s' % (txid, rec.type, info['type']))
         _check(_norm_status(info.get('path') or '') == _norm_status(rec.path), 'yed_gettxinfo.path', rec.height, txid)
         _check(info['verdict'] == rec.verdict, 'yed_gettxinfo.verdict', rec.height, '%s model=%s rpc=%s' % (txid, rec.verdict, info['verdict']))
         _check(int(info['yedIn']) == rec.yed_in, 'yed_gettxinfo.yedIn', rec.height, txid)
@@ -2786,6 +2791,82 @@ def compare_txinfo(model, node):
         _check(got == sorted('%s:%d' % op for op in rec.spent_tokens), 'yed_gettxinfo.spentTokens', rec.height, txid)
         got = sorted(_norm_outpoint(x) for x in info.get('closedVaults', []))
         _check(got == sorted('%s:%d' % op for op in rec.closed_vaults), 'yed_gettxinfo.closedVaults', rec.height, txid)
+        # v3 (contract: the TxLog additions)
+        _check(_price_eq(rec.a_mint, info.get('aMint')), 'yed_gettxinfo.aMint', rec.height, '%s model=%r rpc=%r' % (txid, rec.a_mint, info.get('aMint')))
+        _check(_price_eq(rec.a_claim, info.get('aClaim')), 'yed_gettxinfo.aClaim', rec.height, '%s model=%r rpc=%r' % (txid, rec.a_claim, info.get('aClaim')))
+        _check(sorted(int(x) for x in info.get('bundleSeqs', [])) == sorted(rec.bundle_seqs), 'yed_gettxinfo.bundleSeqs', rec.height, txid)
+        _check(int(info.get('attestFeeZat', 0)) == rec.attest_fee_zat, 'yed_gettxinfo.attestFeeZat', rec.height, txid)
+        want_payee = None
+        if rec.attest_payee is not None and rec.attest_payee in model.attestors:
+            want_payee = hash160(model.attestors[rec.attest_payee].bond_pubkey)
+        _check(_key_of(info.get('attestPayee')) == want_payee, 'yed_gettxinfo.attestPayee', rec.height, '%s model=%r rpc=%r' % (txid, rec.attest_payee, info.get('attestPayee')))
+        _check(int(info.get('residualZat', 0)) == rec.residual_zat, 'yed_gettxinfo.residualZat', rec.height, '%s model=%r rpc=%r' % (txid, rec.residual_zat, info.get('residualZat')))
+        _check((info.get('claimPath') or '') == rec.claim_path, 'yed_gettxinfo.claimPath', rec.height, txid)
+        _check(bool(info.get('notice', False)) == rec.notice, 'yed_gettxinfo.notice', rec.height, txid)
+        if _RPC_TYPE.get(str(rec.type), str(rec.type)) == 'register':
+            _check(int(info.get('seq', -1)) == rec.attestor_seq, 'yed_gettxinfo.seq', rec.height, txid)
+
+
+def compare_attestors(model, node):
+    """Every yed_listattestors field the Attestors record holds (v3 section 3.6), plus seated /
+    pinned / weight against the tip snapshot."""
+    rows = {int(r['seq']): r for r in node.yed_listattestors()}
+    _check(set(rows) == set(model.attestors), 'yed_listattestors set', extra='model=%r rpc=%r' % (sorted(model.attestors), sorted(rows)))
+    tip = model.tip_height
+    snap = model.snapshots.get(tip)
+    for seq, rec in model.attestors.items():
+        r = rows[seq]
+        _check(str(r['attestorPubKey']).lower() == rec.attestor_pubkey.hex(), 'attestor.attestorPubKey', extra=str(seq))
+        _check(_key_of(r.get('bondKeyAddress')) == hash160(rec.bond_pubkey), 'attestor.bondKeyAddress', extra=str(seq))
+        _check(_norm_outpoint(r['bondOutpoint']) == '%s:%d' % rec.bond_outpoint, 'attestor.bondOutpoint', extra=str(seq))
+        for name, val in (('bondZat', rec.bond_zat), ('bondLocktime', rec.bond_locktime), ('registerHeight', rec.register_height),
+                          ('statusHeight', rec.status_height)):
+            _check(int(r[name]) == val, 'attestor.%s' % name, extra='%d model=%r rpc=%r' % (seq, val, r[name]))
+        _check(_norm_status(r['status']) == _norm_status(ATTESTOR_STATUS_NAMES[rec.status]), 'attestor.status', extra='%d model=%s rpc=%s' % (seq, ATTESTOR_STATUS_NAMES[rec.status], r['status']))
+        flags = r['flags']
+        _check(int(flags['tier']) == (rec.flags & 3) and bool(flags['pool']) == bool(rec.flags & 4), 'attestor.flags', extra=str(seq))
+        _check((r.get('bondSpentHeight') or 0) == rec.bond_spent_height, 'attestor.bondSpentHeight', extra=str(seq))
+        _check((r.get('seatedSince') or 0) == rec.seated_since, 'attestor.seatedSince', extra='%d model=%r rpc=%r' % (seq, rec.seated_since, r.get('seatedSince')))
+        if snap is not None:
+            _check(bool(r['seated']) == (seq in snap.seated), 'attestor.seated', tip, str(seq))
+            _check(bool(r['pinned']) == (seq in snap.pinned_seqs), 'attestor.pinned', tip, str(seq))
+            _check(int(r['weight']) == model.weight(rec, snap.attest, tip), 'attestor.weight', tip, '%d model=%r rpc=%r' % (seq, model.weight(rec, snap.attest, tip), r['weight']))
+
+
+def compare_attest_history(model, node):
+    """The v3 snapshot fields yed_gethistory does not carry, through yed_getprice(h) for every
+    height in [START_HEIGHT, tip]: attest (status, triggerHeight, armHeight), seated, pinnedKeys,
+    pinnedSeqs and the xMint / xClaim twins."""
+    for h in range(model.params.start_height, model.tip_height + 1):
+        s = model.snapshots.get(h)
+        _check(s is not None, 'snapshot missing in model', h)
+        row = node.yed_getprice(h)
+        _check(_norm_status(row['attestStatus']) == _norm_status(ATTEST_NAMES[s.attest.status]), 'yed_getprice.attestStatus', h, repr(row.get('attestStatus')))
+        _check(bool(row['armed']) == model.params.is_armed(s.attest.status), 'yed_getprice.armed', h)
+        _check([int(x) for x in row['seated']] == list(s.seated), 'yed_getprice.seated', h, 'model=%r rpc=%r' % (s.seated, row['seated']))
+        _check(sorted(_key_of(k) for k in row['pinnedKeys']) == sorted(s.pinned_keys), 'yed_getprice.pinnedKeys', h, 'model=%r rpc=%r' % ([k.hex() for k in s.pinned_keys], row['pinnedKeys']))
+        _check([int(x) for x in row['pinnedSeqs']] == list(s.pinned_seqs), 'yed_getprice.pinnedSeqs', h, 'model=%r rpc=%r' % (s.pinned_seqs, row['pinnedSeqs']))
+        _check(_price_eq(s.p_mint, row.get('xMint')) and _price_eq(s.p_claim, row.get('xClaim')), 'yed_getprice.xMint/xClaim', h)
+    info = node.yed_getinfo()['attest']
+    tip = model.snapshots.get(model.tip_height)
+    if tip is not None:
+        _check(_norm_status(info['status']) == _norm_status(ATTEST_NAMES[tip.attest.status]), 'yed_getinfo.attest.status')
+        _check(int(info['triggerHeight']) == tip.attest.trigger_height and int(info['armHeight']) == tip.attest.arm_height, 'yed_getinfo.attest heights')
+        _check(int(info['seatedCount']) == len(tip.seated), 'yed_getinfo.attest.seatedCount')
+
+
+def compare_notices(model, node):
+    """yed_getnotice for every ACTIVE vault against the Notices table (v3 section 3.6)."""
+    for op, v in model.vaults.items():
+        if VAULT_STATUS_NAMES[v.status] != 'ACTIVE':
+            continue
+        r = node.yed_getnotice(op[0])
+        n = model.notices.get(op)
+        _check(bool(r['found']) == (n is not None), 'yed_getnotice.found', extra='%s:%d model=%r rpc=%r' % (op[0], op[1], n is not None, r))
+        if n is not None:
+            _check(int(r['height']) == n.height and int(r['refHeight']) == n.ref_height, 'yed_getnotice heights', extra='%s:%d' % op)
+            _check(int(r['pEmerg']) == n.p_emerg, 'yed_getnotice.pEmerg', extra='%s:%d model=%r rpc=%r' % (op[0], op[1], n.p_emerg, r['pEmerg']))
+            _check(int(r['emergencyOpenAt']) == n.ref_height + model.params.emergency_persist, 'yed_getnotice.emergencyOpenAt', extra='%s:%d' % op)
 
 
 def compare_vaults(model, node):
@@ -2841,6 +2922,9 @@ def assert_model_matches(node, full=False, params=None):
         compare_txinfo(model, node)
         compare_vaults(model, node)
         compare_stats(model, node)
+        compare_attestors(model, node)
+        compare_attest_history(model, node)
+        compare_notices(model, node)
         rpc_hash = node.yed_getstatehash()
         if isinstance(rpc_hash, dict):
             rpc_hash = rpc_hash.get('hash') or rpc_hash.get('statehash') or rpc_hash.get('stateHash')

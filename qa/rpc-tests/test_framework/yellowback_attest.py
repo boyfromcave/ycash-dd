@@ -62,8 +62,8 @@ __all__ = [
     'encode_claim_notice', 'encode_equivocation', 'encode_revive', 'encode_bundle', 'decode_bundle',
     'outpoint_selector', 'select_attestors', 'bond_weight', 'weighted_quantile', 'bundle_stat',
     'build_register_tx', 'build_carrier_tx', 'spend_carrier', 'build_mint_tx_v3',
-    'post_notice_raw', 'equivocation_raw', 'revive_raw',
-    'feed', 'feed_all', 'build_bundle', 'register_and_arm', 'assert_void_reason', 'hot_secret_for',
+    'post_notice_raw', 'equivocation_raw', 'revive_raw', 'withdraw_bond_raw', 'bond_secret_for',
+    'feed', 'feed_all', 'build_bundle', 'register_and_arm', 'assert_void_reason', 'hot_secret_for', 'send_and_lock',
 ]
 
 # ---------------------------------------------------------------------------
@@ -518,6 +518,17 @@ def _fund(node, vout, needed, extra_vin=(), lock_time=0, expiry=0, extra_in_valu
     return node.signrawtransaction(bytes_to_hex_str(raw))['hex'], len(utxos)
 
 
+def send_and_lock(node, hex_):
+    """``sendrawtransaction`` then ``lockunspent`` the inputs: ``_select_funding`` reads
+    ``listunspent(1)``, which knows nothing of the mempool, so two hand-built transactions in one
+    block would otherwise spend the same coin (the second is a silent mempool conflict).  The
+    locks fall away with the next restart; nothing else reads them."""
+    txid = node.sendrawtransaction(hex_)
+    vin = node.decoderawtransaction(hex_)['vin']
+    node.lockunspent(False, [{'txid': i['txid'], 'vout': int(i['vout'])} for i in vin if 'txid' in i])
+    return txid
+
+
 def build_register_tx(node, hot_pubkey, bond_pubkey, bond_zat=BOND_MIN_ZAT, lock_blocks=BOND_MIN_LOCK, flags=0,
                       locktime=None, expiry=0):
     """The ATTESTOR_REGISTER of section 3.5: ``vout[0]`` the bond (P2SH of ``bond_script``),
@@ -657,6 +668,40 @@ def revive_raw(node, att74, expiry=0):
     return hex_
 
 
+def withdraw_bond_raw(node, rec, bond_secret32, to=None, branch_id=SIGNING_BRANCH_ID, lock_time=None):
+    """The bond spend (section 3.5 ``yed_withdrawbond``'s shape, built here): ``vin[0]`` the
+    bond outpoint with scriptSig ``<sig> <bondScript>`` signed by ``bond_secret32`` over the
+    ZIP-243 sighash (``scriptCode`` = the bond script, ``amount = bondZat``), ``nSequence
+    0xFFFFFFFE``, ``nLockTime = bondLocktime`` (CLTV); one output of ``bondZat -
+    YELLOWBACK_FEE`` to ``to`` (default a fresh address of ``node``).  ``rec`` is a
+    ``yed_listattestors`` row.  Returns the hex; the caller mines it at or past the locktime."""
+    from .mininode import CTransaction
+    from .script import CScript, SIGHASH_ALL, SignatureHash
+    bond_pub = yu.secret_to_pubkey(bond_secret32)
+    locktime = int(rec['bondLocktime'])
+    redeem = bond_script(bond_pub, locktime)
+    value = int(rec['bondZat']) - YELLOWBACK_FEE
+    dest = to or node.getnewaddress()
+    vin = [(rec['bondOutpoint']['txid'], int(rec['bondOutpoint']['vout']), b'', 0xFFFFFFFE)]
+    raw = ym.serialize_tx_v4(vin, [(value, yu._spk_of_address(dest))], locktime if lock_time is None else lock_time, 0)
+    tx = CTransaction()
+    tx.deserialize(BytesIO(raw))
+    sighash = SignatureHash(CScript(redeem), tx, 0, SIGHASH_ALL, int(rec['bondZat']), branch_id)[0]
+    r, s = ecdsa_sign(bond_secret32, sighash)
+    sig = der_encode(r, s) + bytes([SIGHASH_ALL])
+    tx.vin[0].scriptSig = ym.push(sig) + ym.push(redeem)
+    return bytes_to_hex_str(tx.serialize())
+
+
+def bond_secret_for(rec):
+    """The fixed bond secret of a ``yed_listattestors`` row registered with the fixed key set."""
+    by_pubkey = {pk: secret for secret, pk in bond_keys(len(BOND_WIFS))}
+    hot_by_pubkey = {pk: i for i, (_s, pk) in enumerate(attestor_keys(len(ATTESTOR_WIFS)))}
+    i = hot_by_pubkey.get(rec['attestorPubKey'])
+    assert i is not None, 'seq %s was not registered with a fixed key' % rec.get('seq')
+    return bond_keys(len(BOND_WIFS))[i][0]
+
+
 # ---------------------------------------------------------------------------
 # Node drivers, against the section 4.5 RPC surface (Phase A2+; untestable until then)
 
@@ -731,7 +776,7 @@ def register_and_arm(test, n=ATTEST_ARM_MIN, funder=None, miner=None, bond_zat=B
     hot, bond = attestor_keys(n), bond_keys(n)
     for i in range(n):
         hex_, _lt = build_register_tx(funder, hot[i][1], bond[i][1], bond_zat, lock_blocks)
-        funder.sendrawtransaction(hex_)
+        send_and_lock(funder, hex_)
         wallet = ATTESTOR_A if i < 3 else ATTESTOR_B
         if wallet < len(nodes) and nodes[wallet] is not None:
             nodes[wallet].importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)
