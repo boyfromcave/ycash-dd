@@ -31,8 +31,9 @@ namespace rpc {
 void PushNoticeFields(UniValue& o, const State& st, const Params& p, const COutPoint& vault, const VaultRecord& v);
 
 /**
- * What a claim of `vault` would see at this node's reference height R = tip - REF_LAG (the
- * wallet's choice, V11): unarmed at R, exactly v2 — RED-4 (a) under the tip snapshot's pClaim;
+ * What a claim of `vault` would see at R = the index tip (the wallet's spendRefHeight for a
+ * vault spend; RED-1's window holds at H = tip + 1): unarmed, exactly v2 — RED-4 (a) under the
+ * tip snapshot's pClaim;
  * armed, RED-4 (a) under the combined pClaim with the bundle this node would build for the vault
  * (selector = the outpoint), or (b) when a notice has persisted and the emergency inequality
  * holds under pEmerg. With no buildable bundle the cross-section alone is read and claimPath is
