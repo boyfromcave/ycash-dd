@@ -2327,7 +2327,8 @@ class YellowbackModel(object):
         return False
 
     def _mint_verdict(self, tx, height, pl, opret, facts):
-        """MINT-2, 3, 4, 6, 7, 8, then MINT-9, AFEE-1, MINT-5, MINT-10 (v3 plan R15)."""
+        """Not ARMED at R: the v2 order MINT-2..8 exactly.  ARMED: MINT-2, 3, 4, 6, 7, 8, then MINT-9,
+        AFEE-1, MINT-5 (with the combined pMint), MINT-10 (v3 plan R15)."""
         p = self.params
         # MINT-2 (signed arithmetic)
         rng = p.class_range(pl.term_class)
@@ -2365,8 +2366,25 @@ class YellowbackModel(object):
             return 'mint-halted-divergence'
         if s.halt_mask != 0:
             return 'mint-not-active'
-        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9)
+        armed = self.armed_at(pl.ref_height)
         x_mint = s.p_mint
+
+        def mint5(p_mint):
+            if p_mint is None:
+                return 'mint-halted-no-price'
+            req = required_zat(pl.cents, min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps), p_mint)
+            if req is None:
+                return 'mint-unsatisfiable'
+            if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
+                return 'bad-mint-collateral'
+            return None
+
+        # MINT-5 at its v2 position when not ARMED (pMint = xMint)
+        if not armed:
+            v = mint5(x_mint)
+            if v is not None:
+                return v
+        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9)
         cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
         if cap is not None and self.totals.supply_cents + pl.cents > cap:
             return 'mint-supply-cap'
@@ -2384,10 +2402,10 @@ class YellowbackModel(object):
                 return 'bad-mint-fee'
             if tx.vout[fv].value < fee_zat(tx.vout[0].value, p.fee_min, p.fee_bps):
                 return 'bad-mint-fee'
+        if not armed:
+            return VERDICT_OK
         # MINT-9 (ARMED at R: BUNDLE-1 with the empty selector; aMint defined)
-        armed = self.armed_at(pl.ref_height)
-        p_mint = x_mint
-        if armed:
+        if True:
             b = self._bundle(tx, pl.ref_height, b'', False)
             facts['bundle'] = b
             if not b['ok']:
@@ -2403,19 +2421,14 @@ class YellowbackModel(object):
             facts['attest_payee'] = payee
             # PRICE-2 (revised)
             p_mint = None if x_mint is None else min(x_mint, b['a_mint'])
-        # MINT-5
-        if p_mint is None:
-            return 'mint-halted-no-price'
-        req = required_zat(pl.cents, min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps), p_mint)
-        if req is None:
-            return 'mint-unsatisfiable'
-        if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
-            return 'bad-mint-collateral'
+        # MINT-5 (ARMED: after MINT-9, with the combined pMint)
+        v = mint5(p_mint)
+        if v is not None:
+            return v
         # MINT-10
-        if armed:
-            a = facts['bundle']['a_mint']
-            if abs(x_mint - a) * BPS > p.diverge_bps_attest * min(x_mint, a):
-                return 'mint10-diverged'
+        a = facts['bundle']['a_mint']
+        if abs(x_mint - a) * BPS > p.diverge_bps_attest * min(x_mint, a):
+            return 'mint10-diverged'
         return VERDICT_OK
 
     def _apply_transfer(self, tx, height, rec, pl, yed_in):

@@ -273,9 +273,10 @@ void SetVault(VaultRecord& v, const Payload& p, const Params& params, const CTra
 }
 
 // ---------------------------------------------------------------------------
-// MINT-2..10 (§3.8), in the v3 plan's evaluation order (R15): MINT-2, 3, 4, 6, 7, 8, then MINT-9,
-// AFEE-1 (the attestor-fee clause of MINT-8, which needs A), MINT-5 (which needs pMint) and MINT-10.
-// Unarmed, the only change from v2 is that MINT-6 precedes MINT-5 (SERIALISATION.md §3 D).
+// MINT-2..10 (§3.8). Not ARMED at R: the v2 clause order MINT-2..8 exactly (SERIALISATION.md §3 D),
+// so v2 verdicts are unchanged. ARMED: the v3 plan's evaluation order (R15) — MINT-2, 3, 4, 6, 7, 8,
+// then MINT-9, AFEE-1 (the attestor-fee clause of MINT-8, which needs A), MINT-5 (which needs pMint)
+// and MINT-10 — so bundle signatures are verified only for a mint that has paid its pool fee.
 
 /** What MINT evaluation learns beyond the verdict (TxLog fields). */
 struct MintFacts
@@ -312,8 +313,21 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (S->haltMask & HALT_GLOBAL_RATIO) return verdict::MINT_HALTED_GLOBAL_RATIO;
     if (S->haltMask & HALT_DIVERGENCE) return verdict::MINT_HALTED_DIVERGENCE;
     if (S->haltMask != 0) return verdict::MINT_NOT_ACTIVE; // an unknown bit: MINT-4 needs haltMask == 0
-    // MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9, R15)
+    const bool armed = ctx.Armed(ref);
     std::optional<MicroUsd> xMint = S->PMint();
+    std::optional<MicroUsd> pMint = xMint;
+    auto mint5 = [&]() -> const char* {
+        if (!pMint.has_value()) return verdict::MINT_HALTED_NO_PRICE;
+        std::optional<CAmount> required = RequiredCollateral((Cents)p.cents, MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps), pMint.value());
+        if (!required.has_value()) return verdict::MINT_UNSATISFIABLE;
+        if (tx.vout[0].nValue < required.value() || tx.vout[0].nValue < 4 * P.feeMin) return verdict::BAD_MINT_COLLATERAL;
+        return nullptr;
+    };
+    // MINT-5 at its v2 position when not ARMED (pMint = xMint)
+    if (!armed) {
+        if (const char* v = mint5()) return v;
+    }
+    // MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9, R15)
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, xMint, P.supplyCapBps);
     if (cap.has_value() && totals.supplyCents + (Cents)p.cents > cap.value()) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
@@ -327,10 +341,9 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::BAD_MINT_FEE;
         if (tx.vout[fv].nValue < FeeZat(tx.vout[0].nValue, P.feeMin, P.feeBps)) return verdict::BAD_MINT_FEE;
     }
+    if (!armed) return verdict::OK;
     // MINT-9 (ARMED at R: BUNDLE-1 with the empty selector, W9; aMint defined)
-    const bool armed = ctx.Armed(ref);
-    std::optional<MicroUsd> pMint = xMint;
-    if (armed) {
+    {
         facts.bundle = ctx.Bundle(tx, ref, std::vector<unsigned char>(), false);
         if (!facts.bundle.verified) {
             if (!facts.bundle.carrierPresent) return verdict::MINT9_NO_BUNDLE;
@@ -345,13 +358,10 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         // PRICE-2 (revised): pMint = min(xMint, aMint)
         pMint = PriceCombine(xMint, S->PClaim(), facts.bundle.aMint, facts.bundle.aClaim).pMint;
     }
-    // MINT-5
-    if (!pMint.has_value()) return verdict::MINT_HALTED_NO_PRICE;
-    std::optional<CAmount> required = RequiredCollateral((Cents)p.cents, MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps), pMint.value());
-    if (!required.has_value()) return verdict::MINT_UNSATISFIABLE;
-    if (tx.vout[0].nValue < required.value() || tx.vout[0].nValue < 4 * P.feeMin) return verdict::BAD_MINT_COLLATERAL;
+    // MINT-5 (ARMED: after MINT-9, with the combined pMint)
+    if (const char* v = mint5()) return v;
     // MINT-10 (ARMED: |xMint - aMint| * 10^4 <= DIVERGE_BPS_ATTEST * min(xMint, aMint))
-    if (armed) {
+    {
         const MicroUsd x = xMint.value(), a = facts.bundle.aMint.value();
         const arith_uint256 diff = x >= a ? arith_uint256(x - a) : arith_uint256(a - x);
         if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, P.divergeBpsAttest)) * arith_uint256(std::min(x, a))) return verdict::MINT10_DIVERGED;
