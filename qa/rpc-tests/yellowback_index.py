@@ -60,6 +60,8 @@ from test_framework.yellowback_util import (
     wait_yed_healthy,
     yellowback_node_args,
 )
+from test_framework.yellowback_attest import attestor_keys, bond_keys, build_register_tx, send_and_lock
+from test_framework.yellowback_util import ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY
 
 
 def rpc_error_message(fn, *args):
@@ -74,6 +76,7 @@ def rpc_error_message(fn, *args):
 
 
 # Rule: TAG-1 TAG-2 TAG-3 PRICE-1 PRICE-2 ACT-1 ACT-2 ACT-3 SNAP UNDO REG-4 BLK-2 BLK-3 RED-1 RED-2 RED-3 MP-1
+# Rule: REG-A1 ARM-1 ARM-2
 class YellowbackIndexTest(YellowbackTestFramework):
 
     def statehash(self, i):
@@ -87,7 +90,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         print('initial synchronous index state')
         for node in self.enforcing_nodes():
             info = wait_yed_healthy(node)
-            assert_equal(info['rpcversion'], 2)
+            assert_equal(info['rpcversion'], 3)
             assert_equal(info['network'], 'regtest')
             assert_equal(info['height'], node.getblockcount())
             assert_equal(info['startHeight'], START_HEIGHT)
@@ -372,6 +375,8 @@ class YellowbackIndexTest(YellowbackTestFramework):
         wait_yed_healthy(nodes[2], timeout=120)
         assert_equal(self.statehash(2), self.statehash(3))
 
+        self.v3_cases()
+
         # ------------------------------------------------------------------ the wipe-and-rebuild fallback
         print('crash_unflushed_chainstate beyond UNDO_KEEP: the wipe-and-rebuild fallback (N35)')
         self.restart(3)
@@ -390,6 +395,116 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert debug_log_contains(tmpdir, 3, 'wiping index (undo record missing'), 'expected the wipe-and-rebuild fallback'
         self.sync_all(blocks_only=True)
         self.checkpoint('end')
+
+
+    # ---------------------------------------------------------------------- v3 (Phase A2)
+
+    def attestors_of(self, i):
+        return [(int(r['seq']), r['status'], r['registerHeight']) for r in self.nodes[i].yed_listattestors()]
+
+    def v3_cases(self):
+        """attest_tables_survive_kill9, attest_reorg_across_arming, schema3_rebuilds_v2_index."""
+        nodes = self.nodes
+        user = nodes[USER]
+        tmpdir = self.options.tmpdir
+        hot, bond = attestor_keys(ATTEST_ARM_MIN), bond_keys(ATTEST_ARM_MIN)
+        yellowback_nodes = [nodes[i] for i in (0, 2, 3, 4, 5, 6) if nodes[i] is not None]
+
+        print('attest_tables_survive_kill9: two raw registrations mined by node 3, kill -9 right after, restart, equal hashes')
+        for i in range(2):
+            hex_, _lt = build_register_tx(user, hot[i][1], bond[i][1])
+            send_and_lock(user, hex_)
+        self.sync_all()
+        nodes[3].generate(1)
+        self.sync_all(blocks_only=True)
+        reg_height = nodes[3].getblockcount()
+        assert_equal([s for _q, s, _h in self.attestors_of(3)], ['PENDING', 'PENDING'])
+        assert_equal(self.attestors_of(3), self.attestors_of(0))
+        self.kill9(3)
+        self.restart(3)
+        wait_yed_healthy(nodes[3], timeout=120)
+        sync_blocks([nodes[0], nodes[3]], timeout=120)
+        assert_equal(nodes[3].yed_getinfo()['height'], nodes[3].getblockcount())
+        assert_equal(self.attestors_of(3), self.attestors_of(0))
+        assert_equal(self.statehash(3), self.statehash(0))
+        self.mine_round_robin(POOLS, BOND_MATURITY)
+        assert_equal([s for _q, s, _h in self.attestors_of(0)], ['ELIGIBLE', 'ELIGIBLE'])
+        assert_equal(nodes[0].yed_getinfo()['attest']['status'], 'UNARMED')     # two of ATTEST_ARM_MIN = 3
+        self.checkpoint('two attestors mature')
+
+        print('attest_reorg_across_arming: the third registration on the enforcing branch only; it triggers and arms there,')
+        print('  the stock branch (node 1) out-mines it, the join undoes the registration, the trigger and the arming')
+        self.split_network()
+        hex3, _lt = build_register_tx(user, hot[2][1], bond[2][1])
+        check = user.yed_validaterawtransaction(hex3)
+        assert_equal((check['valid'], check['type'], check['verdict']), (True, 'register', 'ok'))
+        reg3_txid = user.sendrawtransaction(hex3)
+        self.sync_all()                                               # the pools' half sees it (node 0 <-> 2)
+        bh3 = nodes[POOLS[0]].generate(1)[0]
+        self.sync_all(blocks_only=True)
+        h3 = nodes[POOLS[0]].getblockcount()
+        assert reg3_txid in nodes[POOLS[0]].getblock(bh3)['tx'], 'the registration was not mined: %r' % nodes[POOLS[0]].getrawmempool()
+        assert_equal(len(self.attestors_of(0)), 3)
+        for _ in range(BOND_MATURITY):
+            nodes[POOLS[1]].generate(1)
+            self.sync_all(blocks_only=True)
+        attest = nodes[0].yed_getinfo()['attest']
+        assert_equal((attest['status'], attest['triggerHeight'], attest['armHeight']), ('TRIGGERED', h3 + BOND_MATURITY, h3 + BOND_MATURITY + ATTEST_ARM_DELAY))
+        for _ in range(ATTEST_ARM_DELAY):
+            nodes[POOLS[2]].generate(1)
+            self.sync_all(blocks_only=True)
+        for i in ENFORCING:
+            assert_equal(nodes[i].yed_getinfo()['attest']['status'], 'ARMED')
+        assert_same_statehash([nodes[i] for i in ENFORCING], 'armed branch')
+        assert_equal(len(nodes[STOCK].getrawmempool()), 0)          # the registration never crossed the split
+        assert_equal(nodes[OBSERVER].yed_getinfo()['attest']['status'], 'UNARMED')
+        nodes[STOCK].generate(1 + BOND_MATURITY + ATTEST_ARM_DELAY + 3)
+        self.join_network()
+        assert_best_hash(nodes)
+        for i in ENFORCING + [OBSERVER]:
+            info = nodes[i].yed_getinfo()
+            assert_equal((info['attest']['status'], info['attest']['triggerHeight']), ('UNARMED', 0))
+            assert_equal(len(self.attestors_of(i)), 2)
+        assert_same_statehash(yellowback_nodes, 'after the join: the unarmed branch won')
+        # The undone registration is dead on the winning chain: its bondLocktime was H + BOND_MIN_LOCK for the
+        # height it was built at, and REG-A1 needs L >= H + BOND_MIN_LOCK at the height it is mined, twenty
+        # blocks later. A fresh one (a new locktime) registers, matures and arms from there.
+        check = user.yed_validaterawtransaction(hex3)
+        assert_equal((check['type'], check['verdict']), ('none', 'ok'))               # non-Yellowback now
+        hex3b, _lt = build_register_tx(user, hot[2][1], bond[2][1])
+        nodes[POOLS[0]].sendrawtransaction(hex3b)                     # mempools rarely agree across a reorg join: hand it to the miner
+        nodes[POOLS[0]].generate(1)
+        self.sync_all(blocks_only=True)
+        h3b = nodes[0].getblockcount()
+        assert_equal(len(self.attestors_of(0)), 3)
+        assert_equal(self.attestors_of(0)[2][2], h3b)
+        self.mine_round_robin(POOLS, BOND_MATURITY)
+        assert_equal(nodes[0].yed_getinfo()['attest']['triggerHeight'], h3b + BOND_MATURITY)
+        self.mine_round_robin(POOLS, ATTEST_ARM_DELAY)
+        for node in yellowback_nodes:
+            assert_equal(node.yed_getinfo()['attest']['status'], 'ARMED')
+        self.checkpoint('armed on the winning chain')
+        assert_same_statehash(yellowback_nodes, 'armed everywhere')
+
+        print('schema3_rebuilds_v2_index: node 4 restarted on a datadir whose Tip carries a foreign SCHEMA_VERSION')
+        # No v2 datadir is cached, so the mismatch is injected: -yellowbacktestfault=schema makes SyncToChain
+        # take the same wipe-and-rebuild path a v2 Tip record takes (the unit test writes schemaVersion 2 directly).
+        assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)
+        self.restart(4, ['-yellowbacktestfault=schema'])
+        wait_yed_healthy(nodes[4], timeout=180)
+        sync_blocks([nodes[0], nodes[4]], timeout=120)
+        info = nodes[4].yed_getinfo()
+        assert_equal((info['rebuilt'], info['height']), (True, nodes[4].getblockcount()))
+        assert debug_log_contains(tmpdir, 4, 'rebuilding from the chain'), 'expected the schema rebuild log line'
+        assert_equal(self.statehash(4), self.statehash(0))
+        assert_equal(self.attestors_of(4), self.attestors_of(0))
+        assert_equal(nodes[4].yed_getinfo()['attest']['status'], 'ARMED')
+        self.restart(4)
+        wait_yed_healthy(nodes[4], timeout=120)
+        assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)
+        assert_equal(self.statehash(4), self.statehash(0))
+        self.sync_all(blocks_only=True)
+        self.checkpoint('v3 cases')
 
 
 if __name__ == '__main__':
