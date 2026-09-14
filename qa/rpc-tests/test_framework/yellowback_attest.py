@@ -1248,10 +1248,9 @@ class ArmedModeMixin(object):
         return wallet_claim(self, node, vault_txid, to, prices=prices if self.armed else None, miner=miner)
 
     def model_check(self, node):
-        """The Python model over the whole chain: the full comparison unarmed; armed, history plus
-        the state hash (compare_txinfo reads yed_gettxinfo.type, which renders the v3 types only
-        once Phase A2's TypeLower lands)."""
-        return model_check(node, full=not self.armed)
+        """The Python model over the whole chain, the full comparison (yed_gettxinfo.type renders
+        the v3 types since Phase A2)."""
+        return model_check(node, full=True)
 
     def mint_args(self, node, cents, lock_blocks, from_addr=''):
         """Positional arguments for a direct ``yed_mint`` call that must reach a refusal past the

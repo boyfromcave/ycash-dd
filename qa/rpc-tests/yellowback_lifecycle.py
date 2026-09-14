@@ -43,7 +43,7 @@ from test_framework.yellowback_util import (
     set_quote,
 )
 from test_framework import yellowback_model as ym
-from test_framework.yellowback_attest import ArmedModeMixin, attested_micro
+from test_framework.yellowback_attest import ArmedModeMixin
 
 SWEEP_ACK = 'I understand this leaves YED unbacked'
 

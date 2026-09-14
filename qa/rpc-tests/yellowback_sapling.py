@@ -32,7 +32,6 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     fee_zat,
 )
-from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import ArmedModeMixin
 from test_framework.yellowback_util import CARRIER_VALUE
 

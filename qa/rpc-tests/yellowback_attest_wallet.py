@@ -31,15 +31,21 @@ from decimal import Decimal
 from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes, wait_and_assert_operationid_status
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
-    TOKEN_VALUE, YELLOWBACK_FEE, YellowbackTestFramework, assert_same_statehash, fee_zat, pubkey_to_address, set_quote,
-    usd_to_micro, DORMANCY_CHECK,
+    TOKEN_VALUE, YELLOWBACK_FEE, YellowbackTestFramework, assert_same_statehash, pubkey_to_address, set_quote,
+    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT,
 )
 from test_framework.yellowback_attest import (
-    REGISTRY, arming_state, attestor_keys, encode_bundle, note_attestor_status, offline_bundle_hex, offline_selection,
+    REGISTRY, arming_state, decode_bundle, note_attestor_status, offline_bundle, offline_bundle_hex, offline_selection,
     outpoint_selector, register_and_arm, register_wallet_attestor, sign_attestation, two_step_pending, verify_attestation,
-    wallet_claim, wallet_mint, wallet_notice, wallet_report_equivocation, wait_for_spender, hot_secret_for, model_check,
+    wallet_claim, wallet_mint, wallet_notice, wallet_report_equivocation, hot_secret_for, model_check,
 )
-from test_framework import yellowback_model as ym
+
+
+def feed_pool(test, node, ref_height, selector, prices):
+    """The offline bundle's attestations (wallet-signed for the wallet-registered seqs) fed one by
+    one into ``node``'s pool through ``yed_addattestation``."""
+    bundle, _selected = offline_bundle(test, node, ref_height, selector, prices)
+    return [node.yed_addattestation(bytes_to_hex_str(att)) for att in decode_bundle(bundle)]
 
 
 def assert_rpc_error(substr, fn, *args):
@@ -47,7 +53,7 @@ def assert_rpc_error(substr, fn, *args):
         fn(*args)
     except Exception as e:
         assert substr in str(e), 'expected %r in %r' % (substr, str(e))
-        return
+        return str(e)
     raise AssertionError('expected an error containing %r' % substr)
 
 
@@ -89,8 +95,6 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
     def run_test(self):
         nodes = self.nodes
         user, claimant, wa, wb = nodes[0], nodes[5], nodes[ATTESTOR_A], nodes[ATTESTOR_B]
-        pool = nodes[POOLS[0]]
-
         print('activate at $50; fund the claimant and the attestor wallets')
         self.activate(POOLS, quote_usd=50)
         self.mine_round_robin(POOLS, REF_LAG + 1)
@@ -186,7 +190,8 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
 
 # Rule: MINT-9 MINT-10 BUNDLE-1
         print('armed refusals: no bundle, a malformed bundle, and attestors 2x the pools (refused before any transaction)')
-        assert_rpc_error('bundle-insufficient: no bundle given', user.yed_mint, 10000, 48)
+        msg = assert_rpc_error('bundle-insufficient', user.yed_mint, 10000, 48)      # the empty pool: nothing to build from
+        assert '0 of %d selected attestors have a fresh attestation; missing seq' % (M_SELECT + K_SLACK) in msg, msg
         assert_rpc_error('bundle-malformed', user.yed_mint, 10000, 48, '', 'zz')
         assert_rpc_error('bundle-malformed', user.yed_mint, 10000, 48, '', '5941ff00')
         r = user.yed_getinfo()['height'] - REF_LAG
@@ -200,6 +205,28 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(user.yed_sweepcarriers()['outstanding'], 0)               # nothing was built
         assert_equal(user.getrawmempool(), [])
         self.mine(POOLS[1])
+
+# Rule: W6 BUNDLE-1
+        print('mint_from_pool: one attestor fed, bundle-insufficient from the pool names the missing seqs; feed_all, then yed_mint with no bundleHex')
+        r = user.yed_getinfo()['height'] - REF_LAG
+        sel = sorted(offline_selection(user, r, b''))
+        feed_pool(self, user, r, b'', {sel[0]: 49})
+        msg = assert_rpc_error('bundle-insufficient', user.yed_mint, 10000, 48)
+        assert '1 of %d selected attestors have a fresh attestation; missing seq ' % len(sel) in msg, msg
+        assert_equal(sorted(int(x) for x in msg.split('missing seq ')[1].split(',')), sel[1:])
+        assert_equal(user.yed_sweepcarriers()['outstanding'], 0)
+        feed_pool(self, user, r, b'', {s: 49 for s in sel[1:]})
+        m0 = wallet_mint(self, user, 10000, 48, bundle_hex='')                  # '' = the node's pool
+        assert_equal((m0['pending'], sorted(m0['bundleSeqs'])), (False, sel))
+        assert_greater_than(m0['aMint'], usd_to_micro(49) - 1)
+        assert_greater_than(usd_to_micro(50), m0['aMint'])
+        assert_equal(m0['pMint'], m0['aMint'])
+        raw0 = user.getrawtransaction(m0['txid'], 1)
+        assert_equal(raw0['vin'][-1]['txid'], m0['carrierTxid'])
+        self.mine(POOLS[2])
+        assert_equal(user.yed_gettxinfo(m0['txid'])['verdict'], 'ok')
+        assert_equal(user.yed_getvault(m0['txid'])['status'], 'ACTIVE')
+        assert_same_statehash(self.enforcing_nodes(), 'pool-path mint')
 
 # Rule: MINT-5 MINT-9 AFEE-1 AFEE-W PRICE-2 W7
         print('an armed mint (wait=True): two transactions one block apart, both fees, bundleSeqs, pMint = aMint')
@@ -228,7 +255,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         v1 = user.yed_getvault(m1['txid'])
         assert_equal((v1['status'], v1['refHeight'], v1['feePaidZat']), ('ACTIVE', m1['refHeight'], m1['feeZat']))
         assert_equal(user.yed_gettxinfo(m1['txid'])['verdict'], 'ok')
-        assert_equal(user.yed_getbalance()['confirmedCents'], 20700)
+        assert_equal(user.yed_getbalance()['confirmedCents'], 30700)
         assert_same_statehash(self.enforcing_nodes(), 'armed mint')
 
 # Rule: W7
@@ -490,7 +517,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_same_statehash(self.enforcing_nodes(), 'withdrawal')
 
         print('the Python model over the whole chain')
-        model_check(nodes[2], full=False)          # history + state hash; yed_gettxinfo.type for the v3 types is Phase A2's
+        model_check(nodes[2], full=True)
         self.checkpoint('end')
 
 

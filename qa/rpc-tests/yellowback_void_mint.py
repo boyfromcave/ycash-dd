@@ -42,7 +42,7 @@ from test_framework.yellowback_util import (
     term_class_of,
 )
 from test_framework import yellowback_model as ym
-from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint, attested_micro
+from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint
 
 SUPPLY_CAP_BPS = 60
 

@@ -49,7 +49,7 @@ from test_framework.yellowback_util import (
     set_quote,
     template_coinbase,
 )
-from test_framework.yellowback_attest import wallet_mint, wallet_claim
+from test_framework.yellowback_attest import wallet_mint
 from test_framework import yellowback_model as ym
 
 USD = 1_000_000
