@@ -1898,6 +1898,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
         e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
     } else {
         e.pClaim = e.xClaim;                         // the cross-section alone; claimPath stays ""
+        e.pEmerg = e.xClaim;                         // likewise for the emergency clause and canNotice (min(xClaim, aClaim) <= xClaim)
     }
     const bool underA = IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
     std::optional<NoticeRecord> notice = st.GetNotice(vault);
