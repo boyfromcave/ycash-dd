@@ -1656,7 +1656,9 @@ EQV-1's conditions itself: same `seq` (any status but WITHDRAWN or EJECTED), sam
 `attestorPubKey(seq)` over **this chain's** `blockHash(citedHeight)` (two honest attestations
 from two sides of a fork are not an equivocation). Then the carrier step with a bundle that is
 exactly the two attestations, and a transaction of confirmed own YEC plus the carrier, the empty
-`0x07` payload, change. Anyone may report; it costs the carrier and the network fee. Refusals:
+`0x07` payload, change (`refHeight` is the carrier's `R = tip − REF_LAG`, the start of its
+sweep window as for every two-step command). Anyone may report; it costs the carrier and the
+network fee. Refusals:
 `not-equivocation` (any EQV-1 condition fails; the message says which), `attest-malformed`,
 `RPC_WALLET_ERROR` for insufficient YEC.
 
@@ -1667,6 +1669,7 @@ Result of `yed_reportequivocation`:
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "carrierTxid": "5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c",
   "pending": false,
+  "refHeight": 331,
   "seq": 4,
   "citedHeight": 329,
   "priceA": 1985000,

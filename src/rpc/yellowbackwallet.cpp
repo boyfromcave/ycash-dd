@@ -1123,7 +1123,7 @@ UniValue yed_reportequivocation(const UniValue& params, bool fHelp)
             "\nReport two attestations of one attestor for one height at two prices (EQV-1): the carrier step with a bundle of\n"
             "exactly the two, then a transaction carrying the EQUIVOCATION payload. The attestor is EJECTED when it confirms.\n"
             "Refused with not-equivocation (the message says which condition fails), attest-malformed.\n"
-            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"seq\", \"citedHeight\", \"priceA\", \"priceB\" }\n");
+            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"refHeight\", \"seq\", \"citedHeight\", \"priceA\", \"priceB\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const Attestation a = ParseAttestationArg(params[0], "attestationHexA");
