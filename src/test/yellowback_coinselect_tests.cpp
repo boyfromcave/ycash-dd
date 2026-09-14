@@ -10,6 +10,12 @@
 
 #include "yellowback/coinselect.h"
 #include "yellowback/params.h"
+#include "yellowback/script.h"
+
+#include "key.h"
+#include "keystore.h"
+#include "script/ismine.h"
+#include "script/standard.h"
 
 #include "test/test_bitcoin.h"
 
@@ -298,6 +304,35 @@ BOOST_AUTO_TEST_CASE(h1_degenerate_arguments)
     BOOST_CHECK(!SelectFloorAware({ 500 }, -1, FLOOR, CAP, false).ok);
     BOOST_CHECK(!SelectFloorAware({ 500 }, 100, FLOOR, 0, false).ok);   // a zero cap selects nothing
     BOOST_CHECK(SelectFloorAware({ 500 }, 100, FLOOR, 0, false).tooManyInputs);
+}
+
+// Rule: H5
+BOOST_AUTO_TEST_CASE(p2sh_yellowback_outputs_are_never_mine)
+{
+    // The YEC side of every builder draws from CWallet::AvailableCoins, which offers only IsMine
+    // outputs. A vault, a carrier and a bond are P2SH of scripts Solver calls TX_NONSTANDARD, so
+    // none is IsMine even when the wallet holds the key inside it (v3 plan R6): sendtoaddress and
+    // the Yellowback builders can never spend one as plain YEC, and no coin lock is needed.
+    CBasicKeyStore ks;
+    CKey k;
+    k.MakeNewKey(true);
+    ks.AddKey(k);
+    const CPubKey pk = k.GetPubKey();
+    std::vector<unsigned char> h(32, 0x11);
+    const CScript carrier = CarrierScript(pk, uint256(h));
+    const CScript bond = BondScript(pk, 500);
+    const CScript vault = VaultScript(300, pk, 324);
+    BOOST_REQUIRE(!carrier.empty() && !bond.empty() && !vault.empty());
+    BOOST_CHECK_EQUAL((int)::IsMine(ks, GetScriptForDestination(pk.GetID())), (int)ISMINE_SPENDABLE);
+    for (const CScript& redeem : { carrier, bond, vault }) {
+        BOOST_CHECK_EQUAL((int)::IsMine(ks, P2SHScript(redeem)), (int)ISMINE_NO);
+        // Even with the redeem script known to the keystore the template is unsolvable.
+        ks.AddCScript(redeem);
+        BOOST_CHECK_EQUAL((int)::IsMine(ks, P2SHScript(redeem)), (int)ISMINE_NO);
+        txnouttype type;
+        std::vector<std::vector<unsigned char>> sols;
+        BOOST_CHECK(!Solver(redeem, type, sols) || type == TX_NONSTANDARD);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

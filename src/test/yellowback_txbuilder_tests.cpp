@@ -13,6 +13,8 @@
 // functions that select coins from a CWallet are exercised by the functional
 // tests (yellowback_lifecycle.py, yellowback_claim.py, yellowback_void_mint.py).
 
+#include "yellowback/attest.h"
+#include "yellowback/bundle.h"
 #include "yellowback/math.h"
 #include "yellowback/params.h"
 #include "yellowback/payload.h"
@@ -32,6 +34,9 @@
 #include "script/interpreter.h"
 #include "script/script_error.h"
 #include "script/standard.h"
+#include "crypto/sha256.h"
+#include "script/ismine.h"
+#include "script/sign.h"
 #include "test/test_bitcoin.h"
 #include "utiltest.h"
 
@@ -145,6 +150,173 @@ struct Fixture
 };
 
 std::optional<FoundPayload> PayloadOf(const CMutableTransaction& mtx) { return FindPayload(CTransaction(mtx)); }
+
+/**
+ * v3: an ARMED state written straight into a MemoryStateView (no chain): n ELIGIBLE attestors
+ * (seq i signs with hot[i], is paid at bond[i]), Attest ARMED, Snapshots[R] ACTIVE at price x with
+ * every attestor seated and a block hash to seed W9, one quote tag at R for E(R). Everything the
+ * wallet's shapes are judged against by ProcessTx at H = R + 3.
+ */
+struct Armed
+{
+    yellowback::Params P;
+    MemoryStateView view;
+    std::vector<CKey> hot, bond;
+    CKey payeeKey, claimantKey, carrierKey;
+    int R;
+    MicroUsd x;
+    uint256 blockHash;
+
+    Armed(int n = 3, MicroUsd price = 2000000, int refHeight = 250) : P(RegtestParams(1, 0, 0, 0)), payeeKey(NewKey()), claimantKey(NewKey()), carrierKey(NewKey()), R(refHeight), x(price)
+    {
+        State st(view);
+        for (int i = 0; i < n; i++) {
+            hot.push_back(NewKey());
+            bond.push_back(NewKey());
+            AttestorRecord rec;
+            const CPubKey h = hot[i].GetPubKey(), b = bond[i].GetPubKey();
+            rec.attestorPubKey.assign(h.begin(), h.end());
+            rec.bondPubKey.assign(b.begin(), b.end());
+            rec.bondOutpoint = COutPoint(uint256S(strprintf("b%d", i)), 0);
+            rec.bondZat = 10 * COIN;
+            rec.bondLocktime = 100000;
+            rec.registerHeight = 10;
+            rec.status = (uint8_t)AttestorStatus::ELIGIBLE;
+            rec.statusHeight = 18;
+            rec.seatedSince = 20;
+            st.Put(keys::Attestor((uint16_t)i), rec);
+        }
+        AttestorSeqRecord next;
+        next.next = (uint16_t)n;
+        st.Put(keys::AttestorSeq(), next);
+        AttestState a;
+        a.status = (uint8_t)AttestStatus::ARMED;
+        a.triggerHeight = 18;
+        a.armHeight = 26;
+        st.Put(keys::Attest(), a);
+        std::vector<unsigned char> v(32, 0x5a);
+        v[0] = (unsigned char)R;
+        blockHash = uint256(v);
+        Snapshot S;
+        S.blockHash = blockHash;
+        S.activation.status = (uint8_t)ActivationStatus::ACTIVE;
+        S.pFast = S.pMid = S.pSlow = S.pMint = S.pClaim = x;
+        S.sigmaMultBps = 10000;
+        S.haltMask = 0;
+        S.attest = a;
+        for (int i = 0; i < n; i++) S.seated.push_back((uint16_t)i);
+        st.Put(keys::Snapshot(R), S);
+        TagRecord tag;
+        tag.payoutKey = payeeKey.GetPubKey().GetID();
+        tag.priceMicroUsd = x;
+        tag.signal = true;
+        st.Put(keys::Tag(R), tag);
+        BOOST_REQUIRE(ArmedAt(view, P, R));
+    }
+
+    Attestation Att(int seq, MicroUsd price, int cited = -1) const
+    {
+        Attestation a;
+        a.seq = (uint16_t)seq;
+        a.priceMicroUsd = (uint32_t)price;
+        a.citedHeight = (uint32_t)(cited < 0 ? R : cited);
+        const uint256 msg = AttestMessage(a.seq, a.priceMicroUsd, a.citedHeight, blockHash);
+        std::vector<unsigned char> der;
+        BOOST_REQUIRE(hot[seq].Sign(msg, der));
+        a.sig.fill(0);
+        size_t pos = 3;
+        for (int part = 0; part < 2; part++) {
+            size_t len = der[pos++];
+            size_t skip = len > 32 ? len - 32 : 0;
+            std::copy(der.begin() + pos + skip, der.begin() + pos + len, a.sig.begin() + part * 32 + (32 - (len - skip)));
+            pos += len + 1;
+        }
+        BOOST_REQUIRE(VerifyCompactSig(hot[seq].GetPubKey(), msg, a.sig));
+        return a;
+    }
+
+    /** The bundle for (R, selector): every selected seq signs `price` (or prices[seq]); `extra` seqs are appended. */
+    std::vector<unsigned char> BundleFor(const std::vector<unsigned char>& selector, MicroUsd price, std::map<int, MicroUsd> prices = {}, std::vector<int> extra = {}) const
+    {
+        Bundle b;
+        for (uint16_t seq : Selected(view, P, R, selector)) {
+            auto it = prices.find(seq);
+            b.atts.push_back(Att(seq, it != prices.end() ? it->second : price));
+        }
+        for (int seq : extra) b.atts.push_back(Att(seq, price));
+        return EncodeBundle(b);
+    }
+
+    CarrierRecord Carrier(const std::vector<unsigned char>& bundle, const std::vector<unsigned char>& selector, const uint256& fundingTxid) const
+    {
+        CarrierRecord c;
+        c.outpoint = COutPoint(fundingTxid, 0);
+        c.refHeight = R;
+        c.selector = selector;
+        c.bundle = bundle;
+        c.pk = carrierKey.GetPubKey();
+        c.createdHeight = R + 1;
+        return c;
+    }
+
+    void AddKeys(CBasicKeyStore& ks) const
+    {
+        ks.AddKey(carrierKey);
+        ks.AddKey(claimantKey);
+        for (const CKey& k : hot) ks.AddKey(k);
+        for (const CKey& k : bond) ks.AddKey(k);
+    }
+
+    /** ProcessTx over a copy of the state at H = R + 3 (the verdict of the wallet's shape). */
+    TxOutcome Judge(const CMutableTransaction& mtx) const
+    {
+        MemoryStateView copy = view;
+        State st(copy);
+        return ProcessTx(st, P, CTransaction(mtx), R + 3);
+    }
+};
+
+/** The wallet's transparent MINT at R with the carrier as vin[last]: collateral for `cents` at pMint = min(x, aMint). */
+CMutableTransaction ArmedMint(const Armed& a, Cents cents, const std::vector<unsigned char>& bundle, const CBasicKeyStore& ks, uint32_t branchId,
+                              std::optional<MicroUsd> aMint, bool withAttestFee = true, CAmount* collateralOut = nullptr, CarrierRecord* carrierOut = nullptr)
+{
+    const CKey owner = NewKey();
+    MintShape s;
+    s.cents = cents;
+    s.termClass = 0;
+    s.lockHeight = (uint32_t)(a.R + 48);
+    s.claimHeight = s.lockHeight + a.P.grace;
+    s.refHeight = a.R;
+    s.owner = owner.GetPubKey();
+    const MicroUsd pMint = aMint.has_value() ? std::min(a.x, aMint.value()) : a.x;
+    CAmount collateral = std::max(RequiredCollateralRounded(cents, MinRatioBps(a.P.baseRatioBps[0], 10000), pMint).value(), 4 * a.P.feeMin);
+    if (collateral % 1000 != 0) collateral += 1000 - collateral % 1000;
+    s.collateralZat = collateral;
+    s.payee = DefaultPayee(a.view, a.P, a.R, std::vector<unsigned char>(s.owner.begin(), s.owner.end()), PayeePolicy::Defaults(a.P));
+    BOOST_REQUIRE(s.payee.has_value());
+    s.feeZat = FeeZat(collateral, a.P.feeMin, a.P.feeBps);
+    std::vector<uint16_t> sel;
+    BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, std::vector<unsigned char>(), &sel);
+    if (withAttestFee && v.ok) {
+        std::vector<uint16_t> A;
+        for (const Attestation& att : v.C) A.push_back(att.seq);
+        std::optional<uint16_t> payee = DefaultAttestPayee(a.view, a.P, a.R, std::vector<unsigned char>(), A, AttestPolicy());
+        BOOST_REQUIRE(payee.has_value());
+        s.attestPayee = a.bond[payee.value()].GetPubKey().GetID();
+        s.attestFeeZat = AttestFeeZat(s.feeZat, a.P.attestFeeBps);
+    }
+    int feeVout = -1, attestFeeVout = -1;
+    CMutableTransaction mtx = Shell((uint32_t)(a.R + REF_WINDOW));
+    mtx.vout = MintOutputs(s, feeVout, &attestFeeVout);
+    mtx.vout.push_back(CTxOut(1 * COIN, GetScriptForDestination(NewKey().GetPubKey().GetID())));   // YEC change
+    mtx.vin.push_back(CTxIn(COutPoint(uint256S("f1"), 0)));                                        // YEC funding
+    const CarrierRecord c = a.Carrier(bundle, std::vector<unsigned char>(), uint256S("ca"));
+    mtx.vin.push_back(CTxIn(c.outpoint));
+    SignCarrierInput(mtx, 1, c, ks, branchId);
+    if (collateralOut) *collateralOut = collateral;
+    if (carrierOut) *carrierOut = c;
+    return mtx;
+}
 
 int OpReturns(const CMutableTransaction& mtx)
 {
@@ -597,6 +769,471 @@ BOOST_AUTO_TEST_CASE(sweep_has_no_burn_no_fee_no_payload)
     SignVaultSpend(b, ks, f.branchId, true);
     BOOST_CHECK(Verify(b.tx, 0, P2SHScript(f.vaultScript), f.vaultValue, f.branchId));
     BOOST_CHECK(Verify(b.tx, 0, P2SHScript(f.vaultScript), f.vaultValue, f.branchId, nullptr, CONSENSUS_FLAGS));
+}
+
+// ---------------------------------------------------------------- v3 (plan §3.4, §3.5, §4.6)
+
+// Rule: MINT-8 AFEE-0 AFEE-1
+BOOST_AUTO_TEST_CASE(v3_mint_layout_places_the_attestor_fee_after_the_pool_fee)
+{
+    Fixture f;
+    MintShape s;
+    s.cents = 100000;
+    s.termClass = 0;
+    s.lockHeight = f.lockHeight;
+    s.claimHeight = f.claimHeight;
+    s.refHeight = 250;
+    s.owner = f.owner.GetPubKey();
+    s.collateralZat = 251 * COIN;
+    s.payee = f.payeeKey.GetPubKey().GetID();
+    s.feeZat = FeeZat(s.collateralZat, f.params.feeMin, f.params.feeBps);
+    const CKey bondKey = NewKey();
+    s.attestPayee = bondKey.GetPubKey().GetID();
+    s.attestFeeZat = AttestFeeZat(s.feeZat, f.params.attestFeeBps);
+    int feeVout = -1, attestFeeVout = -1;
+    std::vector<CTxOut> vout = MintOutputs(s, feeVout, &attestFeeVout);
+    BOOST_REQUIRE_EQUAL(vout.size(), 5u);
+    BOOST_CHECK_EQUAL(feeVout, 3);
+    BOOST_CHECK_EQUAL(attestFeeVout, 4);   // vout[4] with both fees (§3.5)
+    BOOST_CHECK(vout[4].scriptPubKey == GetScriptForDestination(bondKey.GetPubKey().GetID()));
+    BOOST_CHECK_EQUAL(vout[4].nValue, s.attestFeeZat);
+    CMutableTransaction mtx = Shell(290);
+    mtx.vout = vout;
+    std::optional<FoundPayload> fp = PayloadOf(mtx);
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL((int)fp->payload.feeVout, 3);
+    BOOST_CHECK_EQUAL((int)fp->payload.attestFeeVout, 4);
+    // FEE-0 with an attestor fee: vout[3].
+    s.payee = std::nullopt;
+    vout = MintOutputs(s, feeVout, &attestFeeVout);
+    BOOST_REQUIRE_EQUAL(vout.size(), 4u);
+    BOOST_CHECK_EQUAL(feeVout, -1);
+    BOOST_CHECK_EQUAL(attestFeeVout, 3);
+    mtx.vout = vout;
+    fp = PayloadOf(mtx);
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL((int)fp->payload.feeVout, (int)FEE_VOUT_NONE);
+    BOOST_CHECK_EQUAL((int)fp->payload.attestFeeVout, 3);
+    // AFEE-0: no attestor payee => the v2 shape, attestFeeVout = 0xFF.
+    s.attestPayee = std::nullopt;
+    vout = MintOutputs(s, feeVout, &attestFeeVout);
+    BOOST_CHECK_EQUAL(vout.size(), 3u);
+    BOOST_CHECK_EQUAL(attestFeeVout, -1);
+    mtx.vout = vout;
+    BOOST_CHECK_EQUAL((int)PayloadOf(mtx)->payload.attestFeeVout, (int)FEE_VOUT_NONE);
+}
+
+// Rule: RED-3 RED-5 AFEE-1
+BOOST_AUTO_TEST_CASE(v3_claim_layout_attestor_fee_and_residual)
+{
+    Fixture f;
+    const CKey bondKey = NewKey();
+    std::vector<YedCoin> yed = { Coin(uint256S("01"), 0, 100000, f.yedKey), Coin(uint256S("02"), 0, 100, f.yedKey) };
+    // Transparent destination: collateral, fee, change, attestor fee, residual, payload.
+    VaultSpendShape s = f.Shape(false, true, true, true, yed, 100);
+    s.attestPayee = bondKey.GetPubKey().GetID();
+    s.attestFeeZat = AttestFeeZat(s.feeZat, f.params.attestFeeBps);
+    s.residualZat = 2 * COIN;
+    s.ownerPubKey = f.owner.GetPubKey();
+    s.carrierValue = CARRIER_VALUE;
+    VaultSpendPlan plan = PlanVaultSpend(s);
+    BOOST_REQUIRE_EQUAL(plan.vout.size(), 6u);
+    BOOST_CHECK_EQUAL(plan.feeVout, 1);
+    BOOST_CHECK_EQUAL(plan.changeVout, 2);
+    BOOST_CHECK_EQUAL(plan.attestFeeVout, 3);
+    BOOST_CHECK_EQUAL(plan.residualVout, 4);
+    BOOST_CHECK(plan.vout[3].scriptPubKey == GetScriptForDestination(bondKey.GetPubKey().GetID()));
+    BOOST_CHECK_EQUAL(plan.vout[3].nValue, s.attestFeeZat);
+    BOOST_CHECK(plan.vout[4].scriptPubKey == GetScriptForDestination(f.owner.GetPubKey().GetID()));
+    BOOST_CHECK_EQUAL(plan.vout[4].nValue, 2 * COIN);
+    BOOST_CHECK_EQUAL(plan.collateralOut, f.vaultValue + CARRIER_VALUE + 2 * TOKEN_VALUE - DEFAULT_YELLOWBACK_FEE - s.feeZat - s.attestFeeZat - 2 * COIN - TOKEN_VALUE);
+    CMutableTransaction mtx = Shell(290);
+    mtx.vout = plan.vout;
+    std::optional<FoundPayload> fp = PayloadOf(mtx);
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL(fp->opReturnIndex, 5u);
+    BOOST_CHECK_EQUAL((int)fp->payload.feeVout, 1);
+    BOOST_CHECK_EQUAL((int)fp->payload.attestFeeVout, 3);
+    BOOST_REQUIRE_EQUAL(fp->payload.assignments.size(), 1u);
+    BOOST_CHECK_EQUAL((int)fp->payload.assignments[0].vout, 2);
+    // FEE-0 and no change: the attestor fee may not sit at vout[1] (AFEE-1), so the payload takes it.
+    VaultSpendShape s0 = f.Shape(false, true, true, false, { yed[0] }, 0);
+    s0.attestPayee = s.attestPayee;
+    s0.attestFeeZat = s.attestFeeZat;
+    s0.residualZat = 2 * COIN;
+    s0.ownerPubKey = f.owner.GetPubKey();
+    s0.carrierValue = CARRIER_VALUE;
+    plan = PlanVaultSpend(s0);
+    BOOST_REQUIRE_EQUAL(plan.vout.size(), 4u);
+    BOOST_CHECK_EQUAL(plan.attestFeeVout, 2);
+    BOOST_CHECK_EQUAL(plan.residualVout, 3);
+    mtx.vout = plan.vout;
+    fp = PayloadOf(mtx);
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL(fp->opReturnIndex, 1u);
+    BOOST_CHECK_EQUAL((int)fp->payload.attestFeeVout, 2);
+    // Sapling destination (S11): change, payload, fee, attestor fee, residual — all transparent.
+    VaultSpendShape sz = f.Shape(false, true, false, true, yed, 100);
+    sz.attestPayee = s.attestPayee;
+    sz.attestFeeZat = s.attestFeeZat;
+    sz.residualZat = 2 * COIN;
+    sz.ownerPubKey = f.owner.GetPubKey();
+    sz.carrierValue = CARRIER_VALUE;
+    plan = PlanVaultSpend(sz);
+    BOOST_REQUIRE_EQUAL(plan.vout.size(), 5u);
+    BOOST_CHECK_EQUAL(plan.changeVout, 0);
+    BOOST_CHECK_EQUAL(plan.feeVout, 2);
+    BOOST_CHECK_EQUAL(plan.attestFeeVout, 3);
+    BOOST_CHECK_EQUAL(plan.residualVout, 4);
+    mtx.vout = plan.vout;
+    fp = PayloadOf(mtx);
+    BOOST_REQUIRE(fp.has_value());
+    BOOST_CHECK_EQUAL(fp->opReturnIndex, 1u);
+    BOOST_CHECK_EQUAL((int)fp->payload.feeVout, 2);
+    BOOST_CHECK_EQUAL((int)fp->payload.attestFeeVout, 3);
+    // The v2 shape is untouched when nothing v3 is set (AFEE-0, no residual).
+    plan = PlanVaultSpend(f.Shape(false, true, true, true, yed, 100));
+    BOOST_CHECK_EQUAL(plan.vout.size(), 4u);
+    BOOST_CHECK_EQUAL(plan.attestFeeVout, -1);
+    BOOST_CHECK_EQUAL(plan.residualVout, -1);
+    mtx.vout = plan.vout;
+    BOOST_CHECK_EQUAL((int)PayloadOf(mtx)->payload.attestFeeVout, (int)FEE_VOUT_NONE);
+}
+
+// Rule: BUNDLE-1
+BOOST_AUTO_TEST_CASE(v3_carrier_scriptsig_verifies_under_standard_flags)
+{
+    Armed a;
+    CBasicKeyStore ks;
+    a.AddKeys(ks);
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const std::vector<unsigned char> bundle = a.BundleFor(std::vector<unsigned char>(), a.x);
+    const CarrierRecord c = a.Carrier(bundle, std::vector<unsigned char>(), uint256S("ca"));
+    const CTxOut funding = CarrierOutput(c.pk, c.bundle, CARRIER_VALUE);
+    BOOST_CHECK(funding.scriptPubKey.IsPayToScriptHash());
+    CMutableTransaction mtx = Shell((uint32_t)(a.R + REF_WINDOW));
+    mtx.vin.push_back(CTxIn(c.outpoint));
+    mtx.vout.push_back(CTxOut(CARRIER_VALUE - 1000, GetScriptForDestination(NewKey().GetPubKey().GetID())));
+    SignCarrierInput(mtx, 0, c, ks, branchId);
+    std::optional<CarrierSpend> spend = ParseCarrierScriptSig(mtx.vin[0].scriptSig);
+    BOOST_REQUIRE(spend.has_value());
+    BOOST_CHECK(spend->bundle == bundle);
+    BOOST_CHECK(spend->pk == c.pk);
+    ScriptError err;
+    BOOST_CHECK_MESSAGE(Verify(mtx, 0, funding.scriptPubKey, CARRIER_VALUE, branchId, &err), ScriptErrorString(err));
+    BOOST_CHECK(Verify(mtx, 0, funding.scriptPubKey, CARRIER_VALUE, branchId, &err, CONSENSUS_FLAGS));
+    // The wrong amount or branch id fails (ZIP-243 binds both).
+    BOOST_CHECK(!Verify(mtx, 0, funding.scriptPubKey, CARRIER_VALUE + 1, branchId));
+    BOOST_CHECK(!Verify(mtx, 0, funding.scriptPubKey, CARRIER_VALUE, branchId + 1));
+    // A substituted bundle push fails the hash check (R2): the redeem script commits to SHA256(bundle).
+    Bundle other;
+    other.atts.push_back(a.Att(0, a.x + 1));
+    mtx.vin[0].scriptSig = CarrierScriptSig(EncodeBundle(other), spend->sig, spend->carrierScript);
+    BOOST_CHECK(!Verify(mtx, 0, funding.scriptPubKey, CARRIER_VALUE, branchId, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EQUALVERIFY);
+    // ExtractBundle sees the same bytes the script commits to.
+    SignCarrierInput(mtx, 0, c, ks, branchId);
+    auto ex = ExtractBundle(CTransaction(mtx), BundleCarrier::SCRIPTSIG, false, std::vector<unsigned char>());
+    BOOST_REQUIRE(ex.has_value());
+    BOOST_CHECK(ex->first == bundle);
+}
+
+// Rule: REG-A1
+BOOST_AUTO_TEST_CASE(v3_bond_input_signs_under_cltv)
+{
+    CBasicKeyStore ks;
+    const CKey bondKey = NewKey();
+    ks.AddKey(bondKey);
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const uint32_t locktime = 500;
+    const CScript bond = BondScript(bondKey.GetPubKey(), locktime);
+    const CScript spk = P2SHScript(bond);
+    CMutableTransaction mtx = Shell(600);
+    mtx.nLockTime = locktime;
+    mtx.vin.push_back(CTxIn(COutPoint(uint256S("b0"), 0), CScript(), 0xFFFFFFFE));
+    mtx.vout.push_back(CTxOut(10 * COIN - 1000, GetScriptForDestination(NewKey().GetPubKey().GetID())));
+    SignBondInput(mtx, 0, bondKey.GetPubKey(), locktime, 10 * COIN, ks, branchId);
+    ScriptError err;
+    BOOST_CHECK_MESSAGE(Verify(mtx, 0, spk, 10 * COIN, branchId, &err), ScriptErrorString(err));
+    // Before the locktime CLTV fails; with the wrong value the signature fails.
+    mtx.nLockTime = locktime - 1;
+    BOOST_CHECK(!Verify(mtx, 0, spk, 10 * COIN, branchId, &err));
+    BOOST_CHECK_EQUAL(err, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
+    mtx.nLockTime = locktime;
+    BOOST_CHECK(!Verify(mtx, 0, spk, 10 * COIN + 1, branchId));
+    // The bond key is not a solvable script: the wallet never selects the bond as plain YEC (R6).
+    BOOST_CHECK_EQUAL((int)::IsMine(ks, spk), (int)ISMINE_NO);
+}
+
+// Rule: MINT-5 MINT-9 MINT-10 AFEE-1 PRICE-2
+BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
+{
+    Armed a;
+    CBasicKeyStore ks;
+    a.AddKeys(ks);
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const std::vector<unsigned char> none;
+    const std::vector<uint16_t> selected = Selected(a.view, a.P, a.R, none);
+    BOOST_REQUIRE_EQUAL(selected.size(), 3u);   // M_SELECT + K_SLACK = 3 of 3 seated
+
+    // The wallet's shape with the attestors at $1.90 against the pools' $2.00: pMint = aMint (source "a").
+    const MicroUsd aPrice = 1900000;
+    std::vector<unsigned char> bundle = a.BundleFor(none, aPrice);
+    std::vector<uint16_t> sel;
+    BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, none, &sel);
+    BOOST_REQUIRE_MESSAGE(v.ok, v.reason);
+    BOOST_REQUIRE(v.aMint.has_value());
+    BOOST_CHECK_EQUAL(v.aMint.value(), aPrice);
+    CAmount collateral = 0;
+    CMutableTransaction mtx = ArmedMint(a, 100000, bundle, ks, branchId, v.aMint, true, &collateral);
+    TxOutcome o = a.Judge(mtx);
+    BOOST_CHECK_EQUAL(o.log.verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(o.log.bundleSeqs.size(), 3u);
+    BOOST_CHECK_EQUAL(o.log.aMint, aPrice);
+    BOOST_CHECK_EQUAL(o.log.attestFeeZat, AttestFeeZat(FeeZat(collateral, a.P.feeMin, a.P.feeBps), a.P.attestFeeBps));
+    BOOST_CHECK(o.log.hasAttestPayee);
+    // The same collateral sized at xMint alone would be short under the combined pMint (MINT-5).
+    {
+        MemoryStateView copy = a.view;
+        State st(copy);
+        std::optional<TxLogRecord> dry = DryRun(copy, a.P, CTransaction(mtx), a.R + 3);
+        BOOST_REQUIRE(dry.has_value());
+        BOOST_CHECK_EQUAL(dry->verdict, verdict::OK);
+    }
+    CMutableTransaction shortMint = ArmedMint(a, 100000, bundle, ks, branchId, std::nullopt /* sized at x */);
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(shortMint), a.R + 3)->verdict, verdict::BAD_MINT_COLLATERAL);
+
+    // mint9-*: a bundle carrying a seq outside selected(R, "") (the state has three; sign as none of them differently: drop one, add a stale one).
+    Bundle bad;
+    bad.atts.push_back(a.Att(selected[0], aPrice));
+    bad.atts.push_back(a.Att(selected[1], aPrice, a.R - a.P.attestMaxAge));   // stale: citedHeight <= R - ATTEST_MAX_AGE
+    CMutableTransaction stale = ArmedMint(a, 100000, EncodeBundle(bad), ks, branchId, aPrice);
+    std::optional<TxLogRecord> dry = DryRun(a.view, a.P, CTransaction(stale), a.R + 3);
+    BOOST_REQUIRE(dry.has_value());
+    BOOST_CHECK_EQUAL(dry->verdict, std::string(verdict::MINT9_BUNDLE_PREFIX) + "stale");
+    // mint9-no-bundle: no carrier input at all while armed.
+    CMutableTransaction noCarrier = mtx;
+    noCarrier.vin.pop_back();
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(noCarrier), a.R + 3)->verdict, verdict::MINT9_NO_BUNDLE);
+    // mint10-diverged: attestors at 2x the pools.
+    const MicroUsd far = 4000000;
+    CMutableTransaction diverged = ArmedMint(a, 100000, a.BundleFor(none, far), ks, branchId, far);
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(diverged), a.R + 3)->verdict, verdict::MINT10_DIVERGED);
+    // afee1-fee: the attestor fee output missing while A is non-empty.
+    CMutableTransaction noAfee = ArmedMint(a, 100000, bundle, ks, branchId, v.aMint, false);
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(noAfee), a.R + 3)->verdict, verdict::AFEE1_FEE);
+    // The wallet's preflight arithmetic: BundleVerdict::C is A, and AFEE-W picks from it.
+    std::vector<uint16_t> A;
+    for (const Attestation& att : v.C) A.push_back(att.seq);
+    std::optional<uint16_t> payee = DefaultAttestPayee(a.view, a.P, a.R, none, A, AttestPolicy());
+    BOOST_REQUIRE(payee.has_value());
+    BOOST_CHECK(std::find(A.begin(), A.end(), payee.value()) != A.end());
+    AttestPolicy pref;
+    pref.preferred = A.back();
+    BOOST_CHECK_EQUAL(DefaultAttestPayee(a.view, a.P, a.R, none, A, pref).value(), A.back());
+}
+
+// Rule: RED-1 RED-3 RED-4 RED-5 AFEE-1 MP-1
+BOOST_AUTO_TEST_CASE(v3_armed_claim_pays_the_residual_under_the_emergency_clause)
+{
+    // Pools at $2.20 (not underwater at 110 %), attestors at $2.00: pClaim = 2.20 (clause (a) false),
+    // pEmerg = 2.00 and a persisted notice open clause (b) (R1: margin 100 %, a residual is due).
+    Armed a(3, 2200000);
+    CBasicKeyStore ks;
+    a.AddKeys(ks);
+    const CKey owner = NewKey();
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const uint256 mintTxid = uint256S("aa");
+    const COutPoint vaultOut(mintTxid, 0);
+    const std::vector<unsigned char> selector = OutPointSelector(vaultOut);
+    State st(a.view);
+    VaultRecord vault;
+    const CPubKey ownerPk = owner.GetPubKey();
+    vault.ownerPubKey.assign(ownerPk.begin(), ownerPk.end());
+    vault.termClass = 0;
+    vault.lockHeight = a.R - 30;
+    vault.claimHeight = a.R - 6;
+    vault.collateralZat = 50 * COIN;
+    vault.mintedCents = 10000;
+    vault.mintHeight = a.R - 80;
+    vault.refHeight = a.R - 82;
+    vault.status = (uint8_t)VaultStatus::ACTIVE;
+    st.Put(keys::Vault(vaultOut), vault);
+    YedCoin coin = Coin(uint256S("01"), 0, 10000, a.claimantKey);
+    st.Put(keys::Token(coin.outpoint), coin.token);
+    NoticeRecord notice;
+    notice.height = a.R - 3;
+    notice.refHeight = a.R - a.P.emergencyPersist;
+    notice.pEmerg = 2000000;
+    st.Put(keys::Notice(vaultOut), notice);
+
+    const MicroUsd aPrice = 2000000;
+    const std::vector<unsigned char> bundle = a.BundleFor(selector, aPrice);
+    std::vector<uint16_t> sel;
+    BundleVerdict v = VerifyBundleBytes(a.view, a.P, bundle, a.R, selector, &sel);
+    BOOST_REQUIRE_MESSAGE(v.ok, v.reason);
+    BOOST_CHECK(!IsUnderwater(vault.collateralZat, std::max(a.x, aPrice), vault.mintedCents, a.P.claimThresholdBps));   // (a) false
+    BOOST_CHECK(IsUnderwater(vault.collateralZat, std::min(a.x, aPrice), vault.mintedCents, a.P.emergencyRatioBps));    // (b) true
+    const MicroUsd pClaim = std::max(a.x, aPrice);
+    const CAmount residual = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, 10000, pClaim));
+    BOOST_REQUIRE(residual >= a.P.residualMinZat);
+
+    std::vector<uint16_t> A;
+    for (const Attestation& att : v.C) A.push_back(att.seq);
+    const uint16_t attestPayee = DefaultAttestPayee(a.view, a.P, a.R, selector, A, AttestPolicy()).value();
+    VaultSpendShape s;
+    s.vaultOut = vaultOut;
+    s.vaultScript = VaultScript((uint32_t)vault.lockHeight, ownerPk, (uint32_t)vault.claimHeight);
+    s.vaultValue = vault.collateralZat;
+    s.lockHeight = vault.lockHeight;
+    s.claimHeight = vault.claimHeight;
+    s.ownerPath = false;
+    s.withPayload = true;
+    s.refHeight = a.R;
+    s.payee = DefaultPayee(a.view, a.P, a.R, selector, PayeePolicy::Defaults(a.P));
+    BOOST_REQUIRE(s.payee.has_value());
+    s.feeZat = FeeZat(vault.collateralZat, a.P.feeMin, a.P.feeBps);
+    s.yedInputs = { coin };
+    s.collateralScript = GetScriptForDestination(NewKey().GetPubKey().GetID());
+    s.networkFee = DEFAULT_YELLOWBACK_FEE;
+    s.attestPayee = a.bond[attestPayee].GetPubKey().GetID();
+    s.attestFeeZat = AttestFeeZat(s.feeZat, a.P.attestFeeBps);
+    s.residualZat = residual;
+    s.ownerPubKey = ownerPk;
+    s.carrierValue = CARRIER_VALUE;
+    auto build = [&](const VaultSpendShape& shape) {
+        VaultSpendPlan plan = PlanVaultSpend(shape);
+        BuiltTx b;
+        b.kind = BuiltKind::CLAIM;
+        b.tx = Shell((uint32_t)(a.R + REF_WINDOW));
+        b.tx.nLockTime = plan.nLockTime;
+        b.tx.vin = plan.vin;
+        b.tx.vout = plan.vout;
+        b.vaultScript = shape.vaultScript;
+        b.vaultValue = shape.vaultValue;
+        b.ownerPubKey = ownerPk;
+        b.changeVout = plan.changeVout;
+        b.yedPrevs.push_back(std::make_pair(coin.token.scriptPubKey, coin.token.nValue));
+        b.carrier = a.Carrier(bundle, selector, uint256S("cb"));
+        b.tx.vin.push_back(CTxIn(b.carrier->outpoint));
+        b.carrierVin = (int)b.tx.vin.size() - 1;
+        SignVaultSpend(b, ks, branchId, false);
+        return b;
+    };
+    BuiltTx b = build(s);
+    BOOST_CHECK_EQUAL(b.carrierVin, 2);   // never vin[0] (§3.5)
+    std::optional<TxLogRecord> dry = DryRun(a.view, a.P, CTransaction(b.tx), a.R + 3);
+    BOOST_REQUIRE(dry.has_value());
+    BOOST_CHECK_EQUAL(dry->verdict, verdict::OK);
+    BOOST_CHECK_EQUAL(dry->claimPath, "b");
+    BOOST_CHECK_EQUAL(dry->residualZat, residual);
+    BOOST_CHECK_EQUAL(dry->attestFeeZat, s.attestFeeZat);
+    BOOST_CHECK_EQUAL(dry->aClaim, aPrice);
+    // The carrier input verifies under the standard flags with its funding output.
+    ScriptError err;
+    BOOST_CHECK_MESSAGE(Verify(b.tx, 2, CarrierOutput(a.carrierKey.GetPubKey(), bundle, CARRIER_VALUE).scriptPubKey, CARRIER_VALUE, branchId, &err), ScriptErrorString(err));
+    // red5-residual: the same claim without the residual output.
+    VaultSpendShape noResidual = s;
+    noResidual.residualZat = 0;
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(build(noResidual).tx), a.R + 3)->verdict, verdict::RED5_RESIDUAL);
+    // afee1-fee: no attestor fee output.
+    VaultSpendShape noAfee = s;
+    noAfee.attestPayee = std::nullopt;
+    BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(build(noAfee).tx), a.R + 3)->verdict, verdict::AFEE1_FEE);
+    // red1-bundle-*: a bundle built for the empty selector is not this vault's selection (or is short of it).
+    VaultSpendShape wrongSel = s;
+    BuiltTx w = build(wrongSel);
+    w.carrier->bundle = a.BundleFor(std::vector<unsigned char>(), aPrice);
+    w.tx.vin[2].scriptSig = CScript();
+    // Re-sign with the mis-selected bundle: BUNDLE-1 reads the bytes the carrier commits to.
+    w.carrier->selector = selector;
+    SignCarrierInput(w.tx, 2, w.carrier.value(), ks, branchId);
+    std::optional<TxLogRecord> wrong = DryRun(a.view, a.P, CTransaction(w.tx), a.R + 3);
+    BOOST_REQUIRE(wrong.has_value());
+    const std::string prefix = verdict::RED1_BUNDLE_PREFIX;
+    BOOST_CHECK_MESSAGE(wrong->verdict == verdict::OK || wrong->verdict.compare(0, prefix.size(), prefix) == 0, wrong->verdict);
+    // Without a persisted notice clause (b) is false: claim-not-underwater.
+    {
+        MemoryStateView copy = a.view;
+        State st2(copy);
+        st2.EraseKey(keys::Notice(vaultOut));
+        BOOST_CHECK_EQUAL(DryRun(copy, a.P, CTransaction(b.tx), a.R + 3)->verdict, verdict::VAULT_CLAIM_NOT_UNDERWATER);
+    }
+}
+
+// Rule: TPL-2 NOT-1
+BOOST_AUTO_TEST_CASE(v3_carrier_templates_are_standard)
+{
+    // The built MINT (with carrier and attestor fee), CLAIM_NOTICE and EQUIVOCATION through
+    // IsStandardTx and AreInputsStandard with every prevout in a coins view (yellowback_script_tests.cpp's setup).
+    RegtestActivateSapling();
+    Armed a;
+    CBasicKeyStore ks;
+    a.AddKeys(ks);
+    LOCK(cs_main);
+    const uint32_t branchId = NetworkUpgradeInfo[Consensus::UPGRADE_SAPLING].nBranchId;
+    const std::vector<unsigned char> none;
+    const std::vector<unsigned char> bundle = a.BundleFor(none, a.x);
+    const CScript userP2PKH = GetScriptForDestination(a.claimantKey.GetPubKey().GetID());
+    CMutableTransaction fund;
+    fund.fOverwintered = true;
+    fund.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+    fund.nVersion = SAPLING_TX_VERSION;
+    fund.vout.push_back(CTxOut(10000 * COIN, userP2PKH));                                 // 0: YEC
+    fund.vout.push_back(CarrierOutput(a.carrierKey.GetPubKey(), bundle, CARRIER_VALUE));  // 1: a carrier
+    fund.vout.push_back(CarrierOutput(a.carrierKey.GetPubKey(), bundle, CARRIER_VALUE));  // 2: another
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    view.ModifyCoins(fund.GetHash())->FromTx(fund, 1);
+    const uint256 fundHash = fund.GetHash();
+    auto checkStandard = [&](const CMutableTransaction& mtx, const std::string& what) {
+        std::string reason;
+        BOOST_CHECK_MESSAGE(IsStandardTx(CTransaction(mtx), reason, ::Params(), 1), what + ": " + reason);
+        BOOST_CHECK_MESSAGE(AreInputsStandard(CTransaction(mtx), view, branchId), what + ": inputs");
+    };
+    CarrierRecord c1 = a.Carrier(bundle, none, fundHash);
+    c1.outpoint = COutPoint(fundHash, 1);
+    // MINT: YEC input, carrier last, five outputs plus change.
+    CMutableTransaction mint = ArmedMint(a, 100000, bundle, ks, branchId, a.x);
+    mint.vin[0] = CTxIn(COutPoint(fundHash, 0));
+    mint.vin[1] = CTxIn(c1.outpoint);
+    BOOST_CHECK(SignSignature(ks, userP2PKH, mint, 0, 10000 * COIN, SIGHASH_ALL, branchId));
+    SignCarrierInput(mint, 1, c1, ks, branchId);
+    checkStandard(mint, "MINT");
+    // CLAIM_NOTICE: the carrier alone funds it (CARRIER_VALUE covers the network fee).
+    CMutableTransaction notice = Shell((uint32_t)(a.R + REF_WINDOW));
+    notice.vin.push_back(CTxIn(c1.outpoint));
+    notice.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::ClaimNotice(COutPoint(uint256S("aa"), 0), (uint32_t)a.R)))));
+    notice.vout.push_back(CTxOut(CARRIER_VALUE - 1000, userP2PKH));
+    SignCarrierInput(notice, 0, c1, ks, branchId);
+    checkStandard(notice, "CLAIM_NOTICE");
+    BOOST_CHECK(FindPayload(CTransaction(notice)).has_value());
+    // EQUIVOCATION: a carrier whose bundle is two attestations of one seq at two prices.
+    Bundle two;
+    two.atts = { a.Att(0, a.x), a.Att(0, a.x + 1000) };
+    CarrierRecord c2 = a.Carrier(EncodeBundle(two), none, fundHash);
+    c2.outpoint = COutPoint(fundHash, 2);
+    CMutableTransaction fund2 = fund;
+    fund2.vout[2] = CarrierOutput(a.carrierKey.GetPubKey(), c2.bundle, CARRIER_VALUE);
+    view.ModifyCoins(fund.GetHash())->FromTx(fund2, 1);
+    CMutableTransaction eqv = Shell((uint32_t)(a.R + REF_WINDOW));
+    eqv.vin.push_back(CTxIn(c2.outpoint));
+    eqv.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Equivocation()))));
+    eqv.vout.push_back(CTxOut(CARRIER_VALUE - 1000, userP2PKH));
+    SignCarrierInput(eqv, 0, c2, ks, branchId);
+    checkStandard(eqv, "EQUIVOCATION");
+    std::optional<TxLogRecord> dry = DryRun(a.view, a.P, CTransaction(eqv), a.R + 3);
+    BOOST_REQUIRE(dry.has_value());
+    BOOST_CHECK(dry->Type() == TxLogType::EQUIVOCATION);
+    // The sweep: two carriers into one output, each signed with its own recorded bundle.
+    CMutableTransaction sweep = Shell((uint32_t)(a.R + REF_WINDOW));
+    sweep.vin.push_back(CTxIn(c1.outpoint));
+    sweep.vin.push_back(CTxIn(c2.outpoint));
+    sweep.vout.push_back(CTxOut(2 * CARRIER_VALUE - 1000, userP2PKH));
+    SignCarrierInput(sweep, 0, c1, ks, branchId);
+    SignCarrierInput(sweep, 1, c2, ks, branchId);
+    checkStandard(sweep, "SWEEP_CARRIERS");
+    RegtestDeactivateSapling();
 }
 
 // Rule: FEE-W
