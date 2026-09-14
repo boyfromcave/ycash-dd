@@ -230,7 +230,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
 
 # Rule: MINT-5 MINT-9 AFEE-1 AFEE-W PRICE-2 W7
         print('an armed mint (wait=True): two transactions one block apart, both fees, bundleSeqs, pMint = aMint')
-        est = user.yed_estimatecollateral(10700, 48)
+        est = user.yed_estimatecollateral(10700, 48, usd_to_micro(50))     # the override: the pool holds only the last R's selection
         m1 = wallet_mint(self, user, 10700, 48, prices=49)
         assert_equal(m1['pending'], False)
         assert_equal(len(m1['bundleSeqs']), 3)                                  # M_SELECT + K_SLACK all signed
@@ -437,9 +437,12 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal((info1['verdict'], info1['path']), ('ok', 'claim'))
 
         print('  V2: not claimable under the combined pClaim with attestors at $11, but under EMERGENCY_RATIO at pEmerg')
+        # canNotice is judged with the bundle this node would build (EstimateClaim): with an empty
+        # pool the cross-section alone reads clause (a) at $10.20, so feed the user's pool at $11 first
+        feed_pool(self, user, user.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11)
         pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
         assert_equal((pos[v2['txid']]['noticed'], pos[v2['txid']]['noticeHeight'], pos[v2['txid']]['emergencyOpenAt']), (False, None, None))
-        assert_equal(pos[v2['txid']]['canNotice'], True)
+        assert_equal((pos[v2['txid']]['canNotice'], pos[v2['txid']]['canClaim']), (True, False))
         assert_rpc_error('claim-not-underwater', claimant.yed_claim, v2['txid'], '',
                          offline_bundle_hex(self, claimant, claimant.yed_getinfo()['height'], outpoint_selector(v2['txid'], 0), 11))
         notice = wallet_notice(self, claimant, v2['txid'], prices=11)

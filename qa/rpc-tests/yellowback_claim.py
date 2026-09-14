@@ -133,7 +133,7 @@ class YellowbackClaimTest(ArmedModeMixin, YellowbackTestFramework):
         for name in ('U', 'V', 'W', 'T'):
             mints[name] = self.mint(user, 10000, 48)
         r = user.yed_getinfo()['height'] - REF_LAG
-        z_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
+        z_hex, _ = build_mint_tx(user, 10000, 48, r, self.estimate(user, 10000, 48)['requiredZat'] - 1000)
         z_txid = user.decoderawtransaction(z_hex)['txid']
         self.sync_all()
         self.mine(POOLS[1])

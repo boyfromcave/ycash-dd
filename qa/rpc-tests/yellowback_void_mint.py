@@ -136,7 +136,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         return self.nodes[0].yed_getinfo()['height'] - REF_LAG
 
     def collateral(self, cents=10000, lock=48):
-        return self.nodes[0].yed_estimatecollateral(cents, lock)['requiredZat']
+        return self.estimate(self.nodes[0], cents, lock)['requiredZat']
 
     def run_test(self):
         nodes = self.nodes
