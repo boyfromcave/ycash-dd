@@ -428,6 +428,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
     strUsage += HelpMessageOpt("-yellowbackpayeeaccuracywindow=<n>", _("Wallet payee policy: accuracy window in blocks (default: the network's ACCURACY_WINDOW)"));
     strUsage += HelpMessageOpt("-yellowbackpayeetiltbps=<bps>", _("Wallet payee policy: accuracy weighting tilt in bps (default: the network's PAYEE_TILT_BPS)"));
+    strUsage += HelpMessageOpt("-yellowbackpreferredattestor=<seq>", _("Attestor seq the wallet pays attestation fees to when it is in the bundle (AFEE-W)"));
     if (showDebug) {
         strUsage += HelpMessageOpt("-yellowbackstartheight=<h>", "Yellowback start height (regtest only; required with -yellowback)");
         strUsage += HelpMessageOpt("-yellowbacksigmaref=<bps>", "Yellowback SIGMA_REF_BPS override, 0 = multiplier fixed at 1 (regtest only)");
@@ -435,7 +436,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbackenforceuntil=<h>", "Yellowback enforcement sunset height, 0 = none (regtest only)");
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
-        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], template or novalve (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], template, novalve or schema (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -1177,6 +1178,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             if (GetArg("-yellowbackquotemaxage", 1800) < 0) return InitError(_("-yellowbackquotemaxage must be >= 0."));
             if (GetArg("-yellowbackpayeepenaltyblocks", 0) < 0 || GetArg("-yellowbackpayeeaccuracywindow", 0) < 0 || GetArg("-yellowbackpayeetiltbps", 0) < 0) {
                 return InitError(_("The -yellowbackpayee* overrides must be >= 0."));
+            }
+            if (mapArgs.count("-yellowbackpreferredattestor") && (GetArg("-yellowbackpreferredattestor", -1) < 0 || GetArg("-yellowbackpreferredattestor", 0) > 0xFFFF)) {
+                return InitError(_("-yellowbackpreferredattestor must be a seq between 0 and 65535."));
             }
         }
         yellowback::g_yellowbackFee = GetArg("-yellowbackfee", yellowback::DEFAULT_YELLOWBACK_FEE);
@@ -1964,6 +1968,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) pp.preferred = *keyID;
             }
             yellowback::g_yellowback->SetPayeePolicy(pp);
+            if (mapArgs.count("-yellowbackpreferredattestor")) {          // AFEE-W (validated in step 3)
+                yellowback::AttestPolicy ap;
+                ap.preferred = (uint16_t)GetArg("-yellowbackpreferredattestor", 0);
+                yellowback::g_yellowback->SetAttestPolicy(ap);
+            }
             if (mapArgs.count("-yellowbacktestfault")) {
                 auto faultErr = yellowback::g_yellowback->SetTestFault(mapArgs["-yellowbacktestfault"]);
                 if (faultErr.has_value()) return InitError(faultErr.value());

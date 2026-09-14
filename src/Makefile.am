@@ -196,6 +196,7 @@ BITCOIN_CORE_H = \
   rpc/client.h \
   rpc/protocol.h \
   rpc/server.h \
+  rpc/yellowbackrpc.h \
   rpc/register.h \
   scheduler.h \
   script/atomicswap.h \

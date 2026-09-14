@@ -4,7 +4,7 @@
 
 /**
  * Yellowback node-context RPCs (plan §4.5; the contract is doc/yellowback-rpc.md,
- * rpcversion 2, whose fenced json blocks define every return shape and error
+ * rpcversion 3, whose fenced json blocks define every return shape and error
  * identifier). They work without a wallet and are gated by
  * -experimentalfeatures -yellowback. The index is synchronous with chainActive
  * (V2), so every reply is for the tip.
@@ -30,6 +30,7 @@
 #include "primitives/transaction.h"
 #include "rpc/protocol.h"
 #include "rpc/server.h"
+#include "rpc/yellowbackrpc.h"
 #include "script/standard.h"
 #include "txmempool.h"
 #include "utilstrencodings.h"
@@ -38,6 +39,8 @@
 #include "wallet/wallet.h"
 #endif
 #include "yellowback/address.h"
+#include "yellowback/attest.h"
+#include "yellowback/bundle.h"
 #include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
@@ -54,7 +57,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 2;
+static const int YELLOWBACK_RPC_VERSION = 3;
 
 namespace {
 
@@ -126,9 +129,84 @@ std::string TypeLower(TxLogType t)
     case TxLogType::MINT: return "mint";
     case TxLogType::TRANSFER: return "transfer";
     case TxLogType::REDEEM: return "redeem";
+    case TxLogType::ATTESTOR_REGISTER: return "register";
+    case TxLogType::CLAIM_NOTICE: return "notice";
+    case TxLogType::EQUIVOCATION: return "equivocation";
+    case TxLogType::ATTESTOR_REVIVE: return "revive";
     case TxLogType::NONE: break;
     }
     return "none";
+}
+
+/** A bond weight as the contract renders it: a decimal string (it exceeds 2^53 on mainnet, R10). */
+std::string DecimalString(arith_uint256 v)
+{
+    if (v == 0) return "0";
+    std::string out;
+    const arith_uint256 ten(10);
+    while (v != 0) {
+        const arith_uint256 q = v / ten;
+        const arith_uint256 r = v - q * ten;
+        out.insert(out.begin(), (char)('0' + (int)r.GetLow64()));
+        v = q;
+    }
+    return out;
+}
+
+/** Registration flags as the contract renders them: {tier, pool} (proposal §5.2). */
+UniValue FlagsToJSON(uint8_t flags)
+{
+    UniValue f(UniValue::VOBJ);
+    f.pushKV("tier", (int)(flags & 0x03));
+    f.pushKV("pool", (flags & 0x04) != 0);
+    return f;
+}
+
+/** The P2PKH address of an attestor's bondPubKey: the attestation-fee payee (AFEE-1). */
+UniValue BondKeyAddress(const AttestorRecord& rec)
+{
+    const CPubKey k = rec.BondKey();
+    return k.IsValid() ? UniValue(P2PKHAddress(k.GetID())) : NullUniValue;
+}
+
+/** The P2SH address of the bond output. */
+UniValue BondAddress(const AttestorRecord& rec)
+{
+    const CPubKey k = rec.BondKey();
+    return k.IsValid() ? UniValue(P2SHAddress(BondScript(k, rec.bondLocktime))) : NullUniValue;
+}
+
+/** A selectorHex argument: "" (MINT) or the 36-byte serialised vault outpoint (REDEEM / CLAIM_NOTICE), nothing else (R13). */
+std::vector<unsigned char> SelectorArg(const UniValue& v)
+{
+    if (v.isNull()) return {};
+    if (!v.isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "selectorHex must be a string");
+    const std::string hex = v.get_str();
+    if (hex.empty()) return {};
+    if (!IsHex(hex)) throw JSONRPCError(RPC_INVALID_PARAMETER, "selectorHex must be hex");
+    std::vector<unsigned char> sel = ParseHex(hex);
+    if (sel.size() != 36) throw JSONRPCError(RPC_INVALID_PARAMETER, "selectorHex must be empty (a MINT) or the 36-byte serialised vault outpoint (72 hex characters)");
+    return sel;
+}
+
+UniValue SeqsToJSON(const std::vector<uint16_t>& v)
+{
+    UniValue arr(UniValue::VARR);
+    for (uint16_t s : v) arr.push_back((int)s);
+    return arr;
+}
+
+/** A 74-byte attestation as {seq, priceMicroUsd, citedHeight, sig, hex}. */
+UniValue AttestationToJSON(const Attestation& a)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("seq", (int)a.seq);
+    o.pushKV("priceMicroUsd", (int64_t)a.priceMicroUsd);
+    o.pushKV("citedHeight", (int64_t)a.citedHeight);
+    o.pushKV("sig", HexStr(a.sig.begin(), a.sig.end()));
+    const std::vector<unsigned char> raw = EncodeAttestation(a);
+    o.pushKV("hex", HexStr(raw.begin(), raw.end()));
+    return o;
 }
 
 UniValue PriceOrNull(std::optional<int64_t> v)
@@ -180,6 +258,7 @@ UniValue VaultToJSON(const COutPoint& out, const VaultRecord& v, const Yellowbac
     o.pushKV("voidReason", v.voidReason);
     // K3 / L10: a VOID vault's claim path is unpoliced after claimHeight; an ACTIVE vault's under abandonment.
     if (v.Status() == VaultStatus::VOID || (v.Status() == VaultStatus::ACTIVE && abandoned)) o.pushKV("sweepBefore", (int64_t)v.claimHeight);
+    yellowback::rpc::PushNoticeFields(o, State(index.View()), p, out, v);
     return o;
 }
 
@@ -209,7 +288,68 @@ UniValue OutPointsToJSON(const std::vector<COutPoint>& v)
     return arr;
 }
 
-UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l)
+/**
+ * The v3 half of a yed_gettxinfo row (contract: xMint, xClaim, aMint, aClaim, pMint, pClaim,
+ * bundleSeqs, attestFeeZat, attestPayee, residualZat, claimPath, notice, carrierVin, bundleSource,
+ * seq on a register row). `refHeight` is the transaction's reference height when known (the vault
+ * record for a MINT, the payload of the fetched transaction otherwise); `tx` the transaction when
+ * it could be fetched (carrierVin / bundleSource). cs_yellowback held.
+ */
+void PushTxLogV3(UniValue& o, const TxLogRecord& l, const YellowbackIndex& index, std::optional<int> refHeight, const CTransaction* tx)
+{
+    State st(index.View());
+    std::optional<MicroUsd> xMint, xClaim, pMint, pClaim;
+    bool armed = false;
+    if (refHeight.has_value()) {
+        const yellowback::Params& p = index.ParamsAt(refHeight.value());
+        std::optional<Snapshot> s = SnapshotAt(st, p, refHeight.value());
+        if (s.has_value()) {
+            xMint = s->PMint();
+            xClaim = s->PClaim();
+            armed = p.IsArmed(s->attest.IsArmed());
+        }
+    }
+    pMint = xMint;
+    pClaim = xClaim;
+    if (armed && l.AMint().has_value() && l.AClaim().has_value()) {
+        CombinedPrices c = PriceCombine(xMint, xClaim, l.AMint(), l.AClaim());
+        pMint = c.pMint;
+        pClaim = c.pClaim;
+    }
+    o.pushKV("xMint", PriceOrNull(xMint));
+    o.pushKV("xClaim", PriceOrNull(xClaim));
+    o.pushKV("aMint", PriceOrNull(l.AMint()));
+    o.pushKV("aClaim", PriceOrNull(l.AClaim()));
+    o.pushKV("pMint", PriceOrNull(pMint));
+    o.pushKV("pClaim", PriceOrNull(pClaim));
+    std::vector<uint16_t> seqs = l.bundleSeqs;
+    std::sort(seqs.begin(), seqs.end());
+    o.pushKV("bundleSeqs", SeqsToJSON(seqs));
+    o.pushKV("attestFeeZat", l.attestFeeZat);
+    UniValue payee = NullUniValue;
+    if (l.hasAttestPayee) {
+        std::optional<AttestorRecord> rec = st.GetAttestor(l.attestPayee);
+        if (rec.has_value()) payee = BondKeyAddress(rec.value());
+    }
+    o.pushKV("attestPayee", payee);
+    o.pushKV("residualZat", l.residualZat);
+    o.pushKV("claimPath", l.claimPath);
+    o.pushKV("notice", l.notice);
+    int carrierVin = -1;
+    std::string source;
+    if (tx) {
+        std::optional<size_t> carrier = FindCarrierInput(*tx, l.Type() == TxLogType::REDEEM);
+        if (carrier.has_value()) {
+            carrierVin = (int)carrier.value();
+            source = "scriptsig";
+        }
+    }
+    o.pushKV("carrierVin", carrierVin);
+    o.pushKV("bundleSource", source);
+    if (l.Type() == TxLogType::ATTESTOR_REGISTER) o.pushKV("seq", (int)l.attestorSeq);
+}
+
+UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l, const YellowbackIndex& index, std::optional<int> refHeight, const CTransaction* tx, bool expired = false)
 {
     UniValue o(UniValue::VOBJ);
     o.pushKV("txid", txid.GetHex());
@@ -225,8 +365,25 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l)
     o.pushKV("assigned", AssignedToJSON(l.assigned));
     o.pushKV("spentTokens", OutPointsToJSON(l.spentTokens));
     o.pushKV("closedVaults", OutPointsToJSON(l.closedVaults));
-    o.pushKV("expired", false);
+    o.pushKV("expired", expired);
+    PushTxLogV3(o, l, index, refHeight, tx);
     return o;
+}
+
+/** The reference height a transaction's rules read: a MINT's vault record, else its REDEEM / CLAIM_NOTICE payload. */
+std::optional<int> RefHeightOf(const uint256& txid, const TxLogRecord& l, const State& st, const CTransaction* tx)
+{
+    if (l.Type() == TxLogType::MINT) {
+        std::optional<VaultRecord> v = st.GetVault(COutPoint(txid, 0));
+        if (v.has_value()) return v->refHeight;
+    }
+    if (tx) {
+        std::optional<FoundPayload> fp = FindPayload(*tx);
+        if (fp.has_value() && (fp->payload.type == PayloadType::REDEEM || fp->payload.type == PayloadType::CLAIM_NOTICE || fp->payload.type == PayloadType::MINT)) {
+            return (int)fp->payload.refHeight;
+        }
+    }
+    return std::nullopt;
 }
 
 UniValue ActivationToJSON(const Activation& a)
@@ -328,6 +485,7 @@ UniValue PayloadToJSON(const Payload& p)
         r.pushKV("attestorPubKey", HexStr(p.attestorKeyBytes.begin(), p.attestorKeyBytes.end()));
         r.pushKV("bondPubKey", HexStr(p.bondKeyBytes.begin(), p.bondKeyBytes.end()));
         r.pushKV("bondAddress", p.bondPubKey.IsValid() ? UniValue(P2SHAddress(BondScript(p.bondPubKey, p.bondLocktime))) : NullUniValue);
+        r.pushKV("bondKeyAddress", p.bondPubKey.IsValid() ? UniValue(P2PKHAddress(p.bondPubKey.GetID())) : NullUniValue);
         r.pushKV("bondLocktime", (int64_t)p.bondLocktime);
         UniValue flags(UniValue::VOBJ);
         flags.pushKV("tier", (int)(p.flags & 0x03));
@@ -449,6 +607,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     o.pushKV("lockedOutputs", (int64_t)0);
     o.pushKV("protectedByIndex", false);
 #endif
+    o.pushKV("rebuilt", index.WasRebuilt());
 
     UniValue act(UniValue::VOBJ);
     const Activation a = snap.has_value() ? snap->activation : st.GetActivation();
@@ -458,6 +617,28 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     act.pushKV("signalCount", snap.has_value() ? (int64_t)snap->signalCount : 0);
     act.pushKV("window", p.signalWindow);
     o.pushKV("activation", act);
+
+    // v3 (contract: attest): the arming state at the tip, the seated count, this node's pool.
+    {
+        const AttestState m = snap.has_value() ? snap->attest : st.GetAttest();
+        UniValue at(UniValue::VOBJ);
+        at.pushKV("status", AttestStatusName(m.Status()));
+        at.pushKV("triggerHeight", m.triggerHeight);
+        at.pushKV("armHeight", m.armHeight);
+        at.pushKV("seatedCount", snap.has_value() ? (int64_t)snap->seated.size() : (int64_t)0);
+        at.pushKV("poolSize", (int64_t)index.PoolSize());
+        int fresh = 0;
+        if (snap.has_value()) {
+            for (uint16_t seq : snap->seated) {
+                if (index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge)) fresh++;
+            }
+        }
+        at.pushKV("poolFresh", fresh);
+        at.pushKV("carrierMode", BundleCarrierName(p.bundleCarrier));
+        at.pushKV("required", p.attestRequired);
+        at.pushKV("armed", p.IsArmed(m.IsArmed()));
+        o.pushKV("attest", at);
+    }
 
     UniValue miner(UniValue::VOBJ);
     miner.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(P2PKHAddress(ms.payoutKey.value())) : NullUniValue);
@@ -509,8 +690,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
     policy.pushKV("tiltBps", pp.tiltBps);
     policy.pushKV("preferredPayee", pp.preferred.has_value() ? UniValue(P2PKHAddress(pp.preferred.value())) : NullUniValue);
-    // A2 wires AFEE-W; until then the flag is reported as given (a seq number), null when unset.
-    policy.pushKV("preferredAttestor", mapArgs.count("-yellowbackpreferredattestor") ? UniValue(GetArg("-yellowbackpreferredattestor", 0)) : NullUniValue);
+    policy.pushKV("preferredAttestor", index.GetAttestPolicy().preferred.has_value() ? UniValue((int)index.GetAttestPolicy().preferred.value()) : NullUniValue);
     prm.pushKV("policy", policy);
     // v3 §3.1 attestation parameters (contract: params.attest; armMin and carrierMode are hashed on regtest, M13)
     UniValue attest(UniValue::VOBJ);
@@ -639,6 +819,16 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
     o.pushKV("pSlow", PriceOrNull(s.PSlow()));
     o.pushKV("pMint", PriceOrNull(s.PMint()));
     o.pushKV("pClaim", PriceOrNull(s.PClaim()));
+    // v3: the same medians under their §3.6 names, the arming state a transaction at refHeight = h is judged under, seating and the pins.
+    o.pushKV("xMint", PriceOrNull(s.PMint()));
+    o.pushKV("xClaim", PriceOrNull(s.PClaim()));
+    o.pushKV("armed", p.IsArmed(s.attest.IsArmed()));
+    o.pushKV("attestStatus", AttestStatusName(s.attest.Status()));
+    o.pushKV("seated", SeqsToJSON(s.seated));
+    UniValue pinnedKeys(UniValue::VARR);
+    for (const uint160& k : s.pinnedKeys) pinnedKeys.push_back(P2PKHAddress(CKeyID(k)));
+    o.pushKV("pinnedKeys", pinnedKeys);
+    o.pushKV("pinnedSeqs", SeqsToJSON(s.pinnedSeqs));
     UniValue fill(UniValue::VOBJ);
     const std::pair<const char*, int> windows[] = { { "fast", p.pFastWindow }, { "mid", p.pMidWindow }, { "slow", p.pSlowWindow } };
     for (const auto& w : windows) {
@@ -968,16 +1158,24 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
     const yellowback::Params& p = index.GetParams();
     State st(index.View());
     const int tip = IndexHeight(index);
-    std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
     UniValue list(UniValue::VARR);
-    if (!snap.has_value() || !snap->PClaim().has_value()) return list;
-    const MicroUsd pClaim = snap->PClaim().value();
+    if (tip < 0) return list;
+    // v3: RED-4 by clause (a) under the combined pClaim with the bundle this node would build for
+    // the vault, or by clause (b) when its notice has persisted (yellowback::rpc::EstimateClaim);
+    // unarmed the estimate is exactly v2's tip-snapshot test.
+    std::vector<std::pair<COutPoint, VaultRecord>> candidates;
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
         if (!DeserializeRecord(raw, v)) return true;
         if (v.Status() != VaultStatus::ACTIVE || tip < v.claimHeight) return true;
-        if (!IsUnderwater(v.collateralZat, pClaim, v.mintedCents, p.claimThresholdBps)) return true;
-        COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
+        candidates.push_back(std::make_pair(COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k)), v));
+        return true;
+    });
+    for (const auto& c : candidates) {
+        const COutPoint& out = c.first;
+        const VaultRecord& v = c.second;
+        yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, tip);
+        if (!est.claimable || !est.pClaim.has_value()) continue;
         const CPubKey owner = v.OwnerKey();
         UniValue o(UniValue::VOBJ);
         o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));
@@ -987,10 +1185,13 @@ UniValue yed_listclaimable(const UniValue& params, bool fHelp)
         o.pushKV("feeZat", FeeZat(v.collateralZat, p.feeMin, p.feeBps));
         o.pushKV("claimHeight", (int64_t)v.claimHeight);
         o.pushKV("underwaterAt", UnderwaterAt(v, p));
-        o.pushKV("pClaim", pClaim);
+        o.pushKV("pClaim", est.pClaim.value());
+        o.pushKV("claimPath", est.claimPath);
+        yellowback::rpc::PushNoticeFields(o, st, p, out, v);
+        o.pushKV("residualZat", est.residualZat);
+        o.pushKV("attestFeeZat", est.attestFeeZat);
         list.push_back(o);
-        return true;
-    });
+    }
     return list;
 }
 
@@ -1013,7 +1214,15 @@ UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
     EnsureHealthy(index);
     State st(index.View());
     std::optional<TxLogRecord> log = st.GetTxLog(txid);
-    if (log.has_value()) return TxLogToJSON(txid, log.value());
+    if (log.has_value()) {
+        // The v3 fields need the transaction itself (carrierVin, bundleSource, a REDEEM's refHeight): the
+        // mempool, -txindex, or the slow path through an unspent output; absent all three they render at
+        // their zero values.
+        CTransaction tx;
+        uint256 hashBlock;
+        const bool haveTx = GetTransaction(txid, tx, ::Params().GetConsensus(), hashBlock, true);
+        return TxLogToJSON(txid, log.value(), index, RefHeightOf(txid, log.value(), st, haveTx ? &tx : nullptr), haveTx ? &tx : nullptr);
+    }
 #ifdef ENABLE_WALLET
     // §4.6 / N39: a wallet transaction with a payload past its nExpiryHeight that is in neither
     // TxLog nor the mempool is reported as expired (it left no index trace; the user re-runs it).
@@ -1024,22 +1233,20 @@ UniValue yed_gettxinfo(const UniValue& params, bool fHelp)
             std::optional<FoundPayload> fp = FindPayload(wtx);
             if (fp.has_value() && wtx.nExpiryHeight != 0 && (int64_t)wtx.nExpiryHeight <= (int64_t)chainActive.Height()
                 && !mempool.exists(txid) && wtx.GetDepthInMainChain() <= 0) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", txid.GetHex());
-                o.pushKV("height", -1);
-                o.pushKV("type", fp->payload.type == PayloadType::MINT ? "mint" : fp->payload.type == PayloadType::TRANSFER ? "transfer" : "redeem");
-                o.pushKV("path", "");
-                o.pushKV("verdict", "expired");
-                o.pushKV("yedIn", 0);
-                o.pushKV("yedOut", 0);
-                o.pushKV("burned", 0);
-                o.pushKV("feeZat", 0);
-                o.pushKV("payee", NullUniValue);
-                o.pushKV("assigned", UniValue(UniValue::VARR));
-                o.pushKV("spentTokens", UniValue(UniValue::VARR));
-                o.pushKV("closedVaults", UniValue(UniValue::VARR));
-                o.pushKV("expired", true);
-                return o;
+                TxLogRecord expired;
+                expired.height = -1;
+                expired.verdict = "expired";
+                switch (fp->payload.type) {
+                case PayloadType::MINT: expired.type = (uint8_t)TxLogType::MINT; break;
+                case PayloadType::TRANSFER: expired.type = (uint8_t)TxLogType::TRANSFER; break;
+                case PayloadType::REDEEM: expired.type = (uint8_t)TxLogType::REDEEM; break;
+                case PayloadType::ATTESTOR_REGISTER: expired.type = (uint8_t)TxLogType::ATTESTOR_REGISTER; break;
+                case PayloadType::CLAIM_NOTICE: expired.type = (uint8_t)TxLogType::CLAIM_NOTICE; break;
+                case PayloadType::EQUIVOCATION: expired.type = (uint8_t)TxLogType::EQUIVOCATION; break;
+                case PayloadType::ATTESTOR_REVIVE: expired.type = (uint8_t)TxLogType::ATTESTOR_REVIVE; break;
+                }
+                const CTransaction& tx = wtx;
+                return TxLogToJSON(txid, expired, index, std::nullopt, &tx, true);
             }
         }
     }
@@ -1071,6 +1278,25 @@ UniValue yed_decodepayload(const UniValue& params, bool fHelp)
         if (fp.has_value()) {
             UniValue o = PayloadToJSON(fp->payload);
             o.pushKV("opReturnIndex", (int64_t)fp->opReturnIndex);
+            // v3: the carrier's bundle, decoded only (never verified: yed_validaterawtransaction does that).
+            std::optional<size_t> vin = FindCarrierInput(tx, fp->payload.type == PayloadType::REDEEM);
+            if (vin.has_value()) {
+                std::optional<CarrierSpend> spend = ParseCarrierScriptSig(tx.vin[vin.value()].scriptSig);
+                std::optional<Bundle> bundle = spend.has_value() ? DecodeBundle(spend->bundle, 255) : std::nullopt;
+                if (spend.has_value()) {
+                    UniValue b(UniValue::VOBJ);
+                    b.pushKV("vin", (int64_t)vin.value());
+                    b.pushKV("hash", spend->bundleHash.GetHex());
+                    b.pushKV("version", bundle.has_value() ? (int)bundle->version : 0);
+                    b.pushKV("count", bundle.has_value() ? (int64_t)bundle->atts.size() : (int64_t)0);
+                    UniValue atts(UniValue::VARR);
+                    if (bundle.has_value()) {
+                        for (const Attestation& a : bundle->atts) atts.push_back(AttestationToJSON(a));
+                    }
+                    b.pushKV("attestations", atts);
+                    o.pushKV("bundle", b);
+                }
+            }
             return o;
         }
     }
@@ -1106,7 +1332,7 @@ UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
     pseudo.vtx.push_back(CTransaction(cb));
     pseudo.vtx.push_back(tx);
     OverlayStateView overlay(index.MutableView());
-    BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0);
+    BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0, index.GetSigCache());
     const uint256 txid = tx.GetHash();
     TxLogRecord log;
     bool relevant = false;
@@ -1168,7 +1394,7 @@ UniValue yed_getblockverdict(const UniValue& params, bool fHelp)
     if (!ReadBlockFromDisk(block, pindex, ::Params().GetConsensus())) throw JSONRPCError(RPC_INVALID_PARAMETER, "block not on disk");
     const int h = pindex->nHeight;
     OverlayStateView overlay(index.MutableView());
-    BlockEvaluation ev = EvaluateBlock(overlay, index.ParamsAt(h), block, h, hash, GetBlockSubsidy(h, ::Params().GetConsensus()));
+    BlockEvaluation ev = EvaluateBlock(overlay, index.ParamsAt(h), block, h, hash, GetBlockSubsidy(h, ::Params().GetConsensus()), index.GetSigCache());
     UniValue o(UniValue::VOBJ);
     o.pushKV("blockInvalid", ev.blockInvalid);
     o.pushKV("reason", ev.reason);
@@ -1217,10 +1443,41 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     const int64_t lockHeight = (int64_t)refH + lockBlocks;
     if (lockHeight + p.grace >= LOCKTIME_THRESHOLD) throw JSONRPCError(RPC_INVALID_PARAMETER, "mint-bad-lock: lockHeight + GRACE exceeds LOCKTIME_THRESHOLD");
     std::optional<Snapshot> snap = SnapshotAt(st, p, refH);
-    std::optional<MicroUsd> pMint;
+    std::optional<MicroUsd> pMint, xMint, aMint;
     int sigmaMultBps = snap.has_value() ? snap->sigmaMultBps : p.sigmaMultMaxBps;
-    if (params.size() > 2 && !params[2].isNull()) pMint = params[2].get_int64();
-    else if (snap.has_value()) pMint = snap->PMint();
+    const bool override = params.size() > 2 && !params[2].isNull();
+    // v3: while Snapshots[R] is armed the estimate reads the combined pMint = min(xMint, aMint) of PRICE-2 with
+    // the bundle this node would build for a MINT at R (empty selector, W9); a priceMicroUsd override
+    // bypasses both sources and both refusals, as in v2.
+    const bool armed = snap.has_value() && p.IsArmed(snap->attest.IsArmed());
+    std::string source;
+    std::vector<uint16_t> bundleSeqs;
+    CAmount attestFeeZat = 0;
+    std::optional<int64_t> divergenceBps;
+    if (snap.has_value()) xMint = snap->PMint();
+    if (override) {
+        pMint = params[2].get_int64();
+    } else {
+        pMint = xMint;
+        if (armed) {
+            BuiltBundle built = index.BuildBundleInfo(refH, std::vector<unsigned char>());
+            if (!built.sufficient || !built.aMint.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, built.InsufficientMessage());
+            aMint = built.aMint;
+            bundleSeqs = built.seqs;
+            if (xMint.has_value()) {
+                const MicroUsd x = xMint.value(), a = aMint.value();
+                const arith_uint256 diff = x >= a ? arith_uint256(x - a) : arith_uint256(a - x);
+                const arith_uint256 lo(std::min(x, a));
+                const arith_uint256 d = diff * arith_uint256(BPS) / lo;
+                divergenceBps = FitsInt64(d) ? (int64_t)d.GetLow64() : std::numeric_limits<int64_t>::max();
+                if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, p.divergeBpsAttest)) * lo) {
+                    throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("mint10-diverged: xMint %d and aMint %d differ by %d bps (DIVERGE_BPS_ATTEST %d)", (int)x, (int)a, (int)divergenceBps.value(), p.divergeBpsAttest));
+                }
+                pMint = std::min(x, a);
+                source = pMint.value() == a && a < x ? "a" : "x";
+            }
+        }
+    }
     const int minRatio = MinRatioBps(p.baseRatioBps[termClass], sigmaMultBps);
     UniValue o(UniValue::VOBJ);
     if (!pMint.has_value()) {
@@ -1229,6 +1486,7 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
         auto req = RequiredCollateralRounded((Cents)cents, minRatio, pMint.value());
         if (!req.has_value()) throw JSONRPCError(RPC_VERIFY_REJECTED, "mint-unsatisfiable: the required collateral exceeds MAX_MONEY");
         o.pushKV("requiredZat", req.value());
+        if (!bundleSeqs.empty()) attestFeeZat = AttestFeeZat(FeeZat(req.value(), p.feeMin, p.feeBps), p.attestFeeBps);
     }
     o.pushKV("termClass", ClassLetter((uint8_t)termClass));
     o.pushKV("lockHeight", lockHeight);
@@ -1238,6 +1496,13 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
     o.pushKV("sigmaMultBps", sigmaMultBps);
     o.pushKV("pMint", PriceOrNull(pMint));
     o.pushKV("refHeight", refH);
+    o.pushKV("xMint", PriceOrNull(xMint));
+    o.pushKV("aMint", PriceOrNull(aMint));
+    o.pushKV("source", source);
+    o.pushKV("armed", armed);
+    o.pushKV("bundleSeqs", SeqsToJSON(bundleSeqs));
+    o.pushKV("attestFeeZat", attestFeeZat);
+    o.pushKV("divergenceBps", divergenceBps.has_value() ? UniValue(divergenceBps.value()) : NullUniValue);
     return o;
 }
 
@@ -1288,6 +1553,261 @@ UniValue yed_gethistory(const UniValue& params, bool fHelp)
     return arr;
 }
 
+// ---------------------------------------------------------------------------
+// v3 (plan §4.5): attestors, the pool, bundles, notices
+
+UniValue yed_listattestors(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() > 1)
+        throw std::runtime_error(
+            "yed_listattestors ( height )\n"
+            "\nEvery Attestors record (v3 §3.6) in seq order; seated/pinned/weight at height's snapshot (default the tip).\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const int tip = IndexHeight(index);
+    const int h = HeightArg(params.size() > 0 ? params[0] : NullUniValue, tip);
+    const yellowback::Params& p = index.ParamsAt(std::max(h, 0));
+    if (h < 0 || h > tip) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("height must be between 0 and %d", tip));
+    std::optional<Snapshot> snap = h >= p.startHeight ? st.GetSnapshot((uint32_t)h) : std::nullopt;
+    const AttestState attest = snap.has_value() ? snap->attest : AttestState();
+    // The newest BundleLog row naming each seq, in one pass over the table.
+    std::map<uint16_t, uint32_t> lastBundle;
+    index.View().Iterate(std::string(1, keys::PREFIX_BUNDLELOG), [&](const std::string& k, const std::string& raw) {
+        BundleLogRecord row;
+        if (!DeserializeRecord(raw, row)) return true;
+        const uint32_t height = keys::HeightOf(k);
+        for (uint16_t seq : row.seqs) lastBundle[seq] = std::max(lastBundle[seq], height);
+        return true;
+    });
+    UniValue out(UniValue::VARR);
+    for (const auto& r : st.Attestors()) {
+        const uint16_t seq = r.first;
+        const AttestorRecord& rec = r.second;
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("seq", (int)seq);
+        o.pushKV("attestorPubKey", HexStr(rec.attestorPubKey.begin(), rec.attestorPubKey.end()));
+        o.pushKV("bondAddress", BondAddress(rec));
+        o.pushKV("bondKeyAddress", BondKeyAddress(rec));
+        o.pushKV("bondOutpoint", OutPointToJSON(rec.bondOutpoint));
+        o.pushKV("bondZat", rec.bondZat);
+        o.pushKV("bondLocktime", (int64_t)rec.bondLocktime);
+        o.pushKV("flags", FlagsToJSON(rec.flags));
+        o.pushKV("registerHeight", rec.registerHeight);
+        o.pushKV("status", AttestorStatusName(rec.Status()));
+        o.pushKV("statusHeight", rec.statusHeight);
+        o.pushKV("bondSpentHeight", rec.bondSpentHeight != 0 ? UniValue(rec.bondSpentHeight) : NullUniValue);
+        o.pushKV("seatedSince", rec.seatedSince != 0 ? UniValue(rec.seatedSince) : NullUniValue);
+        o.pushKV("founding", attest.Status() != AttestStatus::UNARMED && AgeOrigin(rec, attest, p) == (int64_t)attest.triggerHeight);
+        o.pushKV("weight", DecimalString(AttestorWeight(rec, attest, p, h)));
+        const bool seated = snap.has_value() && std::find(snap->seated.begin(), snap->seated.end(), seq) != snap->seated.end();
+        const bool pinned = snap.has_value() && std::find(snap->pinnedSeqs.begin(), snap->pinnedSeqs.end(), seq) != snap->pinnedSeqs.end();
+        o.pushKV("seated", seated);
+        o.pushKV("pinned", pinned);
+        std::map<uint16_t, uint32_t>::const_iterator lb = lastBundle.find(seq);
+        o.pushKV("lastBundleHeight", lb != lastBundle.end() ? UniValue((int64_t)lb->second) : NullUniValue);
+        o.pushKV("poolFresh", index.PoolHasNewerThan(seq, (int64_t)h - g_yellowbackMintLag - p.attestMaxAge));
+        out.push_back(o);
+    }
+    return out;
+}
+
+UniValue yed_getattestations(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "yed_getattestations\n"
+            "\nThis node's attestation pool (W5): every held attestation, ascending seq then citedHeight.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const int tip = IndexHeight(index);
+    const yellowback::Params& p = index.ParamsAt(std::max(tip, 0));
+    std::optional<Snapshot> snap = tip >= 0 ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
+    UniValue out(UniValue::VARR);
+    for (const PooledAttestation& pa : index.PoolAttestations()) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("seq", (int)pa.att.seq);
+        o.pushKV("priceMicroUsd", (int64_t)pa.att.priceMicroUsd);
+        o.pushKV("citedHeight", (int64_t)pa.att.citedHeight);
+        o.pushKV("receivedHeight", pa.receivedHeight);
+        o.pushKV("seated", snap.has_value() && std::find(snap->seated.begin(), snap->seated.end(), pa.att.seq) != snap->seated.end());
+        o.pushKV("fresh", (int64_t)pa.att.citedHeight > (int64_t)tip - g_yellowbackMintLag - p.attestMaxAge);
+        const std::vector<unsigned char> raw = EncodeAttestation(pa.att);
+        o.pushKV("hex", HexStr(raw.begin(), raw.end()));
+        out.push_back(o);
+    }
+    return out;
+}
+
+UniValue yed_addattestation(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "yed_addattestation \"hex\"\n"
+            "\nVerify one 74-byte attestation against the tip and pool it (S4). RPC-auth only; never gated on the wallet.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    if (!params[0].isStr() || !IsHex(params[0].get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, "attest-malformed: hex expected");
+    std::optional<Attestation> att = DecodeAttestation(ParseHex(params[0].get_str()));
+    if (!att.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("attest-malformed: an attestation is exactly %u bytes", (unsigned)ATTESTATION_SIZE));
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    std::string reason;
+    bool replaced = false;
+    if (!index.AddAttestation(att.value(), reason, &replaced)) throw JSONRPCError(RPC_VERIFY_REJECTED, reason);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("accepted", true);
+    o.pushKV("seq", (int)att->seq);
+    o.pushKV("priceMicroUsd", (int64_t)att->priceMicroUsd);
+    o.pushKV("citedHeight", (int64_t)att->citedHeight);
+    o.pushKV("replaced", replaced);
+    o.pushKV("poolSize", (int64_t)index.PoolSize());
+    return o;
+}
+
+/** refHeight argument of yed_buildbundle / yed_getselection: startHeight <= R <= tip. */
+int RefHeightArg(const UniValue& v, const YellowbackIndex& index)
+{
+    if (!v.isNum()) throw JSONRPCError(RPC_INVALID_PARAMETER, "refHeight must be a number");
+    const int r = v.get_int();
+    const int tip = index.TipHeight();
+    if (r < index.GetParams().startHeight || r > tip) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("refHeight must be between %d and %d", index.GetParams().startHeight, tip));
+    return r;
+}
+
+UniValue yed_buildbundle(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)
+        throw std::runtime_error(
+            "yed_buildbundle refHeight \"selectorHex\"\n"
+            "\nThe bundle this node would build for (refHeight, selector) from its pool (W6, W9); selectorHex is \"\" for a MINT,\n"
+            "the 72-hex-character serialised vault outpoint for a REDEEM or CLAIM_NOTICE. Refuses with bundle-insufficient.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    const std::vector<unsigned char> selector = SelectorArg(params[1]);
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    const int r = RefHeightArg(params[0], index);
+    BuiltBundle b = index.BuildBundleInfo(r, selector);
+    if (!b.sufficient) throw JSONRPCError(RPC_VERIFY_REJECTED, b.InsufficientMessage());
+    const std::vector<unsigned char> raw = EncodeBundle(b.bundle);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("refHeight", r);
+    o.pushKV("selector", HexStr(selector.begin(), selector.end()));
+    o.pushKV("armed", b.armed);
+    o.pushKV("selected", SeqsToJSON(b.selected));
+    o.pushKV("seqs", SeqsToJSON(b.seqs));
+    o.pushKV("missing", SeqsToJSON(b.missing));
+    o.pushKV("count", (int64_t)b.seqs.size());
+    o.pushKV("hex", HexStr(raw.begin(), raw.end()));
+    o.pushKV("aMint", PriceOrNull(b.aMint));
+    o.pushKV("aClaim", PriceOrNull(b.aClaim));
+    return o;
+}
+
+UniValue yed_getselection(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)
+        throw std::runtime_error(
+            "yed_getselection refHeight \"selectorHex\"\n"
+            "\nselected(refHeight, selector) (v3 §3.7, W9) with weights, statuses and this node's pool coverage.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    const std::vector<unsigned char> selector = SelectorArg(params[1]);
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    const int r = RefHeightArg(params[0], index);
+    const yellowback::Params& p = index.ParamsAt(r);
+    State st(index.View());
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)r);
+    const AttestState attest = snap.has_value() ? snap->attest : AttestState();
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("refHeight", r);
+    o.pushKV("selector", HexStr(selector.begin(), selector.end()));
+    o.pushKV("armed", ArmedAt(index.View(), p, r));
+    UniValue poolArr(UniValue::VARR);
+    arith_uint256 sum = 0;
+    if (snap.has_value()) {
+        for (uint16_t seq : snap->seated) {
+            if (std::find(snap->pinnedSeqs.begin(), snap->pinnedSeqs.end(), seq) != snap->pinnedSeqs.end()) continue;
+            poolArr.push_back((int)seq);
+            std::optional<AttestorRecord> rec = st.GetAttestor(seq);
+            if (rec.has_value()) sum += AttestorWeight(rec.value(), attest, p, r);
+        }
+    }
+    o.pushKV("pool", poolArr);
+    o.pushKV("sumWeight", DecimalString(sum));
+    o.pushKV("fallback", sum == 0 && poolArr.size() > 0);
+    o.pushKV("mSelect", p.mSelect);
+    o.pushKV("kSlack", p.kSlack);
+    BuiltBundle b = index.BuildBundleInfo(r, selector);
+    UniValue sel(UniValue::VARR);
+    int reachable = 0;
+    for (uint16_t seq : b.selected) {
+        std::optional<AttestorRecord> rec = st.GetAttestor(seq);
+        const bool fresh = std::find(b.seqs.begin(), b.seqs.end(), seq) != b.seqs.end();
+        if (fresh) reachable++;
+        UniValue e(UniValue::VOBJ);
+        e.pushKV("seq", (int)seq);
+        e.pushKV("weight", DecimalString(rec.has_value() ? AttestorWeight(rec.value(), attest, p, r) : arith_uint256(0)));
+        e.pushKV("bondKeyAddress", rec.has_value() ? BondKeyAddress(rec.value()) : NullUniValue);
+        e.pushKV("status", rec.has_value() ? AttestorStatusName(rec->Status()) : "");
+        e.pushKV("poolFresh", fresh);
+        sel.push_back(e);
+    }
+    o.pushKV("selected", sel);
+    o.pushKV("reachable", reachable);
+    return o;
+}
+
+UniValue yed_getnotice(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 1)
+        throw std::runtime_error(
+            "yed_getnotice \"vaultTxid\"\n"
+            "\nThe Notices record for the vault (NOT-1), or {found: false}. Refuses with vault-not-found.\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    uint256 txid = ParseHashV(params[0], "vaultTxid");
+    LOCK(cs_main);
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    State st(index.View());
+    const COutPoint out(txid, 0);
+    std::optional<VaultRecord> v = st.GetVault(out);
+    if (!v.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, "vault-not-found: no vault at " + txid.GetHex() + ":0");
+    std::optional<NoticeRecord> n = st.GetNotice(out);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("found", n.has_value());
+    if (!n.has_value()) return o;
+    const yellowback::Params& p = index.ParamsAt(n->height);
+    // The notice transaction: the CLAIM_NOTICE of this vault in the block at notice.height whose TxLog says it held.
+    std::string noticeTxid;
+    const CBlockIndex* pindex = chainActive[n->height];
+    CBlock block;
+    if (pindex && ReadBlockFromDisk(block, pindex, ::Params().GetConsensus())) {
+        for (const CTransaction& tx : block.vtx) {
+            std::optional<FoundPayload> fp = FindPayload(tx);
+            if (!fp.has_value() || fp->payload.type != PayloadType::CLAIM_NOTICE || !(fp->payload.VaultOutPoint() == out)) continue;
+            std::optional<TxLogRecord> log = st.GetTxLog(tx.GetHash());
+            if (log.has_value() && log->notice) { noticeTxid = tx.GetHash().GetHex(); break; }
+        }
+    }
+    o.pushKV("vault", strprintf("%s:%u", out.hash.GetHex(), out.n));
+    o.pushKV("txid", noticeTxid);
+    o.pushKV("height", n->height);
+    o.pushKV("refHeight", n->refHeight);
+    o.pushKV("pEmerg", n->pEmerg);
+    o.pushKV("emergencyOpenAt", (int64_t)n->refHeight + p.emergencyPersist);
+    o.pushKV("expiresAt", (int64_t)n->refHeight + p.emergencyNoticeTtl);
+    return o;
+}
+
 static const CRPCCommand commands[] =
 { //  category   name                          actor (function)              okSafeMode
   //  ---------  ----------------------------  ----------------------------  ----------
@@ -1310,6 +1830,12 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_estimatecollateral",      &yed_estimatecollateral,       true  },
     { "yellowback", "yed_estimatefee",             &yed_estimatefee,              true  },
     { "yellowback", "yed_gethistory",              &yed_gethistory,               true  },
+    { "yellowback", "yed_listattestors",           &yed_listattestors,            true  },
+    { "yellowback", "yed_getattestations",         &yed_getattestations,          true  },
+    { "yellowback", "yed_addattestation",          &yed_addattestation,           true  },
+    { "yellowback", "yed_buildbundle",             &yed_buildbundle,              true  },
+    { "yellowback", "yed_getselection",            &yed_getselection,             true  },
+    { "yellowback", "yed_getnotice",               &yed_getnotice,                true  },
 };
 
 void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)
@@ -1324,3 +1850,70 @@ void RegisterYellowbackRPCCommands(CRPCTable &tableRPC)
     for (unsigned int vcidx = 0; vcidx < ARRAYLEN(commands); vcidx++)
         tableRPC.appendCommand(commands[vcidx].name, &commands[vcidx]);
 }
+
+// ---------------------------------------------------------------------------
+// Shared with rpc/yellowbackwallet.cpp (rpc/yellowbackrpc.h)
+
+namespace yellowback {
+namespace rpc {
+
+void PushNoticeFields(UniValue& o, const State& st, const Params& p, const COutPoint& vault, const VaultRecord& v)
+{
+    std::optional<NoticeRecord> n = v.Status() == VaultStatus::ACTIVE ? st.GetNotice(vault) : std::nullopt;
+    o.pushKV("noticed", n.has_value());
+    o.pushKV("noticeHeight", n.has_value() ? UniValue(n->height) : NullUniValue);
+    o.pushKV("emergencyOpenAt", n.has_value() ? UniValue((int64_t)n->refHeight + p.emergencyPersist) : NullUniValue);
+}
+
+ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, const VaultRecord& v, int tip)
+{
+    AssertLockHeld(index.cs_yellowback);
+    ClaimEstimate e;
+    State st(index.View());
+    const int r = tip - g_yellowbackMintLag;
+    const Params& p = index.ParamsAt(std::max(r, 0));
+    e.refHeight = r;
+    e.armed = r >= p.startHeight && ArmedAt(index.View(), p, r);
+    const bool mature = tip >= v.claimHeight && v.Status() == VaultStatus::ACTIVE;
+    if (!e.armed) {
+        // v2 exactly: RED-4 (a) under the tip snapshot's pClaim.
+        std::optional<Snapshot> snap = tip >= p.startHeight ? st.GetSnapshot((uint32_t)tip) : std::nullopt;
+        e.xClaim = snap.has_value() ? snap->PClaim() : std::nullopt;
+        e.pClaim = e.xClaim;
+        e.claimable = mature && IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
+        e.claimPath = e.claimable ? "a" : "";
+        if (e.claimable) e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, p.claimThresholdBps, e.pClaim.value()));
+        return e;
+    }
+    std::optional<Snapshot> snap = st.GetSnapshot((uint32_t)r);
+    e.xClaim = snap.has_value() ? snap->PClaim() : std::nullopt;
+    BuiltBundle built = index.BuildBundleInfo(r, OutPointSelector(vault));
+    e.bundleOk = built.sufficient && built.aClaim.has_value();
+    if (e.bundleOk) {
+        e.aClaim = built.aClaim;
+        e.bundleSeqs = built.seqs;
+        CombinedPrices c = PriceCombine(snap.has_value() ? snap->PMint() : std::nullopt, e.xClaim, built.aMint, built.aClaim);
+        e.pClaim = c.pClaim;
+        e.pEmerg = c.pEmerg;
+        e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
+    } else {
+        e.pClaim = e.xClaim;                         // the cross-section alone; claimPath stays ""
+    }
+    const bool underA = IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
+    std::optional<NoticeRecord> notice = st.GetNotice(vault);
+    const bool persisted = notice.has_value() && (int64_t)r - notice->refHeight >= p.emergencyPersist && (int64_t)r - notice->refHeight <= p.emergencyNoticeTtl;
+    const bool underB = persisted && IsUnderwater(v.collateralZat, e.pEmerg, v.mintedCents, p.emergencyRatioBps);
+    e.claimable = mature && (underA || underB);
+    if (e.bundleOk) e.claimPath = underA ? "a" : underB ? "b" : "";
+    if (e.claimable && e.pClaim.has_value()) {
+        const int marginBps = underA ? p.claimThresholdBps : (int)BPS;
+        e.residualZat = ResidualZat(v.collateralZat, ClaimantMaxZat(v.mintedCents, marginBps, e.pClaim.value()));
+    }
+    const bool standing = notice.has_value() && (int64_t)tip - notice->height <= p.emergencyNoticeTtl;
+    e.canNotice = v.Status() == VaultStatus::ACTIVE && !standing && !e.claimable &&
+                  IsUnderwater(v.collateralZat, e.pEmerg, v.mintedCents, p.emergencyRatioBps);
+    return e;
+}
+
+} // namespace rpc
+} // namespace yellowback

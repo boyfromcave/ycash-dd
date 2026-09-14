@@ -53,12 +53,13 @@ CScript TagScript(const YellowbackIndex& index);
  * the template overlay so later candidates see it (in-block chaining and
  * first-claim-wins exactly as ConnectBlock will evaluate them); false skips it.
  *
- * False for: a vault spend that fails RED-1..4 (TPL-1; any activation state)
+ * False for: a vault spend that fails RED-1..5 (TPL-1; any activation state)
  * and, under -yellowbacktemplatepolicy=strict (the default, V14), a MINT that
- * would register VOID, a TRANSFER that would burn, a claim-path spend of a
- * VOID vault, a vault spend whose scriptSig is not exactly the wallet's
- * `<sig> OP_1 <script>` / `OP_0 <script>`, and a vault spend without the MP-1
- * expiry (TPL-2). While IsAbandoned() holds every vault spend passes (L13).
+ * would register VOID (MINT-9/10 included), a TRANSFER that would burn, a
+ * claim-path spend of a VOID vault, a vault spend whose scriptSig is not
+ * exactly the wallet's `<sig> OP_1 <script>` / `OP_0 <script>`, a vault spend
+ * without the MP-1 expiry, and a CLAIM_NOTICE that NOT-1 would not register
+ * (TPL-2). The dry run goes through the index's W8 signature cache. While IsAbandoned() holds every vault spend passes (L13).
  * Under `consensus` only TPL-1 applies. True (no dry run) for a transaction
  * with no Tokens/Vaults input and no payload, and for everything while the
  * index is unhealthy (BLK-3: an unhealthy node polices nothing).

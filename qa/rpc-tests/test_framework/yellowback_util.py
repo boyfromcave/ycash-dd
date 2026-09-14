@@ -906,7 +906,8 @@ def _outpoint(o):
 
 def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None, expiry=None,
                           to=None, ref_height=None, extra_outputs=None, owner_wif=None,
-                          branch_id=SIGNING_BRANCH_ID, selector=None):
+                          branch_id=SIGNING_BRANCH_ID, selector=None, carrier=None, carrier_wif=None,
+                          charge_extra=False):
     """A vault spend assembled here (section 3.4/3.5), the adversarial builder for every
     "without a burn" case (K18) and, with ``payload=encode_redeem(...)`` and ``fee=(addr, zat)``,
     the *correct* spends too.
@@ -924,7 +925,11 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     e.g. YED change); then the ``OP_RETURN`` ``payload`` if any.  ``nExpiryHeight = expiry`` if
     given, else ``ref_height + REF_WINDOW`` with ``ref_height`` defaulting to the vault's
     ``refHeight`` when known, else ``getblockcount() - REF_LAG``.  ``selector`` overrides the
-    path push (K4 tests).  Returns the hex."""
+    path push (K4 tests).  **v3:** ``carrier`` (a ``build_carrier_tx`` dict, confirmed) is
+    spent as the last input, signed by ``spend_carrier`` after the wallet signs the burns, and
+    its ``CARRIER_VALUE`` joins ``vout[0]``; with ``charge_extra`` the values of
+    ``extra_outputs`` (the attestor fee, RED-5's residual) come out of ``vout[0]`` too.
+    Returns the hex."""
     assert path in ('owner', 'claim')
     owner = hex_str_to_bytes(vault['ownerPubKey'])
     lock_height, claim_height = int(vault['lockHeight']), int(vault['claimHeight'])
@@ -933,6 +938,10 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     burns = [_outpoint(o) for o in burn_inputs]
     enforcement_fee = int(fee[1]) if fee else 0
     value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee
+    if carrier is not None:
+        value += CARRIER_VALUE
+    if charge_extra:
+        value -= sum(int(v) for v, _s in (extra_outputs or []))
     assert value > 0, 'the vault does not cover the fees'
     dest = to or node.getnewaddress()
     vout = [(value, _spk_of_address(dest))]
@@ -950,10 +959,15 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         expiry = int(ref_height) + REF_WINDOW
     lock_time = lock_height if path == 'owner' else claim_height
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
+    if carrier is not None:
+        vin.append((carrier['txid'], int(carrier['vout']), b'', 0xFFFFFFFF))
     raw = ym.serialize_tx_v4(vin, vout, lock_time, expiry)
     if burns:
         # the wallet signs the token inputs; it cannot solve OP_IF and leaves vin[0] empty
         raw = hex_str_to_bytes(node.signrawtransaction(bytes_to_hex_str(raw))['hex'])
+    if carrier is not None:
+        from . import yellowback_attest as ya
+        raw = hex_str_to_bytes(ya.spend_carrier(node, bytes_to_hex_str(raw), len(vin) - 1, carrier, carrier_wif, branch_id))
     from io import BytesIO
     from .mininode import CTransaction
     from .script import CScript, SIGHASH_ALL, SignatureHash

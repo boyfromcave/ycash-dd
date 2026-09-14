@@ -171,6 +171,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_sendmany", 0 },
     { "yed_estimatesend", 0 },      // H3: the recipients object or the plain cents number
     { "yed_unlockcoin", 1 },        // H5: the vout
+    { "yed_listattestors", 0 },     // v3 (contract: client.cpp rows)
+    { "yed_buildbundle", 0 },
+    { "yed_getselection", 0 },
     { "z_sendmany", 1},
     { "z_sendmany", 2},
     { "z_sendmany", 3},
