@@ -62,7 +62,9 @@ Everything marked **v3** in this file is Phase A0's contract for Phases A2 (node
   command takes them.
 - **v3 attestor identity.** An attestor is named by its `seq` (number, `u16`, assigned in block
   order at registration, W4). `attestorPubKey` is the 33-byte hot key in hex; `bondAddress` is
-  the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself) (the fee payee and the bond owner). An **attestation** is 74
+  the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself; nothing pays
+  to it) and `bondKeyAddress` the P2PKH address of `bondPubKey` — the attestation-fee payee
+  (AFEE-1) and the key `yed_withdrawbond` signs with. An **attestation** is 74
   bytes — `seq u16 ‖ priceMicroUsd u32 ‖ citedHeight u32 ‖ sig 64`, little-endian, compact low-S
   ECDSA over `SHA256("YBATTEST1" ‖ seq ‖ price ‖ citedHeight ‖ blockHash(citedHeight))` — and
   travels through RPC as its hex (`hex`, 148 characters). A **bundle** is `"YA" ‖ 0x01 ‖ count ‖
@@ -668,7 +670,7 @@ transaction's verified bundle (`null` when it carried none or BUNDLE-1 failed), 
 the cross-section at its `refHeight`, `pMint`/`pClaim` the combined PRICE-2 prices it was judged
 under (`null` when undefined; equal to `x…` when not armed), `bundleSeqs` the `seq`s of its
 contributing attestations `C` (ascending; empty when none), `attestFeeZat` and `attestPayee`
-(the `bondAddress` paid, `null` under AFEE-0), `residualZat` (RED-5's amount, `0` when none was
+(the `bondKeyAddress` paid, `null` under AFEE-0), `residualZat` (RED-5's amount, `0` when none was
 due), `claimPath` (`"a"`, `"b"` or `""`), `notice` (`true` when this transaction wrote a
 `Notices` record — a CLAIM_NOTICE that NOT-1 accepted), `carrierVin` (the input index of the
 carrier, `-1` when none) and `bundleSource` (`"scriptsig"`, `"opreturn"` or `""`). `type` gains
@@ -726,7 +728,7 @@ Type-specific fields: MINT `termClass`, `cents`, `lockHeight`, `refHeight`, `own
 `feeVout` (`255` = none), `attestFeeVout` (**v3**, `255` = none); TRANSFER `assignments:
 [{vout, cents}]`, `assignedCents`; REDEEM `refHeight`, `feeVout`, `attestFeeVout`,
 `assignments`, `assignedCents`; **v3** `register` (`0x05`) `attestorPubKey`, `bondPubKey`,
-`bondAddress`, `bondLocktime`, `flags {tier, pool}`; `notice` (`0x06`) `vault {txid, vout}`,
+`bondAddress`, `bondKeyAddress`, `bondLocktime`, `flags {tier, pool}`; `notice` (`0x06`) `vault {txid, vout}`,
 `refHeight`; `equivocation` (`0x07`) nothing; `revive` (`0x08`) `attestation {seq,
 priceMicroUsd, citedHeight, sig, hex}`. Fields of the other types are absent (**optional** — the
 checker decodes a MINT payload, the example). When `hex` is a **raw transaction** that has a
@@ -874,7 +876,8 @@ Result of `yed_estimatecollateral`:
 Arguments: `height` (number, optional; default the index tip; `seated`/`pinned`/`weight` are
 evaluated at that height's snapshot, the records are always the current table). Every
 `Attestors` record (v3 §3.6), ascending `seq`. `bondOutpoint` is `txid:0` of the registration;
-`bondAddress` the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself) (where attestation fees are paid);
+`bondAddress` the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself);
+`bondKeyAddress` the P2PKH address of `bondPubKey` (where attestation fees are paid);
 `bondLocktime` the CLTV height; `flags` the decoded registration flags; `status` one of the five
 attestor statuses and `statusHeight` the height it was last set; `bondSpentHeight` `null` until
 the bond outpoint is spent (IN-2); `seatedSince` the height the attestor entered `seated[]`,
@@ -894,6 +897,7 @@ Result of `yed_listattestors`:
     "seq": 1,
     "attestorPubKey": "03b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7d8e9f0",
     "bondAddress": "smExampleBondAddress11111111111111111",
+    "bondKeyAddress": "smExampleBondKeyAddr11111111111111111",
     "bondOutpoint": { "txid": "7b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e6f708192a3b4c5d6e7f809", "vout": 0 },
     "bondZat": 1000000000,
     "bondLocktime": 500,
@@ -1007,7 +1011,7 @@ Result of `yed_buildbundle`:
 Arguments as `yed_buildbundle`. `selected(R, selector)` (v3 §3.7, W9) with what the wallet needs
 for its "*n* of *m* selected attestors reachable" line: `pool` is `Snapshots[R].seated[] \
 pinnedSeqs[]`, `selected` the drawn `seq`s in draw order, each with its `weight` at `R` (decimal
-string), `bondAddress`, `status` and `poolFresh` (this node's pool holds a usable attestation
+string), `bondKeyAddress`, `status` and `poolFresh` (this node's pool holds a usable attestation
 for it at `R`); `reachable` = the count of `poolFresh` among `selected`, `mSelect`/`kSlack` the
 constants, `armed` the snapshot's arming state, `sumWeight` the pool's total weight (decimal
 string; `"0"` triggers the by-`seq` fallback of §3.7, `fallback: true`). Never refuses for an
@@ -1029,7 +1033,7 @@ Result of `yed_getselection`:
     {
       "seq": 2,
       "weight": "31000000000",
-      "bondAddress": "smExampleBondAddress11111111111111111",
+      "bondKeyAddress": "smExampleBondKeyAddr11111111111111111",
       "status": "ELIGIBLE",
       "poolFresh": true
     }
@@ -1277,11 +1281,11 @@ creates the carrier funding transaction (`carrierTxid`) paying `P2SH(carrierScri
 SHA256(bundle)))` of `CARRIER_VALUE`, records it in `<datadir>/yellowback/carriers.dat`, waits
 one confirmation, then builds the MINT with the carrier as `vin[last]` (the only transparent
 input when `from` is Sapling) and — when armed and `A ≠ ∅` — the attestor fee output
-`P2PKH(bondAddress(attestPayee))` of `attestFeeZat` after the pool fee output. Before commit the
+`P2PKH(bondPubKey(attestPayee))` (its `bondKeyAddress`) of `attestFeeZat` after the pool fee output. Before commit the
 wallet **dry-runs MINT-1..10** with that bundle and refuses on any failure, naming the rule; a
 VOID mint is therefore unbuildable except through a reorg. `xMint`, `aMint`, `pMint` are the
 prices it was sized at (`aMint` `null` when not armed; `source` as `yed_estimatecollateral`),
-`bundleSeqs` the contributing `seq`s, `attestPayee` the `bondAddress` paid (`null` under
+`bundleSeqs` the contributing `seq`s, `attestPayee` the `bondKeyAddress` paid (`null` under
 AFEE-0; the AFEE-W choice or `-yellowbackpreferredattestor` when that `seq ∈ A`),
 `attestFeeZat` its amount (`0` when none), `carrierTxid` the funding transaction, `pending` as
 above. Refusals (**v3**): `bundle-insufficient` (armed and fewer than `M_SELECT` selected
@@ -1586,6 +1590,7 @@ Result of `yed_registerattestor`:
   "seq": null,
   "attestorPubKey": "03b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7d8e9f0",
   "bondAddress": "smExampleBondAddress11111111111111111",
+  "bondKeyAddress": "smExampleBondKeyAddr11111111111111111",
   "bondOutpoint": { "txid": "7b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e6f708192a3b4c5d6e7f809", "vout": 0 },
   "bondZat": 1000000000,
   "bondLocktime": 500,
