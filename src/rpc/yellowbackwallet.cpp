@@ -1528,6 +1528,14 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
     { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
+    // v3 (plan §4.5)
+    { "yellowback", "yed_claimnotice",      &yed_claimnotice,       false },
+    { "yellowback", "yed_sweepcarriers",    &yed_sweepcarriers,     false },
+    { "yellowback", "yed_registerattestor", &yed_registerattestor,  false },
+    { "yellowback", "yed_withdrawbond",     &yed_withdrawbond,      false },
+    { "yellowback", "yed_revive",           &yed_revive,            false },
+    { "yellowback", "yed_reportequivocation", &yed_reportequivocation, false },
+    { "yellowback", "yed_signattestation",  &yed_signattestation,   false },
 };
 
 void RegisterYellowbackWalletRPCCommands(CRPCTable &tableRPC)
