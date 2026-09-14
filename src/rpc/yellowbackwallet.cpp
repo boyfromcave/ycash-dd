@@ -354,12 +354,18 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
     return built.carrier.value();
 }
 
-/** Is the carrier a confirmed unspent coin (cs_main taken here)? */
+/**
+ * Is the carrier a confirmed unspent coin that the wallet, too, has seen in a block? Both are
+ * needed: the block connects before the notifier thread tells the wallet, and until then the
+ * carrier's own funding input still looks unspent to AvailableCoins (its spender has depth -1).
+ */
 bool CarrierConfirmed(const COutPoint& out)
 {
-    LOCK(cs_main);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
     const CCoins* c = pcoinsTip->AccessCoins(out.hash);
-    return c && c->IsAvailable(out.n);
+    if (!(c && c->IsAvailable(out.n))) return false;
+    std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(out.hash);
+    return it == pwalletMain->mapWallet.end() || it->second.GetDepthInMainChain() >= 1;
 }
 
 /** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600). */
@@ -697,7 +703,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
-            pf = PreflightMint(yw, cents, lockBlocks, bundleArg);
+            pf = PreflightMint(yw, cents, lockBlocks, bundleArg, from);
         } catch (const std::runtime_error& e) {
             ThrowBuildError(e);
         }
@@ -1277,7 +1283,8 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
         o.pushKV("canClaim", claimable && balance >= v.mintedCents);
         o.pushKV("canSweep", active && abandoned && h >= v.lockHeight);
-        o.pushKV("canNotice", active && armedTip && !standing && underEmergency && !o["claimable"].get_bool());
+        // A2/A3 merge: with the pool's aClaim, add "and not claimable under pClaim = max(xClaim, aClaim)" (contract).
+        o.pushKV("canNotice", active && armedTip && !standing && underEmergency);
         arr.push_back(o);
         return true;
     });

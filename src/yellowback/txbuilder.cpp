@@ -469,9 +469,10 @@ struct Context
         }
     }
 
+    /** Sign vin[first .. first + prevs.size()) as P2PKH (the inputs after them — a carrier — are signed separately, after this). */
     void SignInputs(CMutableTransaction& mtx, const std::vector<std::pair<CScript, CAmount>>& prevs, unsigned int first) const
     {
-        for (unsigned int i = first; i < mtx.vin.size(); i++) {
+        for (unsigned int i = first; i < first + prevs.size() && i < mtx.vin.size(); i++) {
             const auto& p = prevs[i - first];
             if (!SignSignature(wallet, p.first, mtx, i, p.second, SIGHASH_ALL, branchId)) {
                 throw std::runtime_error(strprintf("failed to sign input %u", i));
@@ -942,9 +943,15 @@ std::array<unsigned char, 64> DerToCompact(const std::vector<unsigned char>& der
 
 // ---------------------------------------------------------------- v3 preflights (before the carrier step)
 
-MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle)
+MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle,
+                            const std::string& from)
 {
     Context ctx(yw);
+    // The funding address is judged before any price: bad-address precedes bundle-insufficient.
+    const AddressChoice source = ParseAddressChoice(from, "from");
+    if (source.kind == AddressChoice::SAPLING && !std::visit(HaveSpendingKeyForPaymentAddress(&ctx.wallet), libzcash::PaymentAddress(source.sapling))) {
+        throw std::runtime_error("bad-address: from: no spending key for " + source.text + " in this wallet");
+    }
     MintPreflight pf;
     pf.refHeight = ctx.refHeight;
     const MintGateFacts g = MintGate(ctx, cents, lockBlocks, pf.refHeight);
@@ -1047,9 +1054,14 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
     const CAmount selected = ctx.SelectYec(needed, mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
     const CAmount change = selected - needed;
     if (change > 0) {
-        CPubKey changeKey;
-        if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        // An s1... `from` keeps its change: the main transaction is funded "from this address" too.
+        if (source.kind == AddressChoice::TRANSPARENT) {
+            mtx.vout.push_back(CTxOut(change, onlyScript));
+        } else {
+            CPubKey changeKey;
+            if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
+            mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
+        }
     }
     ctx.SignInputs(mtx, prevs, 0);
     out.tx = mtx;
@@ -1144,9 +1156,9 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
         if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
         mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
     }
-    ctx.SignInputs(mtx, prevs, 0);
-    mtx.vin.push_back(CTxIn(carrier.outpoint));   // vin[last] (§3.5)
+    mtx.vin.push_back(CTxIn(carrier.outpoint));   // vin[last] (§3.5); appended before any signature, since ZIP-243 commits to every prevout
     out.carrierVin = (int)mtx.vin.size() - 1;
+    ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
 
     out.tx = mtx;
@@ -1338,9 +1350,9 @@ BuiltTx BuildClaimNotice(YellowbackWallet& yw, const uint256& vaultTxid, CReserv
         if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
         mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
     }
-    ctx.SignInputs(mtx, prevs, 0);
     mtx.vin.push_back(CTxIn(carrier.outpoint));
     out.carrierVin = (int)mtx.vin.size() - 1;
+    ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
     out.tx = mtx;
     DryRunOrThrow(ctx, out);   // NOT-1 at the next height
@@ -1571,9 +1583,9 @@ BuiltTx BuildEquivocation(YellowbackWallet& yw, const Attestation& a, const Atte
         if (!reservekey.GetReservedKey(changeKey)) throw std::runtime_error("keypool-empty: keypool ran out");
         mtx.vout.push_back(CTxOut(change, GetScriptForDestination(changeKey.GetID())));
     }
-    ctx.SignInputs(mtx, prevs, 0);
     mtx.vin.push_back(CTxIn(carrier.outpoint));
     out.carrierVin = (int)mtx.vin.size() - 1;
+    ctx.SignInputs(mtx, prevs, 0);
     SignCarrierInput(mtx, (unsigned int)out.carrierVin, carrier, ctx.wallet, ctx.branchId);
     out.tx = mtx;
     DryRunOrThrow(ctx, out);   // EQV-1 at the next height

@@ -287,7 +287,8 @@ struct MintPreflight
     std::string source;
     MintPreflight() : refHeight(0), armed(false) {}
 };
-MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle);
+MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::optional<std::vector<unsigned char>>& bundle,
+                            const std::string& from = "");
 
 /** v3: the claim's preflight: R = index tip, the bundle verdict at (R, vault outpoint), RED-4 by clause and the residual. */
 struct ClaimPreflight
