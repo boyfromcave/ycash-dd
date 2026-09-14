@@ -1578,7 +1578,8 @@ keypool keys of this wallet (draw two — back up `wallet.dat` afterwards, the r
 bond is **not** `IsMine` (its script is non-standard to `Solver`, R6): the wallet finds it
 through `Attestors` by `bondPubKey` and nothing is written to `wallet.dat`. `seq` is `null` in
 the result — it is assigned when the transaction confirms (REG-A1); read it from
-`yed_listattestors` by `attestorPubKey`. Refusals: `bond-below-min`, `lock-below-min` (also for
+`yed_listattestors` by `attestorPubKey`; `warning` is the keypool-low nag as `yed_mint` (`""`
+when there is none). Refusals: `bond-below-min`, `lock-below-min` (also for
 `bondLocktime ≥ LOCKTIME_THRESHOLD`), `RPC_WALLET_ERROR` for insufficient YEC or a locked
 wallet, `keypool-empty`.
 
@@ -1595,7 +1596,8 @@ Result of `yed_registerattestor`:
   "bondZat": 1000000000,
   "bondLocktime": 500,
   "flags": { "tier": 0, "pool": false },
-  "maturesAt": 289
+  "maturesAt": 289,
+  "warning": ""
 }
 ```
 

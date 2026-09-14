@@ -972,7 +972,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK; bondLocktime = tip + 1 + lockBlocks\n"
             "3. flags       (numeric, optional, default 0) bits 0-1 source tier, bit 2 pool operator\n"
-            "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\" }\n");
+            "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const CAmount bondZat = AmountFromValue(params[0]);
@@ -1016,7 +1016,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     fl.pushKV("pool", (built.flags & 4) != 0);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    if (!built.warning.empty()) o.pushKV("warning", built.warning);
+    o.pushKV("warning", built.warning);
     return o;
 }
 
