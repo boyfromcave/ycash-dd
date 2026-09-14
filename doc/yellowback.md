@@ -10,11 +10,17 @@ spends a vault in a way the rules forbid — a soft fork in the P2SH/CLTV sense.
 overlay: ordinary Ycash v4 transactions, one `OP_RETURN` payload, a self-contained index under
 `<datadir>/yellowback/`. A node that does not enable the feature runs v4.5.0's code paths.
 
-The normative protocol is `doc/yellowback-spec.md` (§3 of the workspace plan, published verbatim
-by `make spec`); the design record, the decisions and the phase plan are the workspace's
-`docs/plans/yellowback-v2-development-plan.md`; the RPC surface is `doc/yellowback-rpc.md`; what
-a mining pool runs is `doc/yellowback-mining.md`. This file is the user-facing guide to the node
-and its wallet commands.
+**Yellowback v3 adds a second price population** on top of that: bonded **attestors** sign
+YEC/USD prices off-chain, and a mint or claim carries a few of those signatures with it, so a
+price that pays needs a hashpower majority *and* a bond-weighted majority of the attestors picked
+for that transaction. It changes nothing about custody. See *Where the price comes from* below.
+
+The normative protocol is `doc/yellowback-spec.md` (§3 of the workspace plans, published verbatim
+by `make spec`, with the v3 delta appended); the design record, the decisions and the phase plan
+are the workspace's `docs/plans/yellowback-v3-development-plan.md` (a delta on
+`yellowback-v2-development-plan.md`); the RPC surface is `doc/yellowback-rpc.md`; what a mining
+pool runs is `doc/yellowback-mining.md`; what an attestor runs is `doc/yellowback-attestor.md`.
+This file is the user-facing guide to the node and its wallet commands.
 
 ## How it works
 
@@ -45,6 +51,30 @@ and its wallet commands.
   and a few basis points of the collateral) to a pool that published a quote in the `payeeWindow`
   blocks up to the transaction's reference height (100 on mainnet, 10 on regtest); the wallet picks the payee, avoiding pools whose quotes strayed
   from their peers'.
+
+## Where the price comes from (v3: price attestation)
+
+Every rule that matters reads a YEC/USD price: how much collateral a mint needs, when a vault
+becomes claimable. v2 took that price from one place — the quotes pools publish in their
+coinbases. v3 keeps those and adds a second, independent population.
+
+- **Attestors.** Anyone may post a long time-locked bond (`yed_registerattestor`) and then sign
+  prices with an off-chain agent (`contrib/yellowback/attest/`). Attestors send no transactions
+  after registering and need no domain, no open port and no funded hot wallet. The highest-weighted
+  bonds are *seated*; weight is bond size times age, so influence is slow, visible and costly to buy.
+- **Arming.** The layer switches on by itself: once five attestors have matured bonds, a one-day
+  countdown starts (`yed_getinfo.attest` shows `UNARMED` / `TRIGGERED` / `ARMED`). Until it arms,
+  the node behaves exactly as v2.
+- **What you see as a minter.** `yed_mint` and `yed_claim` become **two transactions**: the wallet
+  first publishes a small *carrier* output that commits to the attestations it will use, waits one
+  block, then sends the mint or claim that spends it. The wallet does this for you; the GUI shows
+  "preparing price proof (1 block)". You pay one extra small output and a 25 % addition to the
+  enforcement fee, which goes to an attestor whose signature you used.
+- **The combination.** Mints size at the **lower** of the two sources and claims open at the
+  **higher**, so each operation is priced against whichever population the transacting party
+  controls least. If the two disagree by more than 15 %, minting pauses rather than guessing.
+- **If attestations are unavailable**, minting refuses with `bundle-insufficient` and nothing else
+  changes: YED still moves, redemptions still work, and existing vaults are untouched.
 
 ## Enabling
 
@@ -212,6 +242,15 @@ Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Yca
   the vault's debt; an underwater, abandoned vault can be claimed only by burning that debt; both
   pay a fee to a pool that published a price quote in the 100 blocks up to the transaction's
   reference height.
+- **v3:** prices are the *combination* of two populations — the pool medians and a bond-weighted
+  quantile over the attestations the transaction carries — by `min` for mints and `max` for
+  claims. Moving a price in the direction that pays therefore needs a hashpower majority **and** a
+  bond-weighted majority of the attestors selected for that transaction, at the same time. A
+  captured attestor set alone can halt minting or force an early liquidation at an honest price
+  with the remainder returned to the vault owner; it cannot take collateral. Attestors are not
+  slashed: the penalty is ejection and a bond that earns nothing until it unlocks. Attestations
+  travel outside the chain; if that transport fails, minting pauses and nothing else changes.
+  Every price is bounded by the depth of the markets it is read from.
 - Prices are the medians of the quotes pools publish in their own blocks; moving them needs a
   majority of *quote-tagged* blocks over a window, which is a majority of hashpower only when
   most blocks carry quotes — so the windows that decide claims are undefined until two-thirds of
