@@ -393,6 +393,9 @@ jobs:
       - run: python3 -m pip install --user pyflakes
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
+      - name: Calibration scripts' unit tests (v3 Phase A4; offline)
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest contrib/yellowback/attest/calibrate/test_calibrate.py
       - name: pyflakes (functional tests and the shared helpers)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall. The two v3 framework files
@@ -424,7 +427,7 @@ jobs:
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
-        run: python3 -m pyflakes contrib/yellowback/*.py contrib/yellowback/yellowback-quote contrib/yellowback/pool/check-coinbase contrib/yellowback/devnet/yellowback-devnet
+        run: python3 -m pyflakes contrib/yellowback/*.py contrib/yellowback/yellowback-quote contrib/yellowback/pool/check-coinbase contrib/yellowback/devnet/yellowback-devnet contrib/yellowback/attest/calibrate/*.py
       - name: The quote agent's acceptance line (plan Phase 7)
         run: contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
       - name: Fuzz corpora and the embedded replay tables agree (N34)

@@ -1,4 +1,4 @@
-# `contrib/yellowback/` — Yellowback quote agent and pool kit
+# `contrib/yellowback/` — Yellowback quote agent, pool kit and attestor agent
 
 Python 3 (≥ 3.11, standard library only) tooling that runs **beside** `ycashd`, never inside it.
 The node has no outbound networking for Yellowback: the quote agent fetches exchange prices and
@@ -11,6 +11,8 @@ pushes one number into the pool's node with `yed_setquote`; the node puts it in 
 | `yellowback-quote` | The quote agent daemon: `--conf <toml>`, polls every `poll_seconds`, calls `yed_setquote <priceMicroUsd> <sourceMask>`, `yed_setquote 0` after `fail_polls` failed aggregates (L5), RPC failures retried and never fatal; `--once`, `--dry-run`, `--mock-price <file>`, `sources` | done; `qa/rpc-tests/yellowback_quote.py` runs three of them against pool nodes |
 | `pool/` | Pool-integration kit: `yellowback-quote.toml.sample`, `check-coinbase`, `monitor-quote.sh`, systemd/launchd units, `README.md` with the carriers and per-stack notes | tools done; the per-stack notes stay a skeleton until the operator survey (§12 Q9) |
 | `test_yellowback_price.py`, `test_yellowback_quote.py` | Unit tests, no node, no network: `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py` | done |
+| `attest/` | **v3** attestor agent `yellowback-attest` (Rust; `attest`, `subscribe`, `sources`, `check-config`), its `attest.toml.sample`, fixtures for the Rust/Python aggregator cross-check, systemd/launchd units; see below | crate done; devnet integration and the nightly functional test follow (v3 plan Phase A4) |
+| `attest/calibrate/` | **v3** the two calibration measurements of proposal §16: `spreads.py` (log CoinGecko / SafeTrade / nonkyc.io for two weeks, then `analyze` → `DIVERGE_BPS_ATTEST`), `pinrate.py` (arming rate of PIN-1 over hourly history → `PIN_WINDOW`/`PIN_DELTA_BPS`), `test_calibrate.py` (offline) | done; the live runs precede the first mainnet registration |
 | `devnet/yellowback-devnet` | One-laptop Yellowback v2 network: `up [--agents]` (five regtest nodes, node 0 funded, three pools quoting — directly or through real `yellowback-quote --mock-price` agents — and mined through activation), `check`, `status`, `mine`, `price`, `wallet`, `cli [--datadir N]`, `down` | done |
 | `yellowback_fed.py`, `test_yellowback_fed.py`, `yellowback-redeem` | The retired federation coordinator and its tests; deleted in Phase 0 / Phase 7 (the feed layer lives on in `yellowback_price.py`) | removed |
 
@@ -43,3 +45,39 @@ The Phase 7 acceptance line:
 ```
 contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
 ```
+
+## Attestor agent (v3) and the calibration scripts
+
+`attest/` is a separate Rust crate (`rust-toolchain.toml` pins stable 1.91.0, `Cargo.lock`
+committed, built with `--locked`; never part of the node's `depends` build — v3 plan §5, W13). It
+runs beside a node the way the quote agent does and, like it, holds no key:
+
+| Mode | Beside | Does |
+|---|---|---|
+| `yellowback-attest attest --conf attest.toml` | an attestor's `ycashd -yellowback` | every `every_blocks` (10) blocks: aggregate the `[[sources]]` exactly as `yellowback_price.py` does (`price.rs` is a port; `fixtures/` cross-checks the two), `yed_signattestation <seq> <priceMicroUsd> <tip − ref_lag>`, publish the returned 74 bytes on the gossip topic |
+| `yellowback-attest subscribe --conf attest.toml` | any minting node (YecWallet's bundled node, the devnet's node 0) | join the topic, drop malformed or unknown-`seq` messages, `yed_addattestation` the rest; optional HTTPS `[subscribe] endpoints` as a second path |
+| `sources`, `check-config` | — | one-shot checks |
+
+Transports: `iroh` (production; `[transport] peers` bootstraps the swarm, `secret_key_file`
+keeps the endpoint id stable) and `dir` (a shared directory; tests and the regtest devnet, no
+network). `attest/README.md` documents the layout, the toolchain note (the crate's
+`.cargo/config.toml` undoes a built checkout's vendored-sources redirect) and a regtest
+walk-through; `doc/yellowback-attestor.md` is the operator's guide. Build and test:
+
+```
+cd contrib/yellowback/attest && cargo build --locked --release && cargo test --locked
+```
+
+`attest/calibrate/` holds the two measurements proposal §16 asks for before the first mainnet
+registration, standard library plus `yellowback_price.py` (imported, so the exchanges are read
+exactly as the agents read them):
+
+```
+V=../../.venv/bin/python
+$V contrib/yellowback/attest/calibrate/spreads.py log --out spreads.csv --duration 14     # two weeks, five-minute cadence (--once for cron)
+$V contrib/yellowback/attest/calibrate/spreads.py analyze spreads.csv                     # pairwise spread p95 → DIVERGE_BPS_ATTEST ≈ 3 × p95
+$V contrib/yellowback/attest/calibrate/pinrate.py --days 90 --save-csv yec-hourly.csv     # arming rate over rolling 6-hour windows → PIN_DELTA_BPS
+$V -m unittest contrib/yellowback/attest/calibrate/test_calibrate.py                      # offline
+```
+
+`attest/calibrate/README.md` explains how to read both results.
