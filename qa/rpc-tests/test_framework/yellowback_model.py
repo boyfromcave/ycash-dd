@@ -1702,7 +1702,7 @@ class YellowbackModel(object):
         return sorted(seq for _w, seq in ranked[:self.params.n_slots])
 
     def selected(self, ref_height, selector):
-        """selected(R, selector) (W9) over the stored seated \ pinnedSeqs of Snapshots[R]."""
+        """selected(R, selector) (W9) over the stored seated minus pinnedSeqs of Snapshots[R]."""
         from . import yellowback_attest as ya
         s = self.snapshots.get(ref_height)
         if s is None:
