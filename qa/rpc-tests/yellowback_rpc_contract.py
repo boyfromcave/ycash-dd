@@ -47,12 +47,13 @@ OPTIONAL = {
     'yed_getfeepayee': {'preferred'},
     'yed_gettag': {'version', 'signal', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
     'yed_validateaddress': {'address', 'keyid', 'ismine', 'transparentAddress'},
-    'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerPubKey', 'feeVout', 'assignments', 'assignedCents'},
+    'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerPubKey', 'feeVout', 'attestFeeVout', 'assignments',
+                          'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle'},
 }
 
 
 # Fields the text marks *null when …* although the example shows a value (by path suffix).
-NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee'},
+NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor'},
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
             'yed_listpositions': {'closeHeight', 'underwaterAt'}, 'yed_listvaults': {'closeHeight', 'underwaterAt'},
             'yed_listclaimable': {'underwaterAt'}, 'yed_gettxinfo': {'payee'}, 'yed_validaterawtransaction': {'payee'},
@@ -140,10 +141,10 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 2)
+        assert_equal(c.doc['rpcversion'], 3)
 
         print('before activation: mintpol-not-active')
-        assert_equal(user.yed_getinfo()['rpcversion'], 2)
+        assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])
         assert_rpc_error('mintpol-not-active', user.yed_mint, 10000, 48)
         assert_rpc_error('fee-no-eligible-payee', user.yed_getfeepayee, 1, 10 * COIN)
 
