@@ -91,7 +91,7 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
     StateView& templateOverlay = view.Overlay();
     OverlayStateView sub(templateOverlay);
     State st(sub);
-    const TxOutcome out = ProcessTx(st, p, tx, nHeight);
+    const TxOutcome out = ProcessTx(st, p, tx, nHeight, index.GetSigCache());   // W8: the dry run fills the cache ConnectBlock will hit
     const bool strict = index.GetMinerConfig().templatePolicy != "consensus";
     const bool abandoned = index.IsAbandoned();                    // L13: TPL-1/2 stand down for vault spends
     std::string why;
@@ -103,9 +103,12 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
             else if (!IsWalletSpendShape(tx.vin[0].scriptSig)) why = "vault-spend-shape";
         }
     }
-    if (why.empty() && strict) {                                   // TPL-2
+    if (why.empty() && strict) {                                   // TPL-2 (v3: a VOID by MINT-9/10 is a VOID mint like any other; a
+                                                                   // claim failing RED-5 is TPL-1's redFailed above; a CLAIM_NOTICE that
+                                                                   // NOT-1 would not register is skipped here)
         if (out.log.Type() == TxLogType::MINT && out.log.verdict != verdict::OK) why = "void-mint:" + out.log.verdict;
         else if (out.log.Type() == TxLogType::TRANSFER && out.log.burned > 0) why = "transfer-burns";
+        else if (fp.has_value() && fp->payload.type == PayloadType::CLAIM_NOTICE && out.log.Type() != TxLogType::CLAIM_NOTICE) why = "notice-fails-not1";
         else if (spendsVoid && !abandoned && !tx.vin.empty()) {
             std::optional<VaultSpendPath> path = ParseVaultSpendPath(tx.vin[0].scriptSig);
             if (path.has_value() && !path->ownerPath) why = "vault-claim-void";

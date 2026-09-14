@@ -16,6 +16,7 @@
 #include "yellowback/view.h"
 
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -99,7 +100,7 @@ struct MinerStatus
     MinerStatus() : kind("none"), signal(false), registered(false), eligible(false) {}
 };
 
-/** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, or no valve. */
+/** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, no valve, or a schema mismatch at start. */
 struct TestFault
 {
     enum Hook { NONE, CHECK, COMMIT, UNDO };
@@ -108,8 +109,104 @@ struct TestFault
     bool armed;                       //!< consumed on the first firing
     bool templateFault;               //!< FilterTemplate disagrees with EvaluateBlock once (TPL-3)
     bool noValve;                     //!< ACT-7 disabled (yellowback_runbook.py)
+    bool schemaMismatch;              //!< SyncToChain treats the stored tip as a foreign SCHEMA_VERSION once (the v3 rebuild path, yellowback_index.py)
 
-    TestFault() : storageHook(NONE), armed(false), templateFault(false), noValve(false) {}
+    TestFault() : storageHook(NONE), armed(false), templateFault(false), noValve(false), schemaMismatch(false) {}
+};
+
+// ---------------------------------------------------------------------------
+// v3: the attestation pool and the verified-signature cache (v3 plan W5, W8, §3.9)
+
+/** One pooled attestation and the index tip at which it arrived (yed_getattestations.receivedHeight). */
+struct PooledAttestation
+{
+    Attestation att;
+    int receivedHeight;
+
+    PooledAttestation() : receivedHeight(0) {}
+};
+
+/**
+ * The node's attestation pool (W5, R14): in memory, non-consensus, fed by yed_addattestation,
+ * the newest POOL_PER_SEQ attestations per seq by citedHeight (ceil(ATTEST_MAX_AGE / k) + 1 = 3:
+ * at most two signed prices fall in a bundle's window, so three keeps one spare). Empty after a
+ * restart until the subscriber refills it. Never a state input: BuildBundle reads it, no rule does.
+ */
+class AttestationPool
+{
+public:
+    static const size_t POOL_PER_SEQ = 3;
+
+    /**
+     * Pool one verified attestation. Returns false for a byte-identical resubmission (nothing
+     * changes). `replaced` is set when an older attestation of the seq was dropped to make room
+     * or when a different attestation for the same citedHeight was overwritten (the newest wins;
+     * the pool is not the equivocation detector).
+     */
+    bool Add(const Attestation& att, int receivedHeight, bool& replaced);
+    /** Every pooled attestation, ascending seq then citedHeight. */
+    std::vector<PooledAttestation> All() const;
+    /** The newest attestation of `seq` with citedHeight in (R - maxAge, R] and >= startHeight. */
+    std::optional<Attestation> Freshest(uint16_t seq, int refHeight, int maxAge, int startHeight) const;
+    /** Some attestation of `seq` cites a height above `minExclusive` (the contract's poolFresh predicates). */
+    bool HasNewerThan(uint16_t seq, int64_t minExclusive) const;
+    size_t Size() const;
+    void Clear() { bySeq.clear(); }
+
+private:
+    std::map<uint16_t, std::vector<PooledAttestation>> bySeq;   //!< each vector ascending by citedHeight
+};
+
+/** W8, R3: the cache holds this many verified signatures (16,384 x 33 bytes). */
+static const size_t SIG_CACHE_ENTRIES = 16384;
+
+/**
+ * The LRU implementation of bundle.h's SigCache, keyed by SHA256(attestation74 || blockHash(citedHeight))
+ * -> valid. Node-local, never state: a hit and a cold verification always agree because the key
+ * covers every input of the verification. Filled by MP-1, FilterTemplate, ConnectBlock, the dry
+ * runs and yed_addattestation, all under cs_yellowback.
+ */
+class LruSigCache : public SigCache
+{
+public:
+    explicit LruSigCache(size_t capacityIn = SIG_CACHE_ENTRIES) : capacity(capacityIn), hits(0), misses(0) {}
+    std::optional<bool> Lookup(const uint256& key) const override;
+    void Insert(const uint256& key, bool valid) override;
+    size_t Size() const { return entries.size(); }
+    size_t Capacity() const { return capacity; }
+    uint64_t Hits() const { return hits; }
+    uint64_t Misses() const { return misses; }
+    void Clear();
+
+private:
+    struct Entry
+    {
+        bool valid;
+        std::list<uint256>::iterator pos;
+    };
+    size_t capacity;
+    mutable std::list<uint256> order;              //!< most recently used at the front
+    mutable std::map<uint256, Entry> entries;
+    mutable uint64_t hits, misses;
+};
+
+/** What BuildBundle assembled for (R, selector) (W6, W9; yed_buildbundle's shape). */
+struct BuiltBundle
+{
+    int refHeight;
+    std::vector<unsigned char> selector;
+    bool armed;                          //!< ArmedAt(R)
+    std::vector<uint16_t> selected;      //!< selected(R, selector) in draw order
+    std::vector<uint16_t> seqs;          //!< the seq that contributed, ascending (the bundle's order)
+    std::vector<uint16_t> missing;       //!< selected seq with no usable attestation, draw order
+    Bundle bundle;
+    std::optional<MicroUsd> aMint, aClaim;
+    size_t mSelect;
+    bool sufficient;                     //!< seqs.size() >= mSelect
+
+    BuiltBundle() : refHeight(0), armed(false), mSelect(0), sufficient(false) {}
+    /** The contract's message: "bundle-insufficient: <count> of <selected> selected attestors have a fresh attestation; missing seq <a,b,...>". */
+    std::string InsufficientMessage() const;
 };
 
 class YellowbackIndex;
@@ -285,6 +382,39 @@ public:
     /** TPL-3's unit companion: true once after -yellowbacktestfault=template. */
     bool ConsumeTemplateFault();
 
+    // ------------------------------------------------------------------ v3: pool, cache, bundles (W5, W6, W8)
+
+    /**
+     * yed_addattestation (S4): verify one attestation against the tip and pool it. In order:
+     * attest-unknown-seq (no Attestors record), attest-not-eligible (EJECTED or WITHDRAWN),
+     * attest-stale (citedHeight <= tip - REF_LAG - ATTEST_MAX_AGE, above the tip, or below
+     * startHeight), attest-range, attest-bad-sig (compact low-S under attestorPubKey(seq) with this
+     * chain's blockHash(citedHeight); through the cache, which it fills). `reason` starts with the
+     * identifier. `replaced` as AttestationPool::Add. Takes cs_yellowback.
+     */
+    bool AddAttestation(const Attestation& att, std::string& reason, bool* replaced = nullptr);
+    std::vector<PooledAttestation> PoolAttestations() const;
+    size_t PoolSize() const;
+    /** The pool holds an attestation of `seq` with citedHeight > minExclusive (the contract's poolFresh). */
+    bool PoolHasNewerThan(uint16_t seq, int64_t minExclusive) const;
+    /**
+     * The bundle this node would build for (R, selector) (W6, W9): Selected(R, selector), the
+     * freshest pooled attestation per selected seq with citedHeight in (R - ATTEST_MAX_AGE, R]
+     * whose signature still verifies against the chain's blockHash(citedHeight) (a reorg can
+     * invalidate a pooled one), ascending seq in the bundle, the statistic with weights at R.
+     * Never refuses: `sufficient` says whether seqs.size() >= M_SELECT. Needs cs_yellowback only.
+     */
+    BuiltBundle BuildBundleInfo(int refHeight, const std::vector<unsigned char>& selector);
+    /** BuildBundleInfo, or nullopt with the contract's bundle-insufficient message in `reason`. */
+    std::optional<Bundle> BuildBundle(int refHeight, const std::vector<unsigned char>& selector, std::string& reason);
+    /** The W8 cache every evaluation this index runs goes through (also handed to the RPC dry runs). */
+    SigCache* GetSigCache() { return &sigCache; }
+    const LruSigCache& SigCacheStats() const { return sigCache; }
+    /** True for the rest of the session when SyncToChain found a foreign SCHEMA_VERSION and rebuilt (yed_getinfo.rebuilt). */
+    bool WasRebuilt() const { return rebuilt; }
+    void SetAttestPolicy(const AttestPolicy& p) { attestPolicy = p; }
+    const AttestPolicy& GetAttestPolicy() const { return attestPolicy; }
+
     /**
      * Wallet hooks (plan §4.6, stages ii and iii of coin locking), set by the
      * wallet layer when there is one. Called on the notifier thread without
@@ -332,6 +462,10 @@ private:
     bool IsAbandonedLocked() const;
     bool IsSunsetLocked() const;
     std::optional<std::string> MempoolCheckLocked(const CTransaction& tx);
+    /** Snapshots[h].blockHash, nullopt below startHeight or when the row is missing (cs_yellowback). */
+    std::optional<uint256> BlockHashAtLocked(int64_t height) const;
+    /** One signature through the cache (cs_yellowback). */
+    bool AttestationValidLocked(const Attestation& att, const CPubKey& pk, const uint256& blockHash);
 
     Params params;
     std::vector<Params> paramSets;
@@ -339,11 +473,15 @@ private:
     bool healthy;
     std::string unhealthyReason;
     bool stopped;
+    bool rebuilt;
 
     MinerConfig miner;
     PayeePolicy payeePolicy;
+    AttestPolicy attestPolicy;
     QuoteHolder quote;
     TestFault testFault;
+    AttestationPool pool;
+    LruSigCache sigCache;
 
     Evaluation cache;
     std::set<uint256> rejected;                 //!< the Rejected table, mirrored in memory (loaded at open)

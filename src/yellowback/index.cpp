@@ -49,7 +49,7 @@ TemplateView::~TemplateView() {}
 // Construction, health, storage
 
 YellowbackIndex::YellowbackIndex(const Params& paramsIn, const fs::path& dir, size_t cacheSize, bool fWipe)
-    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false),
+    : params(paramsIn), db(new YellowbackDB(dir, cacheSize, false, fWipe)), healthy(true), stopped(false), rebuilt(false),
       payeePolicy(PayeePolicy::Defaults(paramsIn)), valveTripped(false), suppressedBlocks(0), sunsetLogged(false)
 {
     paramSets.push_back(paramsIn);
@@ -148,6 +148,8 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         f.templateFault = true;
     } else if (spec == "novalve") {
         f.noValve = true;
+    } else if (spec == "schema") {
+        f.schemaMismatch = true;
     } else if (boost::algorithm::starts_with(spec, "storage:")) {
         std::vector<std::string> parts;
         boost::split(parts, spec, boost::is_any_of(":"));
@@ -163,7 +165,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         }
         f.armed = true;
     } else {
-        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], template or novalve");
+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], template, novalve or schema");
     }
     testFault = f;
     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
@@ -187,7 +189,7 @@ bool YellowbackIndex::ApplyOne(const CBlock& block, int height, const uint256& h
     UndoRecord undo;
     // The block subsidy is EvaluateBlock's argument (N22): state.cpp links against nothing in main.cpp.
     const CAmount subsidy = GetBlockSubsidy(height, ::Params().GetConsensus());
-    std::optional<std::string> err = ApplyBlock(*db, ParamsAt(height), block, height, hash, subsidy, undo);
+    std::optional<std::string> err = ApplyBlock(*db, ParamsAt(height), block, height, hash, subsidy, undo, &sigCache);
     if (err.has_value()) {
         db->Discard();
         error = err.value();
@@ -236,8 +238,17 @@ bool YellowbackIndex::SyncToChain()
     }
 
     std::optional<TipRecord> tip = State(*db).GetTip();
-    if (tip.has_value() && (tip->schemaVersion != SCHEMA_VERSION || tip->network != params.network)) {
-        Wipe("schema or network changed");
+    if (tip.has_value() && (tip->schemaVersion != SCHEMA_VERSION || testFault.schemaMismatch)) {
+        // A v1 or v2 index directory (v3 plan §3.6): wipe and rebuild from the chain below, as v2 did for
+        // v1; yed_getinfo.rebuilt reports it for the rest of the session.
+        LogPrintf("yellowback: index schema %u differs from %u; rebuilding from the chain\n", tip->schemaVersion, SCHEMA_VERSION);
+        testFault.schemaMismatch = false;
+        rebuilt = true;
+        Wipe("schema changed");
+        tip = std::nullopt;
+    }
+    if (tip.has_value() && tip->network != params.network) {
+        Wipe("network changed");
         tip = std::nullopt;
     }
     if (tip.has_value()) {
@@ -308,7 +319,7 @@ const YellowbackIndex::Evaluation& YellowbackIndex::Evaluate(const CBlock& block
     cache = Evaluation();
     OverlayStateView overlay(*db);
     const CAmount subsidy = GetBlockSubsidy(height, ::Params().GetConsensus());
-    cache.ev = EvaluateBlock(overlay, p, block, height, blockHash, subsidy);
+    cache.ev = EvaluateBlock(overlay, p, block, height, blockHash, subsidy, &sigCache);
     cache.writes = overlay.Pending();
     cache.blockHash = blockHash;
     cache.tipHash = tipHash;
@@ -702,7 +713,7 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     pseudo.vtx.push_back(CTransaction(cb));
     pseudo.vtx.push_back(tx);
     OverlayStateView overlay(*db);
-    BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0);
+    BlockEvaluation ev = EvaluateBlock(overlay, p, pseudo, next, uint256(), 0, &sigCache);   // RED-1's bundle fills the W8 cache
     if (ev.blockInvalid) {
         const std::string::size_type colon = ev.reason.find(':');
         return colon == std::string::npos ? ev.reason : ev.reason.substr(0, colon);
@@ -869,6 +880,245 @@ void YellowbackIndex::SyncTransaction(const CTransaction& tx, const CBlock* pblo
     } catch (...) {
         LogPrintf("yellowback: SyncTransaction hook failed\n");
     }
+}
+
+// ---------------------------------------------------------------------------
+// v3: the attestation pool, the signature cache and BuildBundle (W5, W6, W8)
+
+bool AttestationPool::Add(const Attestation& att, int receivedHeight, bool& replaced)
+{
+    replaced = false;
+    std::vector<PooledAttestation>& v = bySeq[att.seq];
+    for (size_t i = 0; i < v.size(); i++) {
+        if (v[i].att.citedHeight != att.citedHeight) continue;
+        if (v[i].att == att) return false;                    // byte-identical: nothing changes
+        v[i].att = att;                                       // the newest for this height wins
+        v[i].receivedHeight = receivedHeight;
+        replaced = true;
+        return true;
+    }
+    PooledAttestation p;
+    p.att = att;
+    p.receivedHeight = receivedHeight;
+    std::vector<PooledAttestation>::iterator at = v.begin();
+    while (at != v.end() && at->att.citedHeight < att.citedHeight) ++at;
+    v.insert(at, p);
+    while (v.size() > POOL_PER_SEQ) {                          // drop the oldest by citedHeight
+        v.erase(v.begin());
+        replaced = true;
+    }
+    return true;
+}
+
+std::vector<PooledAttestation> AttestationPool::All() const
+{
+    std::vector<PooledAttestation> out;
+    for (const auto& kv : bySeq) out.insert(out.end(), kv.second.begin(), kv.second.end());
+    return out;
+}
+
+std::optional<Attestation> AttestationPool::Freshest(uint16_t seq, int refHeight, int maxAge, int startHeight) const
+{
+    std::map<uint16_t, std::vector<PooledAttestation>>::const_iterator it = bySeq.find(seq);
+    if (it == bySeq.end()) return std::nullopt;
+    std::optional<Attestation> best;
+    for (const PooledAttestation& p : it->second) {           // ascending citedHeight: the last match is the newest
+        const int64_t h = p.att.citedHeight;
+        if (h > (int64_t)refHeight || h <= (int64_t)refHeight - maxAge || h < (int64_t)startHeight) continue;
+        best = p.att;
+    }
+    return best;
+}
+
+bool AttestationPool::HasNewerThan(uint16_t seq, int64_t minExclusive) const
+{
+    std::map<uint16_t, std::vector<PooledAttestation>>::const_iterator it = bySeq.find(seq);
+    if (it == bySeq.end()) return false;
+    for (const PooledAttestation& p : it->second) {
+        if ((int64_t)p.att.citedHeight > minExclusive) return true;
+    }
+    return false;
+}
+
+size_t AttestationPool::Size() const
+{
+    size_t n = 0;
+    for (const auto& kv : bySeq) n += kv.second.size();
+    return n;
+}
+
+std::optional<bool> LruSigCache::Lookup(const uint256& key) const
+{
+    std::map<uint256, Entry>::iterator it = entries.find(key);
+    if (it == entries.end()) {
+        misses++;
+        return std::nullopt;
+    }
+    hits++;
+    order.splice(order.begin(), order, it->second.pos);       // most recently used
+    return it->second.valid;
+}
+
+void LruSigCache::Insert(const uint256& key, bool valid)
+{
+    std::map<uint256, Entry>::iterator it = entries.find(key);
+    if (it != entries.end()) {
+        it->second.valid = valid;
+        order.splice(order.begin(), order, it->second.pos);
+        return;
+    }
+    if (capacity == 0) return;
+    while (entries.size() >= capacity && !order.empty()) {
+        entries.erase(order.back());
+        order.pop_back();
+    }
+    order.push_front(key);
+    Entry e;
+    e.valid = valid;
+    e.pos = order.begin();
+    entries[key] = e;
+}
+
+void LruSigCache::Clear()
+{
+    entries.clear();
+    order.clear();
+    hits = misses = 0;
+}
+
+std::string BuiltBundle::InsufficientMessage() const
+{
+    std::string m = strprintf("bundle-insufficient: %u of %u selected attestors have a fresh attestation; missing seq ", (unsigned)seqs.size(), (unsigned)selected.size());
+    for (size_t i = 0; i < missing.size(); i++) m += (i ? "," : "") + strprintf("%u", (unsigned)missing[i]);
+    return m;
+}
+
+std::optional<uint256> YellowbackIndex::BlockHashAtLocked(int64_t height) const
+{
+    AssertLockHeld(cs_yellowback);
+    if (height < params.startHeight || height < 0 || height > 0xFFFFFFFFLL) return std::nullopt;
+    std::optional<Snapshot> s = State(*db).GetSnapshot((uint32_t)height);
+    if (!s.has_value() || s->blockHash.IsNull()) return std::nullopt;
+    return s->blockHash;
+}
+
+bool YellowbackIndex::AttestationValidLocked(const Attestation& att, const CPubKey& pk, const uint256& blockHash)
+{
+    AssertLockHeld(cs_yellowback);
+    const uint256 key = SigCacheKey(att, blockHash);
+    std::optional<bool> cached = sigCache.Lookup(key);
+    if (cached.has_value()) return cached.value();
+    const bool valid = VerifyCompactSig(pk, AttestMessage(att.seq, att.priceMicroUsd, att.citedHeight, blockHash), att.sig);
+    sigCache.Insert(key, valid);
+    return valid;
+}
+
+bool YellowbackIndex::AddAttestation(const Attestation& att, std::string& reason, bool* replacedOut)
+{
+    LOCK(cs_yellowback);
+    State st(*db);
+    const int tip = TipHeight();
+    const Params& p = ParamsAt(std::max(tip, 0));
+    std::optional<AttestorRecord> rec = st.GetAttestor(att.seq);
+    if (!rec.has_value()) {
+        reason = strprintf("attest-unknown-seq: no attestor with seq %u", (unsigned)att.seq);
+        return false;
+    }
+    if (rec->Status() == AttestorStatus::EJECTED || rec->Status() == AttestorStatus::WITHDRAWN) {
+        reason = strprintf("attest-not-eligible: seq %u is %s", (unsigned)att.seq, AttestorStatusName(rec->Status()));
+        return false;
+    }
+    const int64_t cited = att.citedHeight;
+    const int64_t floor = (int64_t)tip - g_yellowbackMintLag - p.attestMaxAge;
+    if (cited <= floor || cited > tip || cited < p.startHeight) {
+        reason = strprintf("attest-stale: citedHeight %d is not in (%d, %d]", (int)cited, (int)std::max<int64_t>(floor, p.startHeight - 1), tip);
+        return false;
+    }
+    if ((MicroUsd)att.priceMicroUsd < PRICE_MIN || (MicroUsd)att.priceMicroUsd > PRICE_MAX) {
+        reason = strprintf("attest-range: priceMicroUsd %u is outside [%d, %d]", (unsigned)att.priceMicroUsd, (int)PRICE_MIN, (int)PRICE_MAX);
+        return false;
+    }
+    std::optional<uint256> blockHash = BlockHashAtLocked(cited);
+    if (!blockHash.has_value() || !AttestationValidLocked(att, rec->AttestorKey(), blockHash.value())) {
+        reason = strprintf("attest-bad-sig: the signature does not verify under attestorPubKey(%u) for block %d", (unsigned)att.seq, (int)cited);
+        return false;
+    }
+    bool replaced = false;
+    pool.Add(att, tip, replaced);
+    if (replacedOut) *replacedOut = replaced;
+    reason.clear();
+    return true;
+}
+
+std::vector<PooledAttestation> YellowbackIndex::PoolAttestations() const
+{
+    LOCK(cs_yellowback);
+    return pool.All();
+}
+
+size_t YellowbackIndex::PoolSize() const
+{
+    LOCK(cs_yellowback);
+    return pool.Size();
+}
+
+bool YellowbackIndex::PoolHasNewerThan(uint16_t seq, int64_t minExclusive) const
+{
+    LOCK(cs_yellowback);
+    return pool.HasNewerThan(seq, minExclusive);
+}
+
+BuiltBundle YellowbackIndex::BuildBundleInfo(int refHeight, const std::vector<unsigned char>& selector)
+{
+    LOCK(cs_yellowback);
+    BuiltBundle b;
+    b.refHeight = refHeight;
+    b.selector = selector;
+    const Params& p = ParamsAt(std::max(refHeight, 0));
+    b.mSelect = (size_t)std::max(0, p.mSelect);
+    b.armed = ArmedAt(*db, p, refHeight);
+    b.selected = Selected(*db, p, refHeight, selector);
+    State st(*db);
+    std::optional<Snapshot> snap = refHeight >= p.startHeight && refHeight >= 0 ? st.GetSnapshot((uint32_t)refHeight) : std::nullopt;
+    const AttestState attest = snap.has_value() ? snap->attest : AttestState();
+    std::vector<std::pair<uint16_t, Attestation>> chosen;
+    for (uint16_t seq : b.selected) {
+        std::optional<Attestation> att = pool.Freshest(seq, refHeight, p.attestMaxAge, p.startHeight);
+        std::optional<AttestorRecord> rec = att.has_value() ? st.GetAttestor(seq) : std::nullopt;
+        std::optional<uint256> blockHash = rec.has_value() ? BlockHashAtLocked(att->citedHeight) : std::nullopt;
+        // A pooled attestation was verified at arrival; after a reorg its cited block may carry another hash (R9).
+        if (!blockHash.has_value() || !AttestationValidLocked(att.value(), rec->AttestorKey(), blockHash.value())) {
+            b.missing.push_back(seq);
+            continue;
+        }
+        chosen.push_back(std::make_pair(seq, att.value()));
+    }
+    std::sort(chosen.begin(), chosen.end(), [](const std::pair<uint16_t, Attestation>& x, const std::pair<uint16_t, Attestation>& y) { return x.first < y.first; });
+    std::vector<arith_uint256> weights;
+    for (const auto& c : chosen) {
+        b.seqs.push_back(c.first);
+        b.bundle.atts.push_back(c.second);
+        std::optional<AttestorRecord> rec = st.GetAttestor(c.first);
+        weights.push_back(rec.has_value() ? AttestorWeight(rec.value(), attest, p, refHeight) : arith_uint256(0));
+    }
+    b.sufficient = b.seqs.size() >= b.mSelect && !b.seqs.empty();
+    if (b.sufficient) {
+        auto stat = BundleStat(b.bundle.atts, weights, b.mSelect, p.qLowBps, p.qHighBps);
+        b.aMint = stat.first;
+        b.aClaim = stat.second;
+    }
+    return b;
+}
+
+std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vector<unsigned char>& selector, std::string& reason)
+{
+    BuiltBundle b = BuildBundleInfo(refHeight, selector);
+    if (!b.sufficient) {
+        reason = b.InsufficientMessage();
+        return std::nullopt;
+    }
+    reason.clear();
+    return b.bundle;
 }
 
 // ---------------------------------------------------------------------------
