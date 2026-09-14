@@ -187,6 +187,7 @@ class YellowbackAttestEnforcementTest(YellowbackEnforcementTest):
         check = user.yed_validaterawtransaction(hex_)
         assert_equal((check['blockValid'], check['verdict'], check['wouldBeRejected']), (False, 'red1-bundle-shape', True))
         rpc_error('yellowback-vault-spend', user.sendrawtransaction, hex_)
+        self.reset_peer_scores()      # the N1 assertion below measures Yellowback alone (stock tx-expired / bad-prevblk points, see reset_peer_scores)
         blockhash, txid = self.stock_block_with(hex_)
         self.assert_rejected_v3(blockhash, 'red1-bundle-shape')
         assert_equal(self.nodes[OBSERVER].yed_getvault(v['txid'])['status'], 'CLOSED')     # node 5 applied the failing spend
@@ -232,6 +233,7 @@ class YellowbackAttestEnforcementTest(YellowbackEnforcementTest):
         check = user.yed_validaterawtransaction(bad)
         assert_equal((check['blockValid'], check['verdict']), (False, 'red5-residual'))
         rpc_error('yellowback-vault-spend', user.sendrawtransaction, bad)
+        self.reset_peer_scores()      # the out-mine of the previous case's stock block accrues a stock tx-expired point at DoS 10
         blockhash, _txid = self.stock_block_with(bad)
         self.assert_rejected_v3(blockhash, 'red5-residual')
         self.pools_outmine(blockhash)

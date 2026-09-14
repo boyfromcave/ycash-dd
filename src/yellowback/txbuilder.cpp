@@ -712,21 +712,27 @@ struct BundleFactsW
 /**
  * The bundle for (R, selector): unarmed => empty facts and the bundle is ignored (the carrier is
  * still built, one code path); armed => the explicit bytes must verify under BUNDLE-1 with both
- * statistics defined, else `bundle-insufficient` in the contract's grammar. No bytes while armed is
- * the A2/A3 seam: the node's pool path replaces the refusal after both chunks merge.
+ * statistics defined, else `bundle-insufficient` in the contract's grammar. No bytes while armed
+ * takes the node's pool path (BuildBundleInfo); an explicit bundleHex overrides it.
  */
 BundleFactsW BundleAt(const Context& ctx, int R, const std::vector<unsigned char>& selector, const std::optional<std::vector<unsigned char>>& bundle)
 {
     BundleFactsW f;
     f.armed = ArmedAt(ctx.st.View(), ctx.params, R);
     if (!f.armed) return f;
-    if (!bundle.has_value() || bundle->empty()) {
-        // A2/A3 merge: call g_yellowback->BuildBundle(R, selector, reason) here and use its bytes instead of refusing.
-        throw std::runtime_error("bundle-insufficient: no bundle given (the node's pool path is wired at the A2/A3 merge)");
+    std::vector<unsigned char> bytes;
+    if (bundle.has_value() && !bundle->empty()) {
+        bytes = bundle.value();                       // bundleHex overrides the pool
+    } else {
+        // The pool path: the bundle this node would build from its attestation pool (W6), then the
+        // same verification as explicit bytes so the two paths cannot disagree.
+        BuiltBundle built = ctx.index.BuildBundleInfo(R, selector);
+        if (!built.sufficient) throw std::runtime_error(built.InsufficientMessage());
+        bytes = EncodeBundle(built.bundle);
     }
-    std::optional<Bundle> decoded = DecodeBundle(bundle.value(), (size_t)std::max(0, ctx.params.bundleMax));
+    std::optional<Bundle> decoded = DecodeBundle(bytes, (size_t)std::max(0, ctx.params.bundleMax));
     if (!decoded.has_value()) throw std::runtime_error("bundle-malformed: bundleHex is not \"YA\" 0x01 count followed by count x 74-byte attestations");
-    BundleVerdict v = VerifyBundleBytes(ctx.st.View(), ctx.params, bundle.value(), R, selector, &f.selected);
+    BundleVerdict v = VerifyBundleBytes(ctx.st.View(), ctx.params, bytes, R, selector, &f.selected);
     if (!v.ok || !v.aMint.has_value() || !v.aClaim.has_value()) {
         std::set<uint16_t> have;
         for (const Attestation& a : decoded->atts) have.insert(a.seq);
@@ -740,7 +746,7 @@ BundleFactsW BundleAt(const Context& ctx, int R, const std::vector<unsigned char
         throw std::runtime_error(strprintf("bundle-insufficient: %u of %u selected attestors have a fresh attestation; missing seq %s (BUNDLE-1 at %d: %s)",
                                            count, (unsigned)f.selected.size(), missing.empty() ? "none" : missing, R, v.ok ? verdict::BUNDLE_STAT : v.reason.c_str()));
     }
-    f.bundle = bundle.value();
+    f.bundle = bytes;
     for (const Attestation& a : v.C) f.seqs.push_back(a.seq);
     f.aMint = v.aMint;
     f.aClaim = v.aClaim;

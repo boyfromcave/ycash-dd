@@ -42,7 +42,7 @@ from test_framework.yellowback_util import (
     term_class_of,
 )
 from test_framework import yellowback_model as ym
-from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint, attested_micro
+from test_framework.yellowback_attest import ArmedModeMixin, armed_raw_mint
 
 SUPPLY_CAP_BPS = 60
 
@@ -136,7 +136,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         return self.nodes[0].yed_getinfo()['height'] - REF_LAG
 
     def collateral(self, cents=10000, lock=48):
-        return self.nodes[0].yed_estimatecollateral(cents, lock)['requiredZat']
+        return self.estimate(self.nodes[0], cents, lock)['requiredZat']
 
     def run_test(self):
         nodes = self.nodes

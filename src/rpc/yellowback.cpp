@@ -1870,7 +1870,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
     AssertLockHeld(index.cs_yellowback);
     ClaimEstimate e;
     State st(index.View());
-    const int r = tip - g_yellowbackMintLag;
+    const int r = tip;                 // a vault spend's R is the index tip (txbuilder's spendRefHeight), not tip - REF_LAG
     const Params& p = index.ParamsAt(std::max(r, 0));
     e.refHeight = r;
     e.armed = r >= p.startHeight && ArmedAt(index.View(), p, r);
@@ -1898,6 +1898,7 @@ ClaimEstimate EstimateClaim(YellowbackIndex& index, const COutPoint& vault, cons
         e.attestFeeZat = AttestFeeZat(FeeZat(v.collateralZat, p.feeMin, p.feeBps), p.attestFeeBps);
     } else {
         e.pClaim = e.xClaim;                         // the cross-section alone; claimPath stays ""
+        e.pEmerg = e.xClaim;                         // likewise for the emergency clause and canNotice (min(xClaim, aClaim) <= xClaim)
     }
     const bool underA = IsUnderwater(v.collateralZat, e.pClaim, v.mintedCents, p.claimThresholdBps);
     std::optional<NoticeRecord> notice = st.GetNotice(vault);

@@ -200,6 +200,16 @@ that your attestations reach the network, run `yellowback-attest subscribe` besi
 ask a minter) and check `yed_getattestations` there for your `seq` with `fresh: true`. The agent
 logs one `info` line per publish.
 
+**Track the market; never attest a constant (PIN-2).** The mirror of the pools' PIN-1 applies to
+attestors: when the cross-section `xMint` moved by more than `PIN_DELTA_BPS` (5 %) over the last
+`PIN_WINDOW` blocks, a `seq` whose confirmed bundle rows in that window (at least `PIN_MIN_TAGS`
+of them) all carry one price is pinned — it leaves `seated(R)` for selection and its
+attestations stop contributing while the pin holds. And the same threshold governs the pools:
+a pool whose tags are constant is pinned once *your* attested prices move more than 5 % within
+a window, which is what the calibration scripts in `contrib/yellowback/` exercise. The agent's
+sources must be live market data; a fixed price in `attest.toml` for anything but a regtest
+walk-through is a way to be selected and then ignored.
+
 ## Arming, and the day's notice
 
 Nothing reads attestations until the layer **arms** (proposal §6.4, D-4). At the first snapshot

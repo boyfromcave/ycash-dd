@@ -31,6 +31,7 @@
 #include "main.h"
 #include "rpc/protocol.h"
 #include "rpc/server.h"
+#include "rpc/yellowbackrpc.h"
 #include "script/standard.h"
 #include "txmempool.h"
 #include "utilstrencodings.h"
@@ -971,7 +972,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
             "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN)\n"
             "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK; bondLocktime = tip + 1 + lockBlocks\n"
             "3. flags       (numeric, optional, default 0) bits 0-1 source tier, bit 2 pool operator\n"
-            "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\" }\n");
+            "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\", \"warning\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const CAmount bondZat = AmountFromValue(params[0]);
@@ -1015,7 +1016,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
     fl.pushKV("pool", (built.flags & 4) != 0);
     o.pushKV("flags", fl);
     o.pushKV("maturesAt", (int64_t)maturesAt);
-    if (!built.warning.empty()) o.pushKV("warning", built.warning);
+    o.pushKV("warning", built.warning);
     return o;
 }
 
@@ -1122,7 +1123,7 @@ UniValue yed_reportequivocation(const UniValue& params, bool fHelp)
             "\nReport two attestations of one attestor for one height at two prices (EQV-1): the carrier step with a bundle of\n"
             "exactly the two, then a transaction carrying the EQUIVOCATION payload. The attestor is EJECTED when it confirms.\n"
             "Refused with not-equivocation (the message says which condition fails), attest-malformed.\n"
-            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"seq\", \"citedHeight\", \"priceA\", \"priceB\" }\n");
+            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"refHeight\", \"seq\", \"citedHeight\", \"priceA\", \"priceB\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     const Attestation a = ParseAttestationArg(params[0], "attestationHexA");
@@ -1255,12 +1256,8 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     const int h = IndexHeight(index);
     const bool abandoned = index.IsAbandoned();
     const int64_t balance = yw.ConfirmedCents();
-    // v3: the tip snapshot's arming and cross-section pClaim; the emergency clause is judged under
-    // xClaim here (pEmerg = min(xClaim, aClaim) <= xClaim, so "under the ratio at xClaim" is a
-    // sufficient condition) — the pool's own aClaim joins at the A2/A3 merge.
-    const bool armedTip = ArmedAt(index.View(), p, h);
-    std::optional<Snapshot> tipSnap = SnapshotAt(st, p, h);
-    const std::optional<MicroUsd> xClaimTip = tipSnap.has_value() ? tipSnap->PClaim() : std::nullopt;
+    // v3: claimable by either RED-4 clause and canNotice under this node's pEmerg come from the
+    // same estimate yed_listclaimable and yed_getvault read (yellowback::rpc::EstimateClaim).
     UniValue arr(UniValue::VARR);
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
@@ -1275,16 +1272,11 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("noticed", noticed);
         o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
-        const bool underEmergency = active && IsUnderwater(v.collateralZat, xClaimTip, v.mintedCents, p.emergencyRatioBps);
-        const bool clauseB = noticed && armedTip && (int64_t)h - notice->refHeight >= p.emergencyPersist &&
-                             (int64_t)h - notice->refHeight <= p.emergencyNoticeTtl && underEmergency && h >= v.claimHeight;
-        const bool claimable = o["claimable"].get_bool() || clauseB;
-        const bool standing = noticed && (int64_t)h - notice->height <= p.emergencyNoticeTtl;
+        const yellowback::rpc::ClaimEstimate est = yellowback::rpc::EstimateClaim(index, out, v, h);
         o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
-        o.pushKV("canClaim", claimable && balance >= v.mintedCents);
+        o.pushKV("canClaim", est.claimable && balance >= v.mintedCents);
         o.pushKV("canSweep", active && abandoned && h >= v.lockHeight);
-        // A2/A3 merge: with the pool's aClaim, add "and not claimable under pClaim = max(xClaim, aClaim)" (contract).
-        o.pushKV("canNotice", active && armedTip && !standing && underEmergency);
+        o.pushKV("canNotice", est.canNotice);
         arr.push_back(o);
         return true;
     });

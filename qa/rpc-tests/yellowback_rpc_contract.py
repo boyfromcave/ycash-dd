@@ -18,9 +18,11 @@ storage fault or a rejected block belong to the Phase 3 script.
 v3 (Phase A2): after the wallet flow three attestors are registered raw and armed, the pool is
 fed and every v3 node command is checked with every node-side v3 error identifier provoked
 (attest-unknown-seq, attest-not-eligible, attest-stale, attest-bad-sig, attest-range,
-attest-malformed, bundle-insufficient, mint10-diverged). The wallet commands whose v3 shape
-Phase A3 delivers (PENDING_A3 below) are checked softly: a mismatch is recorded and printed,
-not fatal, until A3 lands; the new wallet commands are not called.
+attest-malformed, bundle-insufficient, mint10-diverged). Then (Phase A3, integrated) the v3
+wallet commands: a wallet registration, yed_signattestation, mints from the pool with no
+bundleHex (and bundle-insufficient from the pool naming the missing seq), yed_sweepcarriers,
+dormancy and yed_revive, the emergency claim (yed_claimnotice, then yed_claim by clause b, the
+pool path throughout), yed_reportequivocation and yed_withdrawbond after the locktime.
 
 Nodes: 0 user, 1 stock, 2-4 pools, 5 observer (claimant; sacrificed to the storage fault at the end).
 """
@@ -31,12 +33,17 @@ from decimal import Decimal
 
 from test_framework.util import assert_equal, assert_greater_than
 from test_framework.util import bytes_to_hex_str
-from test_framework.yellowback_attest import wallet_mint, wallet_claim
+from test_framework.yellowback_attest import wallet_mint, wallet_claim, wallet_notice, wallet_report_equivocation
 from test_framework.yellowback_util import (
     ABANDON_BLOCKS,
     ATTEST_ARM_MIN,
     ATTEST_MAX_AGE,
+    BOND_MATURITY,
+    BOND_MIN_LOCK,
     COIN,
+    DORMANCY_BLOCKS,
+    DORMANCY_CHECK,
+    EMERGENCY_PERSIST,
     ENFORCEMENT_FLOOR,
     POOLS,
     REF_LAG,
@@ -48,7 +55,6 @@ from test_framework.yellowback_util import (
     usd_to_micro,
 )
 from test_framework.yellowback_attest import (
-    attestor_keys,
     build_carrier_tx,
     encode_bundle,
     equivocation_raw,
@@ -56,6 +62,7 @@ from test_framework.yellowback_attest import (
     feed_all,
     hot_secret_for,
     register_and_arm,
+    register_wallet_attestor,
     sign_attestation,
 )
 
@@ -76,13 +83,6 @@ OPTIONAL = {
     'yed_gettxinfo': {'seq'},
 }
 
-# Wallet commands whose v3 shape Phase A3 delivers (the node context is complete in A2): a shape
-# mismatch is recorded, not fatal, and the new wallet commands are not called at all.
-PENDING_A3 = {'yed_mint', 'yed_claim', 'yed_listpositions'}
-NEW_WALLET_A3 = {'yed_claimnotice', 'yed_sweepcarriers', 'yed_registerattestor', 'yed_withdrawbond', 'yed_revive',
-                 'yed_reportequivocation', 'yed_signattestation'}
-
-
 # Fields the text marks *null when …* although the example shows a value (by path suffix).
 NULLABLE = {'yed_getinfo': {'miner.payoutAddress', 'miner.quoteAgeSeconds', 'params.policy.preferredPayee', 'params.policy.preferredAttestor'},
             'yed_listminers': {'accuracyBps'}, 'yed_getvault': {'closeHeight', 'underwaterAt'},
@@ -102,6 +102,7 @@ for _cmd, _fields in {
     'yed_estimatecollateral': {'xMint', 'aMint', 'divergenceBps'},
     'yed_listattestors': {'bondSpentHeight', 'seatedSince', 'lastBundleHeight'},
     'yed_buildbundle': {'aMint', 'aClaim'},
+    'yed_mint': {'aMint', 'attestPayee'}, 'yed_claim': {'aClaim', 'pEmerg', 'attestPayee'},
 }.items():
     NULLABLE.setdefault(_cmd, set()).update(_fields)
 
@@ -137,19 +138,10 @@ class Contract(object):
         with open(path) as f:
             self.doc = json.load(f)
         self.checked = set()
-        self.pending = {}        # PENDING_A3 command -> the first mismatch message
 
     def check(self, cmd, result, where=''):
         """Compare ``result`` with the example under ``cmd`` in the contract."""
-        shape = self.doc[cmd]['returns']
-        if cmd in PENDING_A3:
-            try:
-                self._match(cmd, shape, result, cmd + where)
-            except AssertionError as e:
-                self.pending.setdefault(cmd, str(e))
-                return result
-        else:
-            self._match(cmd, shape, result, cmd + where)
+        self._match(cmd, self.doc[cmd]['returns'], result, cmd + where)
         self.checked.add(cmd)
         return result
 
@@ -398,7 +390,8 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_getactivation', user.yed_getactivation())
         c.check('yed_getstats', user.yed_getstats())
 
-        self.v3_node_context(c, mint_a['txid'])
+        seqs = self.v3_node_context(c, mint_a['txid'])
+        self.v3_wallet_context(c, seqs)
 
         print('yellowback-unhealthy on the observer after a storage fault; the allow-list still answers')
         self.restart(5, ['-yellowbacktestfault=storage:commit'])
@@ -411,13 +404,9 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_gettag', nodes[5].yed_gettag(str(nodes[5].getblockcount())))
 
         documented = sorted(k for k in c.doc if k.startswith('yed_'))
-        unchecked = sorted(set(documented) - c.checked - {'yed_estimatesend', 'yed_unlockcoin', 'yed_getblockverdict'}
-                           - PENDING_A3 - NEW_WALLET_A3)
+        unchecked = sorted(set(documented) - c.checked - {'yed_estimatesend', 'yed_unlockcoin', 'yed_getblockverdict'})
         assert_equal(unchecked, [])
         print('checked: %s' % ', '.join(sorted(c.checked)))
-        for cmd in sorted(PENDING_A3):
-            print('pending A3 (%s): %s' % (cmd, c.pending.get(cmd, 'v3 shape already satisfied')))
-        print('not called (A3 wallet commands): %s' % ', '.join(sorted(NEW_WALLET_A3)))
 
     def v3_node_context(self, c, some_vault_txid):
         """Phase A2: the six v3 node commands, the v3 fields of the v2 ones, and every node-side
@@ -525,6 +514,147 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_rpc_error('attest-not-eligible', feed, user, seqs[1], 50)
         c.check('yed_listattestors', user.yed_listattestors())
         c.check('yed_getinfo', user.yed_getinfo())
+        return seqs
+
+    def v3_wallet_context(self, c, seqs):
+        """Phase A3 integrated: every v3 wallet command on the pool path (no bundleHex), plus
+        the v3 shapes of yed_mint, yed_claim and yed_listpositions while armed."""
+        nodes = self.nodes
+        user, claimant = nodes[0], nodes[5]
+        live = [seqs[0], seqs[2]]                    # seqs[1] was ejected by the node context
+        print('v3 wallet: the pools signal again and minting reopens; the user is funded for three vaults and a bond')
+        for i in POOLS:
+            self.restart(i)
+            set_quote(nodes[i], 50)
+        nodes[POOLS[0]].sendtoaddress(user.getnewaddress(), 60)
+        self.sync_all()
+        self.mine_round_robin(POOLS, 64 + REF_LAG)
+        assert_equal((user.yed_getinfo()['abandoned'], user.yed_getstats()['mintingAllowed']), (False, True))
+
+# Rule: REG-A1
+        print('v3 wallet: yed_registerattestor from the user wallet, matured and seated')
+        reg, wseq = register_wallet_attestor(self, user, 10, BOND_MIN_LOCK, 0)
+        c.check('yed_registerattestor', reg)
+        assert_equal(reg['seq'], None)
+        self.mine_round_robin(POOLS, BOND_MATURITY + REF_LAG)
+        rows = {int(r['seq']): r for r in user.yed_listattestors()}
+        assert_equal((rows[wseq]['status'], rows[wseq]['attestorPubKey'], rows[wseq]['seated']), ('ELIGIBLE', reg['attestorPubKey'], True))
+
+# Rule: S16 BUNDLE-1
+        print('v3 wallet: bundle-insufficient from the pool names the missing seqs; yed_signattestation feeds the third')
+        feed(user, live[0], 50)
+        r = user.yed_getinfo()['height'] - REF_LAG
+        selected = sorted(int(x['seq']) for x in user.yed_getselection(r, '')['selected'])
+        assert_equal(selected, sorted(live + [wseq]))
+        msg = assert_rpc_error('bundle-insufficient', user.yed_mint, 10000, 48)
+        assert '1 of 3 selected attestors have a fresh attestation; missing seq' in msg, msg
+        assert str(wseq) in msg.split('missing seq ')[1], msg
+        assert_equal(user.yed_sweepcarriers()['outstanding'], 0)               # refused before the carrier
+        feed(user, live[1], 50)
+        signed = c.check('yed_signattestation', user.yed_signattestation(wseq, usd_to_micro(50)))
+        assert_equal((signed['seq'], signed['reused'], signed['citedHeight']), (wseq, False, user.getblockcount() - REF_LAG))
+        assert_equal(user.yed_addattestation(signed['hex'])['accepted'], True)
+
+# Rule: W6 W7 MINT-9 AFEE-1
+        print('v3 wallet: yed_mint with no bundleHex takes the pool path')
+        est = user.yed_estimatecollateral(10000, 48)
+        m1 = c.check('yed_mint', wallet_mint(self, user, 10000, 48, bundle_hex=''))
+        assert_equal((sorted(m1['bundleSeqs']), m1['aMint'], m1['pMint'], m1['pending']), (sorted(live + [wseq]), usd_to_micro(50), usd_to_micro(50), False))
+        assert_equal((m1['collateralZat'], sorted(est['bundleSeqs'])), (est['requiredZat'], sorted(live + [wseq])))
+        assert_greater_than(m1['attestFeeZat'], 0)
+        assert m1['attestPayee'] is not None
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(m1['txid'])['status'], 'ACTIVE')
+        assert_equal(user.yed_gettxinfo(m1['txid'])['verdict'], 'ok')
+        c.check('yed_sweepcarriers', user.yed_sweepcarriers())
+        user.yed_send(claimant.yed_getnewaddress(), 10000)
+        self.sync_all()
+        self.mine(POOLS[2])
+
+# Rule: S15 REV-1
+        print('v3 wallet: two pool-path mints without seq %d in one window make it DORMANT; yed_revive' % wseq)
+        self.mine_round_robin(POOLS, DORMANCY_BLOCKS + 1)                       # the row it signed leaves the window; the pool goes stale
+        vaults = []
+        for i in range(2):
+            feed_all(user, {seq: 50 for seq in live})
+            m = c.check('yed_mint', wallet_mint(self, user, 10000, 48, bundle_hex=''))
+            assert_equal(sorted(m['bundleSeqs']), sorted(live))
+            self.mine(POOLS[i])
+            vaults.append(m)
+        while user.getblockcount() % DORMANCY_CHECK != 0:
+            self.mine(POOLS[0])
+        self.mine_round_robin(POOLS, REF_LAG + 1)
+        assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[wseq], 'DORMANT')
+        assert_rpc_error('not-dormant', user.yed_revive, live[0], usd_to_micro(50))
+        assert_rpc_error('attest-key-not-held', claimant.yed_revive, wseq, usd_to_micro(50))
+        revived = c.check('yed_revive', user.yed_revive(wseq, usd_to_micro(50)))
+        assert_equal((revived['seq'], revived['priceMicroUsd'], revived['citedHeight']), (wseq, usd_to_micro(50), user.getblockcount() - REF_LAG))
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[wseq], 'ELIGIBLE')
+        assert_equal(user.yed_gettxinfo(revived['txid'])['type'], 'revive')
+
+# Rule: NOT-1 RED-4 RED-5
+        print('v3 wallet: the emergency claim of vault %s from the pool: notice, persistence, clause (b)' % vaults[0]['txid'][:8])
+        victim = vaults[0]['txid']
+        claim_height = user.yed_getvault(victim)['claimHeight']
+        for i in POOLS:
+            set_quote(nodes[i], '10.20')
+        self.mine_round_robin(POOLS, max(64, claim_height - user.getblockcount()) + REF_LAG)
+        assert_equal(user.yed_getprice()['pClaim'], usd_to_micro('10.20'))
+        for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
+            feed_all(node, {seq: 11 for seq in live})
+        pos = {p['txid']: p for p in c.check('yed_listpositions', user.yed_listpositions('ACTIVE'))}
+        assert_equal((pos[victim]['noticed'], pos[victim]['canNotice'], pos[victim]['canClaim']), (False, True, False))
+        assert_equal([x['vault'] for x in user.yed_listclaimable() if x['vault'] == victim + ':0'], [])
+        assert_rpc_error('claim-not-underwater', claimant.yed_claim, victim)
+        notice = c.check('yed_claimnotice', wallet_notice(self, claimant, victim, bundle_hex=''))
+        assert_equal((notice['vault'], notice['xClaim'], notice['pEmerg'], sorted(notice['bundleSeqs'])), (victim + ':0', usd_to_micro('10.20'), usd_to_micro('10.20'), sorted(live)))
+        assert_equal(notice['emergencyOpenAt'], notice['refHeight'] + EMERGENCY_PERSIST)
+        self.mine(POOLS[0])
+        assert_equal(user.yed_gettxinfo(notice['txid'])['type'], 'notice')
+        pos = {p['txid']: p for p in c.check('yed_listpositions', user.yed_listpositions('ACTIVE'))}
+        assert_equal((pos[victim]['noticed'], pos[victim]['noticeHeight'], pos[victim]['canNotice']), (True, user.getblockcount(), False))
+        assert_rpc_error('notice-standing', claimant.yed_claimnotice, victim)
+        self.mine_round_robin(POOLS, notice['emergencyOpenAt'] - user.getblockcount())
+        for node in (user, claimant):                 # the pool is per node: the claimant builds its own bundle
+            feed_all(node, {seq: 11 for seq in live})
+        claimable = {x['vault']: x for x in c.check('yed_listclaimable', user.yed_listclaimable())}
+        assert_equal((claimable[victim + ':0']['claimPath'], claimable[victim + ':0']['noticed']), ('b', True))
+        pos = {p['txid']: p for p in user.yed_listpositions('ACTIVE')}
+        assert_equal((pos[victim]['canClaim'], pos[victim]['canNotice']), (True, False))    # the owner holds >= mintedCents
+        claimed = c.check('yed_claim', wallet_claim(self, claimant, victim, bundle_hex=''))
+        assert_equal((claimed['claimPath'], claimed['burnedCents'], claimed['pEmerg']), ('b', 10000, usd_to_micro('10.20')))
+        assert_equal(claimed['residualZat'], claimable[victim + ':0']['residualZat'])
+        assert_greater_than(claimed['residualZat'], 0)
+        self.mine(POOLS[1])
+        assert_equal(user.yed_getvault(victim)['status'], 'CLAIMED')
+
+# Rule: EQV-1
+        print('v3 wallet: yed_reportequivocation ejects seq %d' % live[1])
+        cited = user.getblockcount() - REF_LAG
+        secret = hot_secret_for(user, live[1])
+        a = sign_attestation(secret, live[1], usd_to_micro(11), cited, user.getblockhash(cited))
+        b = sign_attestation(secret, live[1], usd_to_micro(12), cited, user.getblockhash(cited))
+        assert_rpc_error('not-equivocation', claimant.yed_reportequivocation, bytes_to_hex_str(a), bytes_to_hex_str(a))
+        eqv = c.check('yed_reportequivocation', wallet_report_equivocation(self, claimant, bytes_to_hex_str(a), bytes_to_hex_str(b)))
+        assert_equal((eqv['seq'], eqv['citedHeight'], eqv['priceA'], eqv['priceB']), (live[1], cited, usd_to_micro(11), usd_to_micro(12)))
+        self.mine(POOLS[2])
+        assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[live[1]], 'EJECTED')
+
+# Rule: IN-2
+        print('v3 wallet: yed_withdrawbond after the locktime')
+        assert_rpc_error('bond-locked', user.yed_withdrawbond, wseq)
+        assert_rpc_error('attest-key-not-held', claimant.yed_withdrawbond, wseq)
+        self.mine_round_robin(POOLS, reg['bondLocktime'] - user.getblockcount())
+        wd = c.check('yed_withdrawbond', user.yed_withdrawbond(wseq))
+        assert_equal((wd['seq'], wd['bondZat']), (wseq, 10 * COIN))
+        self.sync_all()
+        self.mine(POOLS[0])
+        assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[wseq], 'WITHDRAWN')
+        assert_rpc_error('bond-spent', user.yed_withdrawbond, wseq)
+        c.check('yed_listattestors', user.yed_listattestors())
+        c.check('yed_listpositions', user.yed_listpositions())
 
 
 if __name__ == '__main__':

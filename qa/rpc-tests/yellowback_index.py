@@ -417,7 +417,6 @@ class YellowbackIndexTest(YellowbackTestFramework):
         self.sync_all()
         nodes[3].generate(1)
         self.sync_all(blocks_only=True)
-        reg_height = nodes[3].getblockcount()
         assert_equal([s for _q, s, _h in self.attestors_of(3)], ['PENDING', 'PENDING'])
         assert_equal(self.attestors_of(3), self.attestors_of(0))
         self.kill9(3)

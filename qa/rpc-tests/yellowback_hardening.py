@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from test_framework.util import (assert_equal, assert_start_raises_init_error, start_node,
                                  stop_node, bitcoind_processes)
-from test_framework.yellowback_attest import wallet_mint, wallet_claim
+from test_framework.yellowback_attest import wallet_mint
 from test_framework.yellowback_util import (
     MIN_OUTPUT,
     POOLS,

@@ -43,7 +43,7 @@ from test_framework.yellowback_util import (
     set_quote,
 )
 from test_framework import yellowback_model as ym
-from test_framework.yellowback_attest import ArmedModeMixin, attested_micro
+from test_framework.yellowback_attest import ArmedModeMixin
 
 SWEEP_ACK = 'I understand this leaves YED unbacked'
 
@@ -100,7 +100,7 @@ class YellowbackLifecycleTest(ArmedModeMixin, YellowbackTestFramework):
 # Rule: MINT-1 MINT-2 MINT-3 MINT-5 MINT-8 MINTPOL-1 FEE-1 FEE-W
         print('mint_class_a: 107 YED locked 48 blocks; collateral fixed at the reference snapshot')
         ref = user.yed_getinfo()['height'] - REF_LAG
-        est = user.yed_estimatecollateral(10700, 48)
+        est = self.estimate(user, 10700, 48)
         assert_equal(est['termClass'], 'A')
         assert_equal(est['refHeight'], ref)
         # armed, the attestors track xMint (ArmedModeMixin.price_at), so pMint = min(xMint, aMint) = xMint: the estimate stands

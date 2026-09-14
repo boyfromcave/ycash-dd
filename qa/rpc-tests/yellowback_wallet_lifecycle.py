@@ -6,7 +6,7 @@
 """Transparent v2 wallet lifecycle: mint, send, and owner-path redeem."""
 
 from test_framework.util import assert_equal
-from test_framework.yellowback_attest import wallet_mint, wallet_claim
+from test_framework.yellowback_attest import wallet_mint
 from test_framework.yellowback_util import (
     POOLS,
     REF_LAG,

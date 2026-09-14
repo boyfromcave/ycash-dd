@@ -102,6 +102,16 @@ The `sourceMask` bits are informational (bit 0 SafeTrade, 1 CoinGecko, 2 CoinMar
 pick a payee among the pools that quoted recently, weighted against those whose quotes were far
 from the medians.
 
+**Your quote agent must actually track the market (PIN-1, v3).** Once attestors are armed, the
+node compares the attested prices confirmed in bundles over the last `PIN_WINDOW` blocks; when
+they moved by more than `PIN_DELTA_BPS` (5 %) between the lowest and the highest bundle in that
+window, every pool key whose tags in the window all carry **one constant price** (at least
+`PIN_MIN_TAGS` of them) is treated as pinned and drops out of the cross-section medians for that
+height. A hard-coded or long-stale quote therefore stops counting exactly when the market moves —
+the moment it matters — and a pinned pool's tags contribute no price until its quotes move again.
+This is a property of the quote, not of the agent: `yellowback-quote` publishes the live aggregate
+and goes signal-only on failure precisely so its quotes never look constant.
+
 ## 5. Monitoring
 
 Four things, in order of urgency:

@@ -22,7 +22,6 @@ from test_framework.yellowback_util import (
     YellowbackTestFramework,
     assert_same_statehash,
 )
-from test_framework import yellowback_model as ym
 from test_framework.yellowback_attest import ArmedModeMixin, offline_bundle_hex
 
 
