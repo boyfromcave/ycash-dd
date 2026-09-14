@@ -906,7 +906,7 @@ def _outpoint(o):
 
 def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None, expiry=None,
                           to=None, ref_height=None, extra_outputs=None, owner_wif=None,
-                          branch_id=SIGNING_BRANCH_ID, selector=None):
+                          branch_id=SIGNING_BRANCH_ID, selector=None, extra_vin=None, value_adjust=0):
     """A vault spend assembled here (section 3.4/3.5), the adversarial builder for every
     "without a burn" case (K18) and, with ``payload=encode_redeem(...)`` and ``fee=(addr, zat)``,
     the *correct* spends too.
@@ -924,7 +924,9 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     e.g. YED change); then the ``OP_RETURN`` ``payload`` if any.  ``nExpiryHeight = expiry`` if
     given, else ``ref_height + REF_WINDOW`` with ``ref_height`` defaulting to the vault's
     ``refHeight`` when known, else ``getblockcount() - REF_LAG``.  ``selector`` overrides the
-    path push (K4 tests).  Returns the hex."""
+    path push (K4 tests).  v3: ``extra_vin`` (``[(txid, n, sequence)]``, a carrier) is appended
+    after the burn inputs, unsigned (``spend_carrier`` signs it); ``value_adjust`` is added to
+    ``vout[0]`` (a carrier's value in, an attestor fee or residual out).  Returns the hex."""
     assert path in ('owner', 'claim')
     owner = hex_str_to_bytes(vault['ownerPubKey'])
     lock_height, claim_height = int(vault['lockHeight']), int(vault['claimHeight'])
@@ -932,7 +934,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     script = ym.vault_script(lock_height, owner, claim_height)
     burns = [_outpoint(o) for o in burn_inputs]
     enforcement_fee = int(fee[1]) if fee else 0
-    value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee
+    value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee + int(value_adjust)
     assert value > 0, 'the vault does not cover the fees'
     dest = to or node.getnewaddress()
     vout = [(value, _spk_of_address(dest))]
@@ -950,6 +952,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
         expiry = int(ref_height) + REF_WINDOW
     lock_time = lock_height if path == 'owner' else claim_height
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
+    vin += [(t, n, b'', seq) for t, n, seq in (extra_vin or [])]
     raw = ym.serialize_tx_v4(vin, vout, lock_time, expiry)
     if burns:
         # the wallet signs the token inputs; it cannot solve OP_IF and leaves vin[0] empty
