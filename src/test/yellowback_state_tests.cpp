@@ -4,7 +4,7 @@
 
 // Every rule of plan §3.7–3.9 on synthetic blocks over an in-memory view
 // (Phase 2). Each case carries a `// Rule:` tag; the acceptance loop greps
-// them. The golden vector (statehash_golden_vector) replays 224 blocks of
+// them. The golden vector (statehash_golden_vector) replays 440 blocks of
 // real serialised transactions built by the Python model
 // (qa/rpc-tests/test_framework/yellowback_golden.json) and must reproduce
 // its pinned state hash byte for byte (N18, N23).
@@ -35,7 +35,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "bf4e41ff50326919fc0da42d352fb8e96efd2f0dd6aede3c028db1283d9a97a7";
+const std::string GOLDEN_HASH = "abe131e0cd68cd438449ce22969c7b331930ca3b9e4324ed9d841e90a340a4fe";
 
 uint160 KeyOf(int i)
 {

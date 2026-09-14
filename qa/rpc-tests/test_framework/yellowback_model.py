@@ -91,6 +91,18 @@ ACTIVATION_NAMES = {SIGNALING: 'SIGNALING', LOCKED_IN: 'LOCKED_IN', ACTIVE: 'ACT
 V_ACTIVE, V_VOID, V_CLOSED, V_CLAIMED = 0, 1, 2, 3
 VAULT_STATUS_NAMES = {V_ACTIVE: 'ACTIVE', V_VOID: 'VOID', V_CLOSED: 'CLOSED', V_CLAIMED: 'CLAIMED'}
 
+# Attestors.status, declaration order (v3 plan section 3.6)
+A_PENDING, A_ELIGIBLE, A_DORMANT, A_EJECTED, A_WITHDRAWN = 0, 1, 2, 3, 4
+ATTESTOR_STATUS_NAMES = {A_PENDING: 'PENDING', A_ELIGIBLE: 'ELIGIBLE', A_DORMANT: 'DORMANT',
+                         A_EJECTED: 'EJECTED', A_WITHDRAWN: 'WITHDRAWN'}
+# Attest.status (ARM-1/2), declaration order
+UNARMED, TRIGGERED, ARMED = 0, 1, 2
+ATTEST_NAMES = {UNARMED: 'UNARMED', TRIGGERED: 'TRIGGERED', ARMED: 'ARMED'}
+# TxLog.type names (view.h TxLogType)
+TXLOG_TYPE_NAMES = {PAYLOAD_MINT: 'MINT', PAYLOAD_TRANSFER: 'TRANSFER', PAYLOAD_REDEEM: 'REDEEM',
+                    PAYLOAD_ATTESTOR_REGISTER: 'ATTESTOR_REGISTER', PAYLOAD_CLAIM_NOTICE: 'CLAIM_NOTICE',
+                    PAYLOAD_EQUIVOCATION: 'EQUIVOCATION', PAYLOAD_ATTESTOR_REVIVE: 'ATTESTOR_REVIVE'}
+
 # haltMask bits, declaration order (section 3.6)
 HALT_NOT_ACTIVE = 1 << 0
 HALT_NO_PRICE = 1 << 1
@@ -152,7 +164,8 @@ class Params(object):
                  class_min, class_max, base_ratio_bps, vol_window, vol_step,
                  vol_periods_per_year, sigma_mult_max_bps, min_mint, max_mint, min_output,
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
-                 price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG):
+                 price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
+                 attest=None):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -203,6 +216,28 @@ class Params(object):
         self.price_max = price_max
         self.attest_arm_min = attest_arm_min
         self.bundle_carrier = bundle_carrier
+        # v3 plan section 3.1 (the mainnet column unless `attest` overrides; regtest() passes its column)
+        a = dict(attest_arm_delay=1_152, attest_required=True, n_slots=9, m_select=4, k_slack=2, bundle_max=6,
+                 q_low_bps=3_333, q_high_bps=6_667, attest_max_age=20, pin_window=288, pin_delta_bps=500,
+                 pin_min_tags=3, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
+                 emergency_persist=48, emergency_notice_ttl=1_152, residual_min_zat=100_000, attest_fee_bps=2_500,
+                 bond_min=20_000 * COIN, bond_min_lock=420_480, bond_maturity=16_128, age_cap=207_360,
+                 founding_window=8_064, dormancy_blocks=16_128, dormancy_min_bundles=20, dormancy_check=48)
+        a.update(attest or {})
+        for k, v in a.items():
+            setattr(self, k, v)
+
+    # The regtest column of v3 plan section 3.1 (yellowback_util.py carries the same numbers for the scripts)
+    REGTEST_ATTEST = dict(attest_arm_delay=8, attest_required=True, n_slots=5, m_select=2, k_slack=1, bundle_max=6,
+                          q_low_bps=3_333, q_high_bps=6_667, attest_max_age=8, pin_window=16, pin_delta_bps=500,
+                          pin_min_tags=2, pin_min_bundles=2, diverge_bps_attest=1_500, emergency_ratio_bps=10_500,
+                          emergency_persist=4, emergency_notice_ttl=64, residual_min_zat=100_000, attest_fee_bps=2_500,
+                          bond_min=10 * COIN, bond_min_lock=200, bond_maturity=8, age_cap=64, founding_window=16,
+                          dormancy_blocks=16, dormancy_min_bundles=2, dormancy_check=4)
+
+    def is_armed(self, snapshot_status):
+        """"ARMED" as every v3 rule reads it: the snapshot's Attest.status and ATTEST_REQUIRED (W15)."""
+        return bool(self.attest_required) and snapshot_status == ARMED
 
     # WINDOW_MIN_FILL (section 3.1, L9): fast ceil(W/2); mid and slow ceil(2W/3)
     @property
@@ -241,7 +276,7 @@ class Params(object):
             class_min=[48, 97, 145], class_max=[96, 144, 240], base_ratio_bps=[50_000, 40_000, 30_000],
             vol_window=64, vol_step=8, vol_periods_per_year=8_760, sigma_mult_max_bps=30_000,
             min_mint=10_000, max_mint=1_000_000, min_output=100, max_output=10_000_000,
-            token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2)
+            token_value=10_000, yellowback_fee=1_000, ref_window=40, ref_lag=2, attest=cls.REGTEST_ATTEST)
 
     @classmethod
     def mainnet(cls, start_height, enforce_until, network='main'):
@@ -377,6 +412,28 @@ def is_underwater(collateral_zat, p_claim, minted_cents, threshold_bps):
     if p_claim is None:
         return False
     return u256(collateral_zat * p_claim) < u256(minted_cents * threshold_bps * COIN)
+
+
+def attest_fee_zat(fee, attest_fee_bps):
+    """attestFeeZat = feeZat * ATTEST_FEE_BPS / 10^4 (floor; AFEE-1)."""
+    if fee <= 0 or attest_fee_bps <= 0:
+        return 0
+    return (fee * attest_fee_bps) // BPS
+
+
+def claimant_max_zat(minted_cents, margin_bps, p_claim):
+    """ceil(mintedCents * marginBps * COIN / pClaim) (R5); None if undefined or over MAX_MONEY."""
+    if minted_cents <= 0 or margin_bps <= 0 or p_claim is None or p_claim <= 0:
+        return None
+    z = ceil_div(minted_cents * margin_bps * COIN, p_claim)
+    return z if z <= MAX_MONEY else None
+
+
+def residual_zat(collateral_zat, claimant_max):
+    """max(0, collateralZat - claimantMaxZat); nothing when claimantMax is undefined (RED-5)."""
+    if claimant_max is None or collateral_zat <= claimant_max:
+        return 0
+    return collateral_zat - claimant_max
 
 
 def fee_zat(collateral_zat, fee_min, fee_bps):
@@ -1161,7 +1218,9 @@ class Token(object):
 
 class TxLogRecord(object):
     __slots__ = ('height', 'type', 'path', 'verdict', 'yed_in', 'yed_out', 'burned', 'fee_zat',
-                 'payee', 'assigned', 'spent_tokens', 'closed_vaults')
+                 'payee', 'assigned', 'spent_tokens', 'closed_vaults',
+                 'a_mint', 'a_claim', 'bundle_seqs', 'attest_fee_zat', 'attest_payee', 'residual_zat',
+                 'claim_path', 'notice', 'attestor_seq')
 
     def __init__(self, height):
         self.height = height
@@ -1176,6 +1235,16 @@ class TxLogRecord(object):
         self.assigned = []          # [(vout, cents)]
         self.spent_tokens = []      # [(txid, n)]
         self.closed_vaults = []     # [(txid, n)]
+        # v3 (section 3.6 TxLog; history, never hashed)
+        self.a_mint = None
+        self.a_claim = None
+        self.bundle_seqs = []       # A, bundle order
+        self.attest_fee_zat = 0
+        self.attest_payee = None    # seq or None
+        self.residual_zat = 0
+        self.claim_path = ''        # 'a' | 'b' | ''
+        self.notice = False
+        self.attestor_seq = None    # REG-A1 assigned / EQV-1 ejected / REV-1 revived
 
     def as_dict(self, txid):
         return {'txid': txid, 'height': self.height, 'type': self.type, 'path': self.path,
@@ -1184,7 +1253,11 @@ class TxLogRecord(object):
                 'payee': self.payee.hex() if self.payee else None,
                 'assigned': [{'vout': v, 'cents': c} for v, c in self.assigned],
                 'spentTokens': ['%s:%d' % op for op in self.spent_tokens],
-                'closedVaults': ['%s:%d' % op for op in self.closed_vaults]}
+                'closedVaults': ['%s:%d' % op for op in self.closed_vaults],
+                'aMint': self.a_mint, 'aClaim': self.a_claim, 'bundleSeqs': list(self.bundle_seqs),
+                'attestFeeZat': self.attest_fee_zat, 'attestPayee': self.attest_payee,
+                'residualZat': self.residual_zat, 'claimPath': self.claim_path, 'notice': self.notice,
+                'attestorSeq': self.attestor_seq}
 
 
 class Totals(object):
@@ -1207,10 +1280,78 @@ class Totals(object):
                 'unbackedCents': self.unbacked_cents}
 
 
+class AttestorRecord(object):
+    """Attestors[seq] (v3 plan section 3.6, REG-A1)."""
+    __slots__ = ('attestor_pubkey', 'bond_pubkey', 'bond_outpoint', 'bond_zat', 'bond_locktime', 'flags',
+                 'register_height', 'status', 'status_height', 'bond_spent_height', 'seated_since')
+
+    def __init__(self):
+        self.attestor_pubkey = b''
+        self.bond_pubkey = b''
+        self.bond_outpoint = None     # (txid display hex, n)
+        self.bond_zat = 0
+        self.bond_locktime = 0
+        self.flags = 0
+        self.register_height = 0
+        self.status = A_PENDING
+        self.status_height = 0
+        self.bond_spent_height = 0
+        self.seated_since = 0
+
+    def as_dict(self, seq):
+        return {'seq': seq, 'attestorPubKey': self.attestor_pubkey.hex(), 'bondPubKey': self.bond_pubkey.hex(),
+                'bondOutpoint': {'txid': self.bond_outpoint[0], 'vout': self.bond_outpoint[1]},
+                'bondZat': self.bond_zat, 'bondLocktime': self.bond_locktime, 'flags': self.flags,
+                'registerHeight': self.register_height, 'status': ATTESTOR_STATUS_NAMES[self.status],
+                'statusHeight': self.status_height,
+                'bondSpentHeight': self.bond_spent_height or None, 'seatedSince': self.seated_since or None}
+
+
+class AttestState(object):
+    """The carried Attest record (ARM-1/2); copied into every snapshot."""
+    __slots__ = ('status', 'trigger_height', 'arm_height')
+
+    def __init__(self, status=UNARMED, trigger_height=0, arm_height=0):
+        self.status = status
+        self.trigger_height = trigger_height
+        self.arm_height = arm_height
+
+    def copy(self):
+        return AttestState(self.status, self.trigger_height, self.arm_height)
+
+    def as_dict(self):
+        return {'status': ATTEST_NAMES[self.status], 'triggerHeight': self.trigger_height, 'armHeight': self.arm_height}
+
+
+class BundleLogRecord(object):
+    """BundleLog[height] (R12): the lowerMedian statistics over the height's verified MINT / REDEEM /
+    CLAIM_NOTICE bundles, the sorted union of their selected sets and the sorted, deduplicated union of
+    their (seq, price) pairs as two parallel arrays."""
+    __slots__ = ('a_mint', 'a_claim', 'selected_seqs', 'seqs', 'prices')
+
+    def __init__(self):
+        self.a_mint = None
+        self.a_claim = None
+        self.selected_seqs = []
+        self.seqs = []
+        self.prices = []
+
+
+class NoticeRecord(object):
+    """Notices[vaultOutpoint] (NOT-1)."""
+    __slots__ = ('height', 'ref_height', 'p_emerg')
+
+    def __init__(self, height, ref_height, p_emerg):
+        self.height = height
+        self.ref_height = ref_height
+        self.p_emerg = p_emerg
+
+
 class Snapshot(object):
     __slots__ = ('block_hash', 'tagged', 'quote', 'signal_count', 'activation', 'p_fast', 'p_mid',
                  'p_slow', 'p_mint', 'p_claim', 'sigma_mult_bps', 'issued_zat', 'supply_cents',
-                 'collateral_zat', 'global_ratio_bps', 'halt_mask', 'virtual')
+                 'collateral_zat', 'global_ratio_bps', 'halt_mask', 'virtual',
+                 'attest', 'seated', 'pinned_keys', 'pinned_seqs')
 
     def __init__(self):
         self.block_hash = '00' * 32
@@ -1230,6 +1371,12 @@ class Snapshot(object):
         self.global_ratio_bps = None
         self.halt_mask = 0
         self.virtual = False
+        # v3: p_mint / p_claim above are the cross-section medians (xMint / xClaim); the PRICE-2
+        # combination with a bundle is per transaction and never stored.
+        self.attest = AttestState()
+        self.seated = []          # sorted seq
+        self.pinned_keys = []     # sorted 20-byte key hashes (PIN-1)
+        self.pinned_seqs = []     # sorted seq (PIN-2)
 
     @classmethod
     def virtual_snapshot(cls):
@@ -1249,7 +1396,9 @@ class Snapshot(object):
                 'pMint': self.p_mint, 'pClaim': self.p_claim, 'sigmaMultBps': self.sigma_mult_bps,
                 'issuedZat': self.issued_zat, 'supplyCents': self.supply_cents,
                 'collateralZat': self.collateral_zat, 'globalRatioBps': self.global_ratio_bps,
-                'haltMask': self.halt_names()}
+                'haltMask': self.halt_names(), 'xMint': self.p_mint, 'xClaim': self.p_claim,
+                'attest': self.attest.as_dict(), 'seated': list(self.seated),
+                'pinnedKeys': [k.hex() for k in self.pinned_keys], 'pinnedSeqs': list(self.pinned_seqs)}
 
 
 class BlockVerdict(object):
@@ -1331,12 +1480,40 @@ def _ser_activation(a):
     return _u8(a.status) + _i32(a.lock_in_height) + _i32(a.activate_height)
 
 
+def _u16_vec(v):
+    return _compact(len(v)) + b''.join(_u16(x) for x in v)
+
+
+def _i64_vec(v):
+    return _compact(len(v)) + b''.join(_i64(x) for x in v)
+
+
+def _ser_attest(a):
+    return _u8(a.status) + _i32(a.trigger_height) + _i32(a.arm_height)
+
+
 def _ser_snapshot(s):
     return (_hash(s.block_hash) + _bool(s.tagged) + _bool(s.quote) + _u32(s.signal_count)
             + _ser_activation(s.activation) + _price(s.p_fast) + _price(s.p_mid) + _price(s.p_slow)
             + _price(s.p_mint) + _price(s.p_claim) + _i32(s.sigma_mult_bps) + _i64(s.issued_zat)
             + _i64(s.supply_cents) + _i64(s.collateral_zat)
-            + _i64(0 if s.global_ratio_bps is None else s.global_ratio_bps) + _u32(s.halt_mask))
+            + _i64(0 if s.global_ratio_bps is None else s.global_ratio_bps) + _u32(s.halt_mask)
+            + _ser_attest(s.attest) + _u16_vec(s.seated)
+            + _compact(len(s.pinned_keys)) + b''.join(bytes(k) for k in s.pinned_keys) + _u16_vec(s.pinned_seqs))
+
+
+def _ser_attestor(a):
+    return (_bytes(a.attestor_pubkey) + _bytes(a.bond_pubkey) + _hash(a.bond_outpoint[0]) + _u32(a.bond_outpoint[1])
+            + _i64(a.bond_zat) + _u32(a.bond_locktime) + _u8(a.flags) + _i32(a.register_height) + _u8(a.status)
+            + _i32(a.status_height) + _i32(a.bond_spent_height) + _i32(a.seated_since))
+
+
+def _ser_bundle_log(b):
+    return _price(b.a_mint) + _price(b.a_claim) + _u16_vec(b.selected_seqs) + _u16_vec(b.seqs) + _i64_vec(b.prices)
+
+
+def _ser_notice(n):
+    return _i32(n.height) + _i32(n.ref_height) + _i64(n.p_emerg)
 
 
 def _ser_vault(v):
@@ -1365,7 +1542,7 @@ def _outpoint_sort_key(op):
 class YellowbackModel(object):
     """Section 3 as a state machine fed block by block.  See the module docstring."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, params, issued_before_start=0):
         self.params = params
@@ -1380,6 +1557,14 @@ class YellowbackModel(object):
         self.totals = Totals()
         self.snapshots = {}       # height -> Snapshot
         self.blocks = {}          # height -> BlockVerdict
+        # v3 tables (section 3.6)
+        self.attestors = {}       # seq -> AttestorRecord
+        self.bond_index = {}      # (txid, n) -> seq (derived; not hashed)
+        self.attestor_seq = 0     # AttestorSeq.next
+        self.attest = AttestState()
+        self.bundle_log = {}      # height -> BundleLogRecord
+        self.notices = {}         # (txid, n) -> NoticeRecord
+        self._bundle_acc = None   # the BundleLog[H] accumulator of the block being fed (R12)
         # issuedZat is carried from the previous snapshot; the virtual snapshot below START_HEIGHT
         # carries ``issued_before_start`` (default 0 = the sum over [START_HEIGHT, H]; see SERIALISATION.md)
         self._issued_below_start = issued_before_start
@@ -1453,17 +1638,17 @@ class YellowbackModel(object):
 
     # -- section 3.7 derived quantities ------------------------------------
 
-    def _quote_prices(self, lo, hi):
-        """priceMicroUsd of the quote tags with lo < h <= hi."""
+    def _quote_prices(self, lo, hi, excluded=()):
+        """priceMicroUsd of the quote tags with lo < h <= hi, skipping the keys in `excluded` (PIN-1)."""
         out = []
         for h in range(max(lo + 1, self.params.start_height), hi + 1):
             t = self.tags.get(h)
-            if t is not None and t.is_quote:
+            if t is not None and t.is_quote and t.payout_key not in excluded:
                 out.append(t.price_micro_usd)
         return out
 
-    def median(self, window, min_fill, height):
-        vals = self._quote_prices(height - window, height)
+    def median(self, window, min_fill, height, excluded=()):
+        vals = self._quote_prices(height - window, height, excluded)
         if len(vals) < min_fill:
             return None
         return lower_median(vals)
@@ -1477,13 +1662,159 @@ class YellowbackModel(object):
         return n
 
     def eligible_payees(self, ref_height):
-        """E(R): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated."""
+        """E(R): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated,
+        minus Snapshots[R].pinnedKeys (PIN-1)."""
+        s = self.snapshots.get(ref_height)
+        pinned = s.pinned_keys if s is not None else []
         keys = []
         for h in range(max(ref_height - self.params.payee_window + 1, self.params.start_height), ref_height + 1):
             t = self.tags.get(h)
-            if t is not None and t.is_quote and t.payout_key not in keys:
+            if t is not None and t.is_quote and t.payout_key not in keys and t.payout_key not in pinned:
                 keys.append(t.payout_key)
         return keys
+
+    # -- v3 section 3.7: arming, weight, seating, selection, BUNDLE-1 ----------
+
+    def armed_at(self, ref_height):
+        """"ARMED" for a transaction with refHeight R: Snapshots[R].attest and ATTEST_REQUIRED (W15)."""
+        s = self.snapshot(ref_height)
+        return s is not None and not s.virtual and self.params.is_armed(s.attest.status)
+
+    def block_hash_at(self, height):
+        """blockHash(h) as the overlay knows it (Snapshots[h].blockHash), None below START_HEIGHT or above the tip."""
+        s = self.snapshots.get(height)
+        return None if s is None else s.block_hash
+
+    def age_origin(self, rec, attest):
+        p = self.params
+        if attest.status != UNARMED and rec.register_height <= attest.trigger_height + p.founding_window:
+            return attest.trigger_height
+        return rec.register_height
+
+    def weight(self, rec, attest, height):
+        """weight(seq, H) = bondZat * clamp(H - ageOrigin, 0, AGE_CAP)."""
+        return rec.bond_zat * clamp(height - self.age_origin(rec, attest), 0, self.params.age_cap)
+
+    def seated(self, height, attest=None):
+        """The N_SLOTS ELIGIBLE seq of greatest weight(seq, H), ties by seq; ascending."""
+        attest = self.attest if attest is None else attest
+        ranked = sorted(((-self.weight(r, attest, height), seq) for seq, r in self.attestors.items() if r.status == A_ELIGIBLE))
+        return sorted(seq for _w, seq in ranked[:self.params.n_slots])
+
+    def selected(self, ref_height, selector):
+        """selected(R, selector) (W9) over the stored seated \ pinnedSeqs of Snapshots[R]."""
+        from . import yellowback_attest as ya
+        s = self.snapshots.get(ref_height)
+        if s is None:
+            return []
+        pool = [(seq, self.weight(self.attestors[seq], s.attest, ref_height))
+                for seq in s.seated if seq not in s.pinned_seqs and seq in self.attestors]
+        return ya.select_attestors(s.block_hash, selector, pool, self.params.m_select, self.params.k_slack)
+
+    def _find_carrier(self, tx, skip_vin0):
+        """(vin index, pushes) of the one carrier-shaped input, or (None, reason)."""
+        from . import yellowback_attest as ya
+        found = None
+        for i, vin in enumerate(tx.vin):
+            if skip_vin0 and i == 0:
+                continue
+            pushes = parse_pushes(vin.script_sig)
+            if pushes is None or len(pushes) != 3 or ya.parse_carrier_script(pushes[2]) is None:
+                continue
+            if found is not None:
+                return None, 'two-carriers'
+            found = (i, pushes)
+        if found is None:
+            return None, 'shape'
+        return found, ''
+
+    def verify_bundle(self, tx, ref_height, selector, skip_vin0):
+        """BUNDLE-1 (W8 order) plus the bundle statistic under weight(s, R).  Returns a dict with
+        ok, reason, carrier_present, atts [(seq, price, cited)], selected, a_mint, a_claim."""
+        from . import yellowback_attest as ya
+        p = self.params
+        out = {'ok': False, 'reason': '', 'carrier_present': False, 'atts': [], 'selected': [], 'a_mint': None, 'a_claim': None}
+        if p.bundle_carrier == CARRIER_OP_RETURN:        # the OP_RETURN tail is unshipped: never a bundle
+            out['reason'] = 'shape'
+            return out
+        found, why = self._find_carrier(tx, skip_vin0)
+        out['carrier_present'] = found is not None or why == 'two-carriers'
+        if found is None:
+            out['reason'] = why
+            return out
+        _i, pushes = found
+        bundle = pushes[0]
+        _pk, h = ya.parse_carrier_script(pushes[2])
+        if sha256(bundle) != h:
+            out['reason'] = 'hash'
+            return out
+        atts = ya.decode_bundle(bundle)
+        if atts is None:
+            out['reason'] = 'shape'
+            return out
+        if not (p.m_select <= len(atts) <= p.bundle_max):
+            out['reason'] = 'count'
+            return out
+        selected = self.selected(ref_height, selector)
+        out['selected'] = selected
+        parsed = [ya.parse_attestation(a) for a in atts]
+        seen = set()
+        for seq, _price, _cited, _r, _s in parsed:
+            if seq not in selected:
+                out['reason'] = 'member'
+                return out
+            if seq in seen:
+                out['reason'] = 'dup'
+                return out
+            seen.add(seq)
+        for _seq, price, cited, _r, _s in parsed:
+            if not (ref_height - p.attest_max_age < cited <= ref_height) or cited < p.start_height:
+                out['reason'] = 'stale'
+                return out
+            if not (p.price_min <= price <= p.price_max):
+                out['reason'] = 'range'
+                return out
+        for att, (seq, _price, cited, _r, _s) in zip(atts, parsed):
+            bh = self.block_hash_at(cited)
+            rec = self.attestors.get(seq)
+            if bh is None or rec is None or not ya.verify_attestation(rec.attestor_pubkey, att, bh):
+                out['reason'] = 'sig'
+                return out
+        s = self.snapshots[ref_height]
+        rows = [((seq, price), self.weight(self.attestors[seq], s.attest, ref_height)) for seq, price, _c, _r, _s in parsed]
+        stat = ya.bundle_stat(rows, p.q_low_bps, p.q_high_bps, p.m_select)
+        out['ok'] = True
+        out['atts'] = [(seq, price, cited) for seq, price, cited, _r, _s in parsed]
+        if stat is not None:
+            out['a_mint'], out['a_claim'] = stat
+        return out
+
+    def _bundle(self, tx, ref_height, selector, skip_vin0):
+        """verify_bundle, recorded into the BundleLog[H] accumulator when BUNDLE-1 held (R12)."""
+        b = self.verify_bundle(tx, ref_height, selector, skip_vin0)
+        if b['ok'] and self._bundle_acc is not None:
+            acc = self._bundle_acc
+            if b['a_mint'] is not None:
+                acc['a_mints'].append(b['a_mint'])
+            if b['a_claim'] is not None:
+                acc['a_claims'].append(b['a_claim'])
+            acc['selected'].update(b['selected'])
+            acc['pairs'].update((seq, price) for seq, price, _c in b['atts'])
+            acc['any'] = True
+        return b
+
+    def _attest_fee_ok(self, tx, attest_fee_vout, A, excluded, attest_fee_zat):
+        """AFEE-1: the seq whose P2PKH(bondPubKey) vout[attestFeeVout] pays, or None."""
+        if attest_fee_vout == FEE_VOUT_NONE or attest_fee_vout >= len(tx.vout) or attest_fee_vout in excluded:
+            return None
+        key = p2pkh_key(tx.vout[attest_fee_vout].script)
+        if key is None or tx.vout[attest_fee_vout].value < attest_fee_zat:
+            return None
+        for seq in A:
+            rec = self.attestors.get(seq)
+            if rec is not None and hash160(rec.bond_pubkey) == key:
+                return seq
+        return None
 
     def registered(self, key, ref_height):
         for h in range(max(ref_height - self.params.n_reg + 1, self.params.start_height), ref_height + 1):
@@ -1575,11 +1906,24 @@ class YellowbackModel(object):
         enforcing = self.enforcement_on(height)
         block_invalid = False
         reason = ''
+        self._bundle_acc = {'any': False, 'a_mints': [], 'a_claims': [], 'selected': set(), 'pairs': set()}
         for tx in txs:
             failed = self._apply_tx(tx, height)
             if failed and not block_invalid:
                 block_invalid = True
                 reason = '%s:%s' % (failed, tx.txid)
+
+        # BundleLog[H] (R12), before SNAP: dormancy reads the row of H
+        acc, self._bundle_acc = self._bundle_acc, None
+        if acc['any']:
+            row = BundleLogRecord()
+            row.a_mint = lower_median(acc['a_mints']) if acc['a_mints'] else None
+            row.a_claim = lower_median(acc['a_claims']) if acc['a_claims'] else None
+            row.selected_seqs = sorted(acc['selected'])
+            pairs = sorted(acc['pairs'])
+            row.seqs = [sq for sq, _pr in pairs]
+            row.prices = [pr for _sq, pr in pairs]
+            self.bundle_log[height] = row
 
         # SNAP
         self._snap(height, block_hash, subsidy_zat, tag)
@@ -1607,9 +1951,54 @@ class YellowbackModel(object):
         s.quote = tag is not None and tag.is_quote
         s.signal_count = count
         s.activation = a.copy()
-        s.p_fast = self.median(p.p_fast_window, p.min_fill_fast, height)
-        s.p_mid = self.median(p.p_mid_window, p.min_fill_mid, height)
-        s.p_slow = self.median(p.p_slow_window, p.min_fill_slow, height)
+        # ---- v3 (section 3.8 SNAP): maturity, ARM-1/2, PIN-1/2, seating; dormancy after the halts
+        for r in self.attestors.values():                                      # maturity
+            if r.status == A_PENDING and height >= r.register_height + p.bond_maturity:
+                r.status = A_ELIGIBLE
+                r.status_height = height
+        eligible_count = sum(1 for r in self.attestors.values() if r.status == A_ELIGIBLE)
+        m = self.attest                                                        # ARM-1/2
+        if m.status == UNARMED and p.attest_arm_min > 0 and eligible_count >= p.attest_arm_min:
+            m.status = TRIGGERED
+            m.trigger_height = height
+            m.arm_height = height + p.attest_arm_delay
+        if m.status == TRIGGERED and height >= m.arm_height:
+            m.status = ARMED
+        s.attest = m.copy()
+        window = [self.bundle_log[h] for h in range(max(height - p.pin_window, p.start_height), height)
+                  if h in self.bundle_log]                                    # W = (H - 1 - PIN_WINDOW, H - 1]
+        if len(window) >= max(1, p.pin_min_bundles):                          # PIN-1
+            a_lo = min(r.a_mint for r in window)
+            a_hi = max(r.a_mint for r in window)
+            if (a_hi - a_lo) * BPS > p.pin_delta_bps * a_lo:
+                per_key = {}
+                for h in range(max(height - p.pin_window, p.start_height), height):
+                    t = self.tags.get(h)
+                    if t is not None and t.is_quote:
+                        per_key.setdefault(t.payout_key, []).append(t.price_micro_usd)
+                s.pinned_keys = sorted(k for k, prices in per_key.items()
+                                       if len(prices) >= max(1, p.pin_min_tags) and len(set(prices)) == 1)
+        s1 = self.snapshot(height - 1)                                         # PIN-2
+        s0 = self.snapshot(height - 1 - p.pin_window)
+        x1 = None if (s1 is None or s1.virtual) else s1.p_mint
+        x0 = None if (s0 is None or s0.virtual) else s0.p_mint
+        if x1 is not None and x0 is not None and abs(x1 - x0) * BPS > p.pin_delta_bps * min(x1, x0):
+            rows_of, prices_of = {}, {}
+            for row in window:
+                for seq, price in set(zip(row.seqs, row.prices)):
+                    prices_of.setdefault(seq, set()).add(price)
+                for seq in set(row.seqs):
+                    rows_of[seq] = rows_of.get(seq, 0) + 1
+            s.pinned_seqs = sorted(seq for seq, n in rows_of.items() if n >= max(1, p.pin_min_tags) and len(prices_of[seq]) == 1)
+        s.seated = self.seated(height, m)                                      # seating
+        for seq, r in self.attestors.items():
+            if seq in s.seated and r.seated_since == 0:
+                r.seated_since = height
+            if seq not in s.seated and r.seated_since != 0:
+                r.seated_since = 0
+        s.p_fast = self.median(p.p_fast_window, p.min_fill_fast, height, s.pinned_keys)
+        s.p_mid = self.median(p.p_mid_window, p.min_fill_mid, height, s.pinned_keys)
+        s.p_slow = self.median(p.p_slow_window, p.min_fill_slow, height, s.pinned_keys)
         if None not in (s.p_fast, s.p_mid, s.p_slow):
             s.p_mint = min(s.p_fast, s.p_mid, s.p_slow)
         if None not in (s.p_mid, s.p_slow):
@@ -1647,6 +2036,17 @@ class YellowbackModel(object):
         if enf:
             mask |= HALT_ENFORCEMENT
         s.halt_mask = mask
+        # dormancy (S15): only at H mod DORMANCY_CHECK == 0, with seatedSince and the BundleLog window (H - DORMANCY_BLOCKS, H]
+        if p.dormancy_check > 0 and height % p.dormancy_check == 0:
+            rows = [self.bundle_log[h] for h in range(max(height - p.dormancy_blocks + 1, p.start_height), height + 1)
+                    if h in self.bundle_log]
+            for seq, r in self.attestors.items():
+                if r.status != A_ELIGIBLE or r.seated_since == 0 or r.seated_since > height - p.dormancy_blocks:
+                    continue
+                selected_rows = [row for row in rows if seq in row.selected_seqs]
+                if len(selected_rows) >= max(1, p.dormancy_min_bundles) and not any(seq in row.seqs for row in selected_rows):
+                    r.status = A_DORMANT
+                    r.status_height = height
         self.snapshots[height] = s
 
     # -- section 3.8 ---------------------------------------------------------
@@ -1663,13 +2063,27 @@ class YellowbackModel(object):
                 yed_in += t.cents
                 rec.spent_tokens.append(op)
         rec.yed_in = yed_in
+        # IN-2 (amended): a bond spend withdraws the attestor unless EJECTED; the record stays
+        bond_spent = False
+        for op in outpoints:
+            seq = self.bond_index.get(op)
+            if seq is None:
+                continue
+            a = self.attestors[seq]
+            if a.bond_spent_height:
+                continue
+            if a.status != A_EJECTED:
+                a.status = A_WITHDRAWN
+                a.status_height = height
+            a.bond_spent_height = height
+            bond_spent = True
         active_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_ACTIVE]
         void_spent = [op for op in outpoints if op in self.vaults and self.vaults[op].status == V_VOID]
         scripts = [o.script for o in tx.vout]
         payload, opret = tx_payload(scripts)
 
         failing = None
-        touched = bool(rec.spent_tokens) or bool(active_spent) or bool(void_spent)
+        touched = bool(rec.spent_tokens) or bool(active_spent) or bool(void_spent) or bond_spent
         if active_spent:
             # M3: RED-1..4 only, whatever the payload
             rec.type = 'REDEEM'
@@ -1679,15 +2093,29 @@ class YellowbackModel(object):
             rec.type = 'MINT'
             created = self._apply_mint(tx, height, rec, payload, opret)
             touched = touched or created
-        elif payload is not None:
-            # The C++ labels every non-MINT payload TRANSFER or REDEEM (state.cpp); until A1 evaluates
-            # the v3 types they take the REDEEM label and the assignment-less XFER path there too.
+        elif payload is not None and payload.type in (PAYLOAD_TRANSFER, PAYLOAD_REDEEM):
             rec.type = 'TRANSFER' if payload.type == PAYLOAD_TRANSFER else 'REDEEM'
             self._apply_transfer(tx, height, rec, payload, yed_in)
         else:
-            rec.type = 'NONE'
-            if yed_in > 0:
-                rec.verdict = VERDICT_BURNED
+            # The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog
+            # entry; a failing one is non-Yellowback for outputs, like a transaction with no payload.
+            held = False
+            if payload is not None:
+                rec.type = TXLOG_TYPE_NAMES[payload.type]
+                if payload.type == PAYLOAD_ATTESTOR_REGISTER:
+                    held = self._apply_register(tx, height, rec, payload)
+                elif payload.type == PAYLOAD_CLAIM_NOTICE:
+                    held = self._apply_notice(tx, height, rec, payload)
+                elif payload.type == PAYLOAD_EQUIVOCATION:
+                    held = self._apply_equivocation(tx, height, rec)
+                elif payload.type == PAYLOAD_ATTESTOR_REVIVE:
+                    held = self._apply_revive(tx, height, rec, payload)
+            if held:
+                touched = True
+            else:
+                rec.type = 'NONE'
+                if yed_in > 0:
+                    rec.verdict = VERDICT_BURNED
 
         # IN-2 for VOID vaults: an ordinary spend that closes them (K3)
         for op in void_spent:
@@ -1713,14 +2141,143 @@ class YellowbackModel(object):
                 if v.status == V_CLOSED and failing is not None:
                     v.unbacked = burned < v.minted_cents
                     self.totals.unbacked_cents += max(0, v.minted_cents - burned)
+                self.notices.pop(op, None)         # IN-2: the vault left ACTIVE
         if touched:
             self.txlog[tx.txid] = rec
         return failing
 
-    def _apply_mint(self, tx, height, rec, pl, opret):
-        """MINT-1..8.  Returns True when a Vaults entry was created (ACTIVE or VOID)."""
+    def _attestation_valid(self, att, pubkey33, block_hash):
+        from . import yellowback_attest as ya
+        return ya.verify_attestation(pubkey33, att, block_hash)
+
+    def _apply_register(self, tx, height, rec, pl):
+        """REG-A1 (proposal section 5.2; bondOutpoint = txid:0)."""
+        from . import yellowback_attest as ya
         p = self.params
-        verdict = self._mint_verdict(tx, height, pl, opret)
+        if not (is_valid_compressed_pubkey(pl.attestor_pubkey) and is_valid_compressed_pubkey(pl.bond_pubkey)):
+            return False
+        if not tx.vout:
+            return False
+        if not (height + p.bond_min_lock <= pl.bond_locktime < LOCKTIME_THRESHOLD):
+            return False
+        if tx.vout[0].script != p2sh_script(ya.bond_script(pl.bond_pubkey, pl.bond_locktime)):
+            return False
+        if tx.vout[0].value < p.bond_min:
+            return False
+        for a in self.attestors.values():
+            if a.attestor_pubkey == pl.attestor_pubkey and a.status != A_WITHDRAWN:
+                return False
+        seq = self.attestor_seq
+        if seq in self.attestors:
+            return False
+        a = AttestorRecord()
+        a.attestor_pubkey = pl.attestor_pubkey
+        a.bond_pubkey = pl.bond_pubkey
+        a.bond_outpoint = (tx.txid, 0)
+        a.bond_zat = tx.vout[0].value
+        a.bond_locktime = pl.bond_locktime
+        a.flags = pl.flags
+        a.register_height = height
+        a.status = A_PENDING
+        a.status_height = height
+        self.attestors[seq] = a
+        self.bond_index[(tx.txid, 0)] = seq
+        self.attestor_seq = (seq + 1) & 0xFFFF
+        rec.attestor_seq = seq
+        return True
+
+    def _apply_notice(self, tx, height, rec, pl):
+        """NOT-1."""
+        from . import yellowback_attest as ya
+        p = self.params
+        op = (pl.vault_txid, pl.vault_vout)
+        v = self.vaults.get(op)
+        if v is None or v.status != V_ACTIVE:
+            return False
+        r = pl.ref_height
+        if not (height - p.ref_window <= r <= height - 1) or r < p.start_height:
+            return False
+        if not self.armed_at(r):
+            return False
+        b = self._bundle(tx, r, ya.outpoint_selector(op[0], op[1]), False)
+        if not b['ok']:
+            return False
+        s = self.snapshots[r]
+        if s.p_claim is None or b['a_claim'] is None:
+            return False
+        p_emerg = min(s.p_claim, b['a_claim'])
+        if not is_underwater(v.collateral_zat, p_emerg, v.minted_cents, p.emergency_ratio_bps):
+            return False
+        standing = self.notices.get(op)
+        if standing is not None and height - standing.height <= p.emergency_notice_ttl:
+            return False
+        self.notices[op] = NoticeRecord(height, r, p_emerg)
+        rec.a_mint, rec.a_claim = b['a_mint'], b['a_claim']
+        rec.bundle_seqs = [seq for seq, _p, _c in b['atts']]
+        rec.notice = True
+        return True
+
+    def _apply_equivocation(self, tx, height, rec):
+        """EQV-1."""
+        from . import yellowback_attest as ya
+        p = self.params
+        if p.bundle_carrier == CARRIER_OP_RETURN:
+            return False
+        found, _why = self._find_carrier(tx, False)
+        if found is None:
+            return False
+        _i, pushes = found
+        _pk, h = ya.parse_carrier_script(pushes[2])
+        if sha256(pushes[0]) != h:
+            return False
+        atts = ya.decode_bundle(pushes[0])
+        if atts is None or len(atts) != 2:
+            return False
+        a, b = ya.parse_attestation(atts[0]), ya.parse_attestation(atts[1])
+        if a[0] != b[0] or a[2] != b[2] or a[1] == b[1]:
+            return False
+        r = self.attestors.get(a[0])
+        if r is None or r.status in (A_WITHDRAWN, A_EJECTED):
+            return False
+        bh = self.block_hash_at(a[2])
+        if bh is None or a[2] < p.start_height:
+            return False
+        if not (self._attestation_valid(atts[0], r.attestor_pubkey, bh) and self._attestation_valid(atts[1], r.attestor_pubkey, bh)):
+            return False
+        r.status = A_EJECTED
+        r.status_height = height
+        rec.attestor_seq = a[0]
+        rec.bundle_seqs = [a[0]]
+        return True
+
+    def _apply_revive(self, tx, height, rec, pl):
+        """REV-1."""
+        p = self.params
+        r = self.attestors.get(pl.seq)
+        if r is None or r.status != A_DORMANT:
+            return False
+        if not (height - p.attest_max_age < pl.cited_height <= height - 1):
+            return False
+        bh = self.block_hash_at(pl.cited_height)
+        if bh is None:
+            return False
+        att = struct.pack('<HII', pl.seq, pl.price_micro_usd, pl.cited_height) + pl.sig
+        if not self._attestation_valid(att, r.attestor_pubkey, bh):
+            return False
+        r.status = A_ELIGIBLE
+        r.status_height = height
+        rec.attestor_seq = pl.seq
+        return True
+
+    def _apply_mint(self, tx, height, rec, pl, opret):
+        """MINT-1..10.  Returns True when a Vaults entry was created (ACTIVE or VOID)."""
+        p = self.params
+        facts = {}
+        verdict = self._mint_verdict(tx, height, pl, opret, facts)
+        b = facts.get('bundle')
+        if b is not None and b['ok']:
+            rec.a_mint, rec.a_claim = b['a_mint'], b['a_claim']
+            rec.bundle_seqs = [seq for seq, _p, _c in b['atts']]
         vout0 = tx.vout[0] if tx.vout else None
         if verdict == VERDICT_OK:
             v = Vault()
@@ -1738,6 +2295,9 @@ class YellowbackModel(object):
                 v.fee_paid_zat = tx.vout[pl.fee_vout].value
                 rec.fee_zat = v.fee_paid_zat
                 rec.payee = p2pkh_key(tx.vout[pl.fee_vout].script)
+            if facts.get('attest_payee') is not None:
+                rec.attest_fee_zat = tx.vout[pl.attest_fee_vout].value
+                rec.attest_payee = facts['attest_payee']
             self.vaults[(tx.txid, 0)] = v
             self.tokens[(tx.txid, 1)] = Token(pl.cents, tx.vout[1].value, tx.vout[1].script, height)
             self.totals.supply_cents += pl.cents
@@ -1766,7 +2326,8 @@ class YellowbackModel(object):
             return True
         return False
 
-    def _mint_verdict(self, tx, height, pl, opret):
+    def _mint_verdict(self, tx, height, pl, opret, facts):
+        """MINT-2, 3, 4, 6, 7, 8, then MINT-9, AFEE-1, MINT-5, MINT-10 (v3 plan R15)."""
         p = self.params
         # MINT-2 (signed arithmetic)
         rng = p.class_range(pl.term_class)
@@ -1802,14 +2363,11 @@ class YellowbackModel(object):
             return 'mint-halted-global-ratio'
         if s.halt_mask & HALT_DIVERGENCE:
             return 'mint-halted-divergence'
-        # MINT-5
-        req = required_zat(pl.cents, min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps), s.p_mint)
-        if req is None:
-            return 'mint-unsatisfiable'
-        if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
-            return 'bad-mint-collateral'
-        # MINT-6
-        cap = supply_cap_cents(s.issued_zat, s.p_mint, p.supply_cap_bps)
+        if s.halt_mask != 0:
+            return 'mint-not-active'
+        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9)
+        x_mint = s.p_mint
+        cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
         if cap is not None and self.totals.supply_cents + pl.cents > cap:
             return 'mint-supply-cap'
         # MINT-7
@@ -1826,6 +2384,38 @@ class YellowbackModel(object):
                 return 'bad-mint-fee'
             if tx.vout[fv].value < fee_zat(tx.vout[0].value, p.fee_min, p.fee_bps):
                 return 'bad-mint-fee'
+        # MINT-9 (ARMED at R: BUNDLE-1 with the empty selector; aMint defined)
+        armed = self.armed_at(pl.ref_height)
+        p_mint = x_mint
+        if armed:
+            b = self._bundle(tx, pl.ref_height, b'', False)
+            facts['bundle'] = b
+            if not b['ok']:
+                return 'mint9-no-bundle' if not b['carrier_present'] else 'mint9-bundle-' + b['reason']
+            if b['a_mint'] is None:
+                return 'mint9-bundle-stat'
+            # AFEE-1 (MINT-8's attestor-fee clause)
+            attest_fee = attest_fee_zat(fee_zat(tx.vout[0].value, p.fee_min, p.fee_bps), p.attest_fee_bps)
+            A = [seq for seq, _p, _c in b['atts']]
+            payee = self._attest_fee_ok(tx, pl.attest_fee_vout, A, {0, 1, opret, pl.fee_vout}, attest_fee)
+            if payee is None:
+                return 'afee1-fee'
+            facts['attest_payee'] = payee
+            # PRICE-2 (revised)
+            p_mint = None if x_mint is None else min(x_mint, b['a_mint'])
+        # MINT-5
+        if p_mint is None:
+            return 'mint-halted-no-price'
+        req = required_zat(pl.cents, min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps), p_mint)
+        if req is None:
+            return 'mint-unsatisfiable'
+        if tx.vout[0].value < req or tx.vout[0].value < 4 * p.fee_min:
+            return 'bad-mint-collateral'
+        # MINT-10
+        if armed:
+            a = facts['bundle']['a_mint']
+            if abs(x_mint - a) * BPS > p.diverge_bps_attest * min(x_mint, a):
+                return 'mint10-diverged'
         return VERDICT_OK
 
     def _apply_transfer(self, tx, height, rec, pl, yed_in):
@@ -1856,7 +2446,14 @@ class YellowbackModel(object):
         verdict or None; applies IN-2 either way."""
         path = spend_path(tx.vin[0].script_sig)
         rec.path = path or ''
-        verdict = self._red_verdict(tx, height, pl, opret, active_spent, outpoints, path, yed_in)
+        facts = {}
+        verdict = self._red_verdict(tx, height, pl, opret, active_spent, outpoints, path, yed_in, facts)
+        b = facts.get('bundle')
+        if b is not None and b['ok']:
+            rec.a_mint, rec.a_claim = b['a_mint'], b['a_claim']
+            rec.bundle_seqs = [seq for seq, _p, _c in b['atts']]
+        rec.residual_zat = facts.get('residual_zat', 0)
+        rec.claim_path = facts.get('claim_path', '')
         vault_op = outpoints[0]
         if verdict == VERDICT_OK:
             v = self.vaults[vault_op]
@@ -1876,6 +2473,9 @@ class YellowbackModel(object):
                 v.fee_paid_zat = tx.vout[pl.fee_vout].value
                 rec.fee_zat = v.fee_paid_zat
                 rec.payee = p2pkh_key(tx.vout[pl.fee_vout].script)
+            if facts.get('attest_payee') is not None:
+                rec.attest_fee_zat = tx.vout[pl.attest_fee_vout].value
+                rec.attest_payee = facts['attest_payee']
             self.totals.collateral_zat -= v.collateral_zat
             self.totals.active_vaults -= 1
             if path == 'owner':
@@ -1897,7 +2497,7 @@ class YellowbackModel(object):
             rec.closed_vaults.append(op)
         return verdict
 
-    def _red_verdict(self, tx, height, pl, opret, active_spent, outpoints, path, yed_in):
+    def _red_verdict(self, tx, height, pl, opret, active_spent, outpoints, path, yed_in, facts):
         p = self.params
         # RED-1
         if outpoints[0] not in active_spent or len(active_spent) != 1:
@@ -1912,6 +2512,17 @@ class YellowbackModel(object):
             if not (p.min_output <= cents <= p.max_output):
                 return 'vault-spend-malformed'
         vault = self.vaults[outpoints[0]]
+        claim = path == 'claim'
+        armed = claim and self.armed_at(pl.ref_height)      # the owner path reads no bundle
+        # RED-1 (amended): the claim path needs BUNDLE-1 with selector = vaultOutpoint when ARMED
+        from . import yellowback_attest as ya
+        if armed:
+            b = self._bundle(tx, pl.ref_height, ya.outpoint_selector(outpoints[0][0], outpoints[0][1]), True)
+            facts['bundle'] = b
+            if not b['ok']:
+                return 'red1-bundle-' + b['reason']
+            if b['a_claim'] is None:
+                return 'red1-bundle-stat'
         # RED-2
         total = sum(c for _, c in pl.assignments)
         burn = yed_in - total
@@ -1919,9 +2530,9 @@ class YellowbackModel(object):
             return 'vault-spend-missing-burn' if burn <= 0 else 'vault-spend-short-burn'
         # RED-3
         eligible = self.eligible_payees(pl.ref_height)
+        assigned_vouts = [v for v, _ in pl.assignments]
         if eligible:
             fv = pl.fee_vout
-            assigned_vouts = [v for v, _ in pl.assignments]
             if fv == FEE_VOUT_NONE or fv >= len(tx.vout) or fv == opret or fv in assigned_vouts:
                 return 'vault-spend-bad-fee'
             key = p2pkh_key(tx.vout[fv].script)
@@ -1929,12 +2540,50 @@ class YellowbackModel(object):
                 return 'vault-spend-bad-payee'
             if tx.vout[fv].value < fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps):
                 return 'vault-spend-bad-fee'
-        # RED-4
-        if path == 'claim':
+        # AFEE-1 (RED-3's attestor-fee clause)
+        if armed:
+            attest_fee = attest_fee_zat(fee_zat(vault.collateral_zat, p.fee_min, p.fee_bps), p.attest_fee_bps)
+            A = [seq for seq, _p, _c in facts['bundle']['atts']]
+            payee = self._attest_fee_ok(tx, pl.attest_fee_vout, A, set(assigned_vouts) | {0, 1, opret, pl.fee_vout}, attest_fee)
+            if payee is None:
+                return 'afee1-fee'
+            facts['attest_payee'] = payee
+        # RED-4 (amended) and RED-5
+        if claim:
             s = self.snapshot(pl.ref_height)
-            p_claim = None if (s is None or s.virtual) else s.p_claim
-            if not is_underwater(vault.collateral_zat, p_claim, vault.minted_cents, p.claim_threshold_bps):
-                return 'vault-claim-not-underwater'
+            x_claim = None if (s is None or s.virtual) else s.p_claim
+            p_claim, p_emerg = x_claim, None
+            if armed:
+                a_claim = facts['bundle']['a_claim']
+                if x_claim is not None:
+                    p_claim, p_emerg = max(x_claim, a_claim), min(x_claim, a_claim)
+                else:
+                    p_claim = None
+            if is_underwater(vault.collateral_zat, p_claim, vault.minted_cents, p.claim_threshold_bps):
+                facts['claim_path'] = 'a'
+            else:
+                notice = self.notices.get(outpoints[0]) if armed else None       # (b) is false before arming
+                persisted = notice is not None and p.emergency_persist <= pl.ref_height - notice.ref_height <= p.emergency_notice_ttl
+                if not persisted or not is_underwater(vault.collateral_zat, p_emerg, vault.minted_cents, p.emergency_ratio_bps):
+                    return 'vault-claim-not-underwater'
+                facts['claim_path'] = 'b'
+            # RED-5
+            if p_claim is None:
+                return 'red5-residual'
+            margin = p.claim_threshold_bps if facts['claim_path'] == 'a' else BPS
+            residual = residual_zat(vault.collateral_zat, claimant_max_zat(vault.minted_cents, margin, p_claim))
+            facts['residual_zat'] = residual
+            if residual >= p.residual_min_zat:
+                owner = hash160(vault.owner_pubkey)
+                paid = False
+                for j, o in enumerate(tx.vout):
+                    if j in (opret, pl.fee_vout, pl.attest_fee_vout) or j in assigned_vouts:
+                        continue
+                    if p2pkh_key(o.script) == owner and o.value >= residual:
+                        paid = True
+                        break
+                if not paid:
+                    return 'red5-residual'
         return VERDICT_OK
 
     # -- state hash (section 3.6) --------------------------------------------
@@ -1959,6 +2608,15 @@ class YellowbackModel(object):
             out += b'S' + _u32be(h) + _ser_snapshot(self.snapshots[h])
         out += (b'P' + _i32(p.start_height) + _i32(p.sigma_ref_bps) + _i32(p.supply_cap_bps) + _i32(p.enforce_until)
                 + _u32(p.attest_arm_min) + _u8(p.bundle_carrier))
+        # v3 (section 3.6 state-hash order): Attestors by seq, AttestorSeq, Attest, BundleLog by height, Notices by outpoint
+        for seq in sorted(self.attestors):
+            out += b'A' + struct.pack('>H', seq) + _ser_attestor(self.attestors[seq])
+        out += b'N' + _u16(self.attestor_seq)
+        out += b'M' + _ser_attest(self.attest)
+        for h in sorted(self.bundle_log):
+            out += b'W' + _u32be(h) + _ser_bundle_log(self.bundle_log[h])
+        for op in sorted(self.notices, key=_outpoint_sort_key):
+            out += _outpoint_key(b'E', op) + _ser_notice(self.notices[op])
         return bytes(out)
 
     def state_hash(self):

@@ -29,8 +29,10 @@ import unittest
 if __package__ in (None, ''):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from test_framework import yellowback_model as ym
+    from test_framework import yellowback_attest as ya
 else:
     from . import yellowback_model as ym
+    from . import yellowback_attest as ya
 
 from decimal import Decimal  # noqa: E402  (used by the getblock-2 dict test)
 
@@ -38,7 +40,7 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, 0, 3, scriptsig}).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'bf4e41ff50326919fc0da42d352fb8e96efd2f0dd6aede3c028db1283d9a97a7'
+GOLDEN_STATE_HASH = 'abe131e0cd68cd438449ce22969c7b331930ca3b9e4324ed9d841e90a340a4fe'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
@@ -51,6 +53,9 @@ KEY3 = ym.hash160(b'yellowback-golden-miner-3')
 MINERS = [KEY1, KEY2, KEY3]
 OWNER_KEYHASH = ym.hash160(b'owner')
 SIG71 = bytes(range(1, 72))          # a placeholder signature push; the model verifies no signature
+# The framework's fixed regtest attestor / bond keys (yellowback_attest.py): [(secret32, pubkey33)]
+ATTESTORS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.attestor_keys(5)]
+BONDS = [(sec, bytes.fromhex(pub)) for sec, pub in ya.bond_keys(5)]
 
 
 def outpoint_hex(i):
@@ -106,15 +111,27 @@ class Chain(object):
 
     # -- transaction builders (section 3.5 shapes) --------------------------
 
+    def carrier_input(self, bundle):
+        """A carrier-shaped input (section 3.4) whose redeem script commits to ``bundle``; the model
+        verifies no script, so the signature push is a placeholder."""
+        redeem = ya.carrier_script(G2_PUBKEY, ym.sha256(bundle))
+        t, n, _ss, seq = self.fund_input()
+        return (t, n, ya.carrier_scriptsig(bundle, SIG71, redeem), seq)
+
     def mint_tx(self, cents, lock_blocks, ref_height, collateral, fee_key=None, fee_value=None,
                 owner=G_PUBKEY, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
-                opret_at=2, lock_height=None):
+                opret_at=2, lock_height=None, carrier=None, attest_fee=None):
+        """``carrier`` = a bundle (bytes) carried by an extra input; ``attest_fee`` = (bond key hash, zat)
+        paid at vout 4 (after the pool fee) and named by attestFeeVout."""
         lock = ref_height + lock_blocks if lock_height is None else lock_height
         script = ym.vault_script(lock, owner, lock + self.params.grace)
         vin = [self.fund_input()] + [(t, n, b'', 0xFFFFFFFF) for t, n in yed_inputs]
+        if carrier is not None:
+            vin.append(self.carrier_input(carrier))
         if fee_vout is None:
             fee_vout = 3 if fee_key is not None else ym.FEE_VOUT_NONE
-        payload = ym.encode_mint(term_class, cents, lock, ref_height, owner, fee_vout)
+        attest_fee_vout = 4 if attest_fee is not None else ym.FEE_VOUT_NONE
+        payload = ym.encode_mint(term_class, cents, lock, ref_height, owner, fee_vout, attest_fee_vout)
         vout0 = ym.p2sh_script(script) if vout0_script is None else vout0_script
         vouts = [(collateral, vout0), (self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH))]
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
@@ -126,6 +143,8 @@ class Chain(object):
             if fee_value is None:
                 fee_value = ym.fee_zat(collateral, self.params.fee_min, self.params.fee_bps)
             vouts.append((fee_value, ym.p2pkh_script(fee_key)))
+        if attest_fee is not None:
+            vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
 
     def transfer_tx(self, yed_inputs, assignments, opret_index=None):
@@ -142,10 +161,12 @@ class Chain(object):
 
     def spend_tx(self, vault_op, vault_script, path, yed_inputs, ref_height, fee_key, fee_value,
                  assignments=(), payload=None, collateral_out=10 ** 9, selector=None, script_sig=None,
-                 extra_vaults=(), fee_vout=1, first_input=None):
+                 extra_vaults=(), fee_vout=1, first_input=None, carrier=None, attest_fee=None, residual=None):
         """A vault spend: vin[0] = vault (owner: <sig> OP_1 <script>; claim: OP_0 <script>),
-        vin[1..] = YED inputs; vout[0] = collateral, vout[1] = fee, vout[2] = OP_RETURN,
-        vout[3..] = assigned token outputs."""
+        vin[1..] = YED inputs, then the carrier input when ``carrier`` (a bundle) is given; vout[0] =
+        collateral, vout[1] = fee, vout[2] = OP_RETURN, vout[3..] = assigned token outputs, then the
+        attestor fee (``attest_fee`` = (bond key hash, zat)) and the residual (``residual`` = (owner key
+        hash, zat)) when given."""
         if script_sig is None:
             if selector is None:
                 selector = bytes([ym.OP_1]) if path == 'owner' else bytes([ym.OP_0])
@@ -155,15 +176,64 @@ class Chain(object):
             vin.insert(0, first_input)
         vin += [(t, n, b'', 0xFFFFFFFF) for t, n in yed_inputs]
         vin += [(t, n, b'\x00' + ym.push(vault_script), 0xFFFFFFFE) for t, n in extra_vaults]
+        if carrier is not None:
+            vin.append(self.carrier_input(carrier))
         vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
         vouts.append((fee_value, ym.p2pkh_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
+        attest_fee_vout = 3 + len(assignments) if attest_fee is not None else ym.FEE_VOUT_NONE
         if payload is None:
-            payload = ym.encode_redeem(ref_height, fee_vout, list(assignments))
+            payload = ym.encode_redeem(ref_height, fee_vout, list(assignments), attest_fee_vout)
         if payload != b'':
             vouts.append((0, bytes([ym.OP_RETURN]) + ym.push(payload)))
         for _ in assignments:
             vouts.append((self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH)))
+        if attest_fee is not None:
+            vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
+        if residual is not None:
+            vouts.append((residual[1], ym.p2pkh_script(residual[0])))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
+
+    # -- v3 builders (section 3.5) -------------------------------------------
+
+    def register_tx(self, hot_pubkey, bond_pubkey, bond_locktime, bond_zat, flags=0):
+        vin = [self.fund_input()]
+        vouts = [(bond_zat, ym.p2sh_script(ya.bond_script(bond_pubkey, bond_locktime))),
+                 (0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_attestor_register(hot_pubkey, bond_pubkey, bond_locktime, flags))),
+                 (1000, ym.p2pkh_script(OWNER_KEYHASH))]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def notice_tx(self, vault_op, ref_height, bundle):
+        vin = [self.fund_input(), self.carrier_input(bundle)]
+        vouts = [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_claim_notice(vault_op[0], vault_op[1], ref_height))),
+                 (1000, ym.p2pkh_script(OWNER_KEYHASH))]
+        return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
+
+    def equivocation_tx(self, att_a, att_b):
+        vin = [self.carrier_input(ya.encode_bundle([att_a, att_b]))]
+        vouts = [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_equivocation())), (1000, ym.p2pkh_script(OWNER_KEYHASH))]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def revive_tx(self, att74):
+        vin = [self.fund_input()]
+        vouts = [(0, bytes([ym.OP_RETURN]) + ym.push(ya.encode_revive(att74))), (1000, ym.p2pkh_script(OWNER_KEYHASH))]
+        return ym.serialize_tx_v4(vin, vouts).hex()
+
+    def bond_spend_tx(self, bond_op, bond_script, lock_time):
+        vin = [(bond_op[0], bond_op[1], ym.push(SIG71) + ym.push(bond_script), 0xFFFFFFFE)]
+        return ym.serialize_tx_v4(vin, [(10 ** 9 - 1000, ym.p2pkh_script(OWNER_KEYHASH))], lock_time).hex()
+
+    def bundle_for(self, ref_height, selector, prices, cited=None, skip=()):
+        """The bundle for (R, selector) signed with the fixed regtest attestor keys: every selected seq
+        not in ``skip`` signs ``prices[seq]`` (or ``prices['*']``) citing ``cited`` (default R)."""
+        selected = self.model.selected(ref_height, selector)
+        cited = ref_height if cited is None else cited
+        atts = []
+        for seq in selected:
+            if seq in skip:
+                continue
+            price = prices.get(seq, prices.get('*'))
+            atts.append(ya.sign_attestation(ATTESTORS[seq][0], seq, price, cited, self.block_hash(cited)))
+        return ya.encode_bundle(atts), selected
 
 
 def txid_of(raw_hex):
@@ -179,9 +249,10 @@ def activated_chain(params=None, **kw):
     return c
 
 
-def collateral_for(c, cents, ref_height, term_class=0):
+def collateral_for(c, cents, ref_height, term_class=0, p_mint=None):
     s = c.model.snapshot(ref_height)
-    req = ym.required_zat(cents, ym.min_ratio_bps(c.params.base_ratio_bps[term_class], s.sigma_mult_bps), s.p_mint)
+    req = ym.required_zat(cents, ym.min_ratio_bps(c.params.base_ratio_bps[term_class], s.sigma_mult_bps),
+                          s.p_mint if p_mint is None else p_mint)
     return ym.ceil_div(req, 1000) * 1000
 
 
@@ -1185,14 +1256,21 @@ class RedeemTests(unittest.TestCase):
 # ===========================================================================
 # section 3.6  State hash and the golden vector
 
+GOLDEN_BLOCKS = 440
+
+
 def build_golden():
-    """The fixed synthetic sequence: regtest params {1, 0, 0, 0}; 224 blocks; a full lifecycle."""
+    """The fixed synthetic sequence: regtest params {1, 0, 0, 0, 3, scriptsig}; 440 blocks; the v2
+    lifecycle to 224, then the v3 one: four registrations, arming, a mint with a bundle, a VOID mint
+    without one, a price fall, a notice and an emergency claim with a residual, dormancy, an
+    equivocation, a revival and two bond spends."""
     params = ym.Params.regtest(1, 0, 0, 0)
     c = Chain(params)
-    price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10)  # noqa: E731
+    price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (2_000 + (h % 3) * 5)  # noqa: E731
     key = lambda h: MINERS[h % 3]  # noqa: E731
     txs_at = {}
-    while c.height < 224:
+    v3 = {}     # heights and choices the v3 tail makes as it goes (deterministic; recorded for the tests)
+    while c.height < GOLDEN_BLOCKS:
         h = c.height + 1
         txs = []
         if h == 136:
@@ -1236,6 +1314,77 @@ def build_golden():
             txs_at['sweep4'] = c.spend_tx((txid_of(txs_at['mint4']), 0), script, 'owner', [], 215, None, 0,
                                           payload=b'', collateral_out=v.collateral_zat - 1000)
             txs.append(txs_at['sweep4'])
+        # ---- the v3 tail
+        elif 225 <= h <= 228:                                   # REG-A1: seq 0..3, 10 YEC bonds, locktime H + 200
+            i = h - 225
+            txs_at['reg%d' % i] = c.register_tx(ATTESTORS[i][1], BONDS[i][1], h + 200, 10 * ym.COIN, flags=i)
+            txs.append(txs_at['reg%d' % i])
+        elif h == 230:                                          # burn the last 6,000 cents so the global ratio is undefined again
+            txs_at['burn'] = c.transfer_tx([(txid_of(txs_at['claim3']), 3)], [])
+            txs.append(txs_at['burn'])
+        elif h == 250:                                          # MINT-9: a mint with a bundle at R = 248 (ARMED at 243)
+            ref = 248
+            bundle, sel = c.bundle_for(ref, b'', {'*': 9_000})
+            x = c.model.snapshot(ref).p_mint
+            collateral = collateral_for(c, 10_000, ref, p_mint=min(x, 9_000))
+            fee = ym.fee_zat(collateral, params.fee_min, params.fee_bps)
+            payee = sel[0]
+            txs_at['mint5'] = c.mint_tx(10_000, 48, ref, collateral, fee_key=KEY1, carrier=bundle,
+                                        attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)))
+            txs.append(txs_at['mint5'])
+            v3['mint5_selected'] = sel
+        elif h == 251:                                          # MINT-9: the same shape without a carrier => VOID mint9-no-bundle
+            ref = 249
+            txs_at['mint6'] = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY2)
+            txs.append(txs_at['mint6'])
+        elif h == 290:                                          # NOT-1 at R = 288: attestors at 1,850, pools at ~2,000
+            ref = 288
+            vault = (txid_of(txs_at['mint5']), 0)
+            sel = c.model.selected(ref, ya.outpoint_selector(*vault))
+            v3['lazy'] = sel[0]                                 # the attestor that stops signing (dormancy)
+            bundle, _ = c.bundle_for(ref, ya.outpoint_selector(*vault), {'*': 1_850}, skip=(v3['lazy'],))
+            txs_at['notice5'] = c.notice_tx(vault, ref, bundle)
+            txs.append(txs_at['notice5'])
+        elif h >= 298 and 'claim5' not in txs_at:               # RED-4(b) + RED-5 at the first R >= 296 that selects the lazy attestor
+            ref = h - 2
+            vault = (txid_of(txs_at['mint5']), 0)
+            selector = ya.outpoint_selector(*vault)
+            sel = c.model.selected(ref, selector)
+            if v3['lazy'] in sel:
+                v = c.model.vaults[vault]
+                script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
+                bundle, _ = c.bundle_for(ref, selector, {'*': 1_850}, skip=(v3['lazy'],))
+                fee = ym.fee_zat(v.collateral_zat, params.fee_min, params.fee_bps)
+                p_claim = max(c.model.snapshot(ref).p_claim, 1_850)
+                residual = ym.residual_zat(v.collateral_zat, ym.claimant_max_zat(v.minted_cents, ym.BPS, p_claim))
+                payee = [q for q in sel if q != v3['lazy']][0]
+                txs_at['claim5'] = c.spend_tx(vault, script, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
+                                              carrier=bundle, collateral_out=v.collateral_zat - residual - fee - 10 ** 8,
+                                              attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
+                                              residual=(ym.hash160(G_PUBKEY), residual))
+                txs.append(txs_at['claim5'])
+                v3['claim_height'] = h
+                v3['residual'] = residual
+                v3['dormancy_height'] = h + (-h) % 4            # the first DORMANCY_CHECK multiple at or after the claim
+        elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
+            e = min(q for q in range(4) if q != v3['lazy'])
+            v3['ejected'] = e
+            a = ya.sign_attestation(ATTESTORS[e][0], e, 2_000, h - 1, c.block_hash(h - 1))
+            b = ya.sign_attestation(ATTESTORS[e][0], e, 2_100, h - 1, c.block_hash(h - 1))
+            txs_at['eqv'] = c.equivocation_tx(a, b)
+            txs.append(txs_at['eqv'])
+        elif 'claim_height' in v3 and h == v3['dormancy_height'] + 4:   # REV-1: the dormant attestor signs again
+            lazy = v3['lazy']
+            txs_at['revive'] = c.revive_tx(ya.sign_attestation(ATTESTORS[lazy][0], lazy, 2_000, h - 1, c.block_hash(h - 1)))
+            txs.append(txs_at['revive'])
+        elif h == GOLDEN_BLOCKS:                                # IN-2: two bond spends (one WITHDRAWN, the EJECTED one stays EJECTED)
+            e = v3['ejected']
+            w = max(q for q in range(4) if q not in (v3['lazy'], e))
+            v3['withdrawn'] = w
+            for name, q in (('spend_e', e), ('spend_w', w)):
+                rec = c.model.attestors[q]
+                txs_at[name] = c.bond_spend_tx(rec.bond_outpoint, ya.bond_script(BONDS[q][1], rec.bond_locktime), rec.bond_locktime)
+                txs.append(txs_at[name])
         if h == 5:
             c.mine(None, txs)                                          # untagged
         elif h == 9:
@@ -1248,6 +1397,7 @@ def build_golden():
             c.mine((0, price(h), 1, key(h)), txs)                      # quote without the signal bit
         else:
             c.mine((1, price(h), 0, key(h)), txs)
+    c.v3 = v3
     return c, txs_at
 
 
@@ -1255,9 +1405,11 @@ def golden_document(c):
     return {
         'description': 'Yellowback v3 state-hash golden vector: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, enforceUntil 0, attestArmMin 3, bundleCarrier 0 (scriptsig)}; payload version 3; '
-                       '224 synthetic blocks (see test_yellowback_model.build_golden). '
+                       '%d synthetic blocks (see test_yellowback_model.build_golden): the v2 lifecycle to 224, then '
+                       'registrations, arming, a mint with a bundle, a VOID mint without one, a notice and an emergency '
+                       'claim with a residual, dormancy, an equivocation, a revival and two bond spends. '
                        'txs[0] of every block is the coinbase; the model reads its scriptSig only. '
-                       'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.',
+                       'Block 217 fails BLK-1 (vault-spend-malformed) with enforcement on; it is applied anyway.' % GOLDEN_BLOCKS,
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'enforceUntil': 0,
                    'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG},
         'stateHash': c.model.state_hash(),
@@ -1273,20 +1425,23 @@ class StateHashTests(unittest.TestCase):
     def test_preimage_layout(self):
         m = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3))
         pre = m.state_hash_preimage()
-        # T + i32 0 + zero hash + u32 2 + "regtest"; C + SIGNALING; G totals; P params
+        # T + i32 0 + zero hash + u32 3 + "regtest"; C + SIGNALING; G totals; P params; N + u16 0; M + UNARMED
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x02\x00\x00\x00')
+        self.assertEqual(pre[37:41], b'\x03\x00\x00\x00')
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:59], b'C' + b'\x00' + bytes(8))
         self.assertEqual(pre[59:60], b'G')
         self.assertEqual(pre[60:100], bytes(40))
         # P: the four v2 i32 fields, then v3's attestArmMin u32 (3) and bundleCarrier u8 (0 = scriptsig) (M13)
-        self.assertEqual(pre[100:], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
+        self.assertEqual(pre[100:122], b'P' + b'\x07\x00\x00\x00' + b'\x01\x00\x00\x00' + b'\x02\x00\x00\x00' + b'\x03\x00\x00\x00'
                          + b'\x03\x00\x00\x00' + b'\x00')
+        # v3 (section 3.6): AttestorSeq (N + u16 next) and Attest (M + status u8 + i32 triggerHeight + i32 armHeight) always present
+        self.assertEqual(pre[122:125], b'N\x00\x00')
+        self.assertEqual(pre[125:], b'M' + bytes(9))
         m2 = ym.YellowbackModel(ym.Params.regtest(7, 1, 2, 3, attest_arm_min=0, bundle_carrier=ym.CARRIER_EITHER))
-        self.assertEqual(m2.state_hash_preimage()[117:], b'\x00\x00\x00\x00' + b'\x02')
+        self.assertEqual(m2.state_hash_preimage()[117:122], b'\x00\x00\x00\x00' + b'\x02')
         self.assertNotEqual(m2.state_hash(), m.state_hash())
         self.assertEqual(m.state_hash(), ym.sha256(pre).hex())
 
@@ -1313,7 +1468,9 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(rec[99:115], bytes(16))                      # supply, collateral
         self.assertEqual(rec[115:123], bytes(8))                      # globalRatio undefined
         self.assertEqual(rec[123:127], b'\x03\x00\x00\x00')           # NOT_ACTIVE | NO_PRICE
-        self.assertEqual(rec[127:128], b'P')
+        self.assertEqual(rec[127:136], bytes(9))                      # v3: attest UNARMED/0/0
+        self.assertEqual(rec[136:139], b'\x00\x00\x00')               # seated, pinnedKeys, pinnedSeqs empty
+        self.assertEqual(rec[139:140], b'P')
 
     # Rule: N18
     def test_golden_vector(self):
@@ -1337,10 +1494,36 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(m.txlog[txid_of(txs_at['sweep4'])].verdict, 'vault-spend-malformed')
         self.assertTrue(m.blocks[217].rejected)
         self.assertEqual([h for h, b in m.blocks.items() if b.block_invalid], [217])
-        self.assertEqual(m.totals.as_dict(), {'supplyCents': 6_000, 'collateralZat': 0, 'activeVaults': 0,
-                                              'voidVaults': 1, 'closedVaults': 2, 'claimedVaults': 1,
+        self.assertEqual(m.totals.as_dict(), {'supplyCents': 0, 'collateralZat': 0, 'activeVaults': 0,
+                                              'voidVaults': 2, 'closedVaults': 2, 'claimedVaults': 2,
                                               'unbackedCents': 10_000})
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
+        # the v3 tail (v3 plan section 3.8): arming, a bundled mint, a bundle-less VOID mint, notice + emergency claim
+        # with a residual, dormancy, ejection, revival, bond spends
+        v3 = c.v3
+        self.assertEqual((m.attest.status, m.attest.trigger_height, m.attest.arm_height), (ym.ARMED, 235, 243))
+        self.assertEqual(m.snapshots[242].attest.status, ym.TRIGGERED)
+        self.assertEqual(m.snapshots[243].attest.status, ym.ARMED)
+        self.assertEqual(sorted(m.attestors), [0, 1, 2, 3])
+        self.assertEqual(m.snapshots[248].seated, [0, 1, 2, 3])
+        mint5 = m.txlog[txid_of(txs_at['mint5'])]
+        self.assertEqual((mint5.verdict, mint5.a_mint, sorted(mint5.bundle_seqs), mint5.attest_payee), ('ok', 9_000, sorted(v3['mint5_selected']), v3['mint5_selected'][0]))
+        self.assertEqual(m.vaults[(txid_of(txs_at['mint6']), 0)].void_reason, 'mint9-no-bundle')
+        self.assertEqual(m.txlog[txid_of(txs_at['notice5'])].notice, True)
+        self.assertEqual(m.bundle_log[290].a_claim, 1_850)
+        claim5 = m.txlog[txid_of(txs_at['claim5'])]
+        self.assertEqual((claim5.verdict, claim5.claim_path, claim5.residual_zat), ('ok', 'b', v3['residual']))
+        self.assertTrue(claim5.residual_zat >= ym.Params.REGTEST_ATTEST['residual_min_zat'])
+        self.assertEqual(m.vaults[(txid_of(txs_at['mint5']), 0)].status, ym.V_CLAIMED)
+        self.assertEqual(m.notices, {})                                        # deleted when the vault left ACTIVE
+        lazy, e, w = v3['lazy'], v3['ejected'], v3['withdrawn']
+        self.assertEqual(m.snapshots[v3['dormancy_height']].attest.status, ym.ARMED)
+        self.assertEqual(m.txlog[txid_of(txs_at['revive'])].attestor_seq, lazy)
+        self.assertEqual(m.attestors[lazy].status, ym.A_ELIGIBLE)
+        self.assertEqual(m.attestors[lazy].status_height, v3['dormancy_height'] + 4)
+        self.assertEqual(m.attestors[e].status, ym.A_EJECTED)
+        self.assertEqual(m.attestors[e].bond_spent_height, GOLDEN_BLOCKS)     # spent, still EJECTED
+        self.assertEqual((m.attestors[w].status, m.attestors[w].status_height), (ym.A_WITHDRAWN, GOLDEN_BLOCKS))
         # the pinned hash, the file on disk and a replay from the file all agree
         self.assertEqual(m.state_hash(), GOLDEN_STATE_HASH)
         with open(GOLDEN_PATH) as f:
@@ -1358,7 +1541,9 @@ class StateHashTests(unittest.TestCase):
         c1.mine_n(3)
         c2.mine_n(3)
         self.assertNotEqual(c1.model.state_hash(), c2.model.state_hash())
-        self.assertEqual(c1.model.state_hash_preimage()[:-16], c2.model.state_hash_preimage()[:-16])
+        # only P.enforceUntil differs: everything before it and the 18 bytes after it (attestArmMin, bundleCarrier, N, M) agree
+        self.assertEqual(c1.model.state_hash_preimage()[:-22], c2.model.state_hash_preimage()[:-22])
+        self.assertEqual(c1.model.state_hash_preimage()[-18:], c2.model.state_hash_preimage()[-18:])
 
 
 class JsonFeedTests(unittest.TestCase):
