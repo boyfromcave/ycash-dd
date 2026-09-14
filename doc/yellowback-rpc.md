@@ -62,7 +62,7 @@ Everything marked **v3** in this file is Phase A0's contract for Phases A2 (node
   command takes them.
 - **v3 attestor identity.** An attestor is named by its `seq` (number, `u16`, assigned in block
   order at registration, W4). `attestorPubKey` is the 33-byte hot key in hex; `bondAddress` is
-  the P2PKH address of `bondPubKey` (the fee payee and the bond owner). An **attestation** is 74
+  the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself) (the fee payee and the bond owner). An **attestation** is 74
   bytes — `seq u16 ‖ priceMicroUsd u32 ‖ citedHeight u32 ‖ sig 64`, little-endian, compact low-S
   ECDSA over `SHA256("YBATTEST1" ‖ seq ‖ price ‖ citedHeight ‖ blockHash(citedHeight))` — and
   travels through RPC as its hex (`hex`, 148 characters). A **bundle** is `"YA" ‖ 0x01 ‖ count ‖
@@ -874,7 +874,7 @@ Result of `yed_estimatecollateral`:
 Arguments: `height` (number, optional; default the index tip; `seated`/`pinned`/`weight` are
 evaluated at that height's snapshot, the records are always the current table). Every
 `Attestors` record (v3 §3.6), ascending `seq`. `bondOutpoint` is `txid:0` of the registration;
-`bondAddress` the P2PKH address of `bondPubKey` (where attestation fees are paid);
+`bondAddress` the P2SH address of `BondScript(bondPubKey, bondLocktime)` (the bond output itself) (where attestation fees are paid);
 `bondLocktime` the CLTV height; `flags` the decoded registration flags; `status` one of the five
 attestor statuses and `statusHeight` the height it was last set; `bondSpentHeight` `null` until
 the bond outpoint is spent (IN-2); `seatedSince` the height the attestor entered `seated[]`,
