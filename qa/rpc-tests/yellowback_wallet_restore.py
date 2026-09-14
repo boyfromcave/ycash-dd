@@ -16,12 +16,14 @@ Nodes: 0 user (the original wallet), 1 stock, 2-4 pools, 5 observer (the restore
 
 from test_framework.util import assert_equal, assert_greater_than, bitcoind_processes, start_node
 from test_framework.yellowback_util import (
+    REF_WINDOW,
     POOLS,
     REF_LAG,
     YellowbackTestFramework,
     assert_same_statehash,
 )
 from test_framework import yellowback_model as ym
+from test_framework.yellowback_attest import ArmedModeMixin, offline_bundle_hex
 
 
 def assert_rpc_error(substr, fn, *args):
@@ -33,7 +35,7 @@ def assert_rpc_error(substr, fn, *args):
     raise AssertionError('expected an error containing %r' % substr)
 
 
-class YellowbackWalletRestoreTest(YellowbackTestFramework):
+class YellowbackWalletRestoreTest(ArmedModeMixin, YellowbackTestFramework):
 
     def run_test(self):
         nodes = self.nodes
@@ -42,11 +44,12 @@ class YellowbackWalletRestoreTest(YellowbackTestFramework):
         print('activate at $50')
         self.activate(POOLS, quote_usd=50)
         self.mine_round_robin(POOLS, REF_LAG + 1)
+        self.arm()
 
 # Rule: MINT-3 XFER-1
         print('node 0 mints twice (class A and class B) and sends 50 YED to a fresh own address; node 5 holds nothing')
-        m1 = user.yed_mint(10000, 48)
-        m2 = user.yed_mint(20000, 100)
+        m1 = self.mint(user, 10000, 48)
+        m2 = self.mint(user, 20000, 100)
         assert_equal(m2['termClass'], 'B')
         self.sync_all()
         self.mine(POOLS[0])
@@ -131,14 +134,37 @@ class YellowbackWalletRestoreTest(YellowbackTestFramework):
         assert_rpc_error('walletpassphrase', user.yed_redeem, m2['txid'])
         assert_equal(user.yed_getbalance()['confirmedCents'], 20000)          # reading needs no passphrase
         user.walletpassphrase('pass', 120)
-        m3 = user.yed_mint(10000, 48)
+        m3 = self.mint(user, 10000, 48)
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(nodes[2].yed_getvault(m3['txid'])['status'], 'ACTIVE')
         assert_equal(user.yed_getbalance()['confirmedCents'], 30000)
         assert_equal(restored.yed_getbalance()['confirmedCents'], 20000)      # the new key is not in the restored wallet
-        ym.assert_model_matches(nodes[2], full=True)
+        self.model_check(nodes[2])
         self.checkpoint('restore')
+
+# Rule: W7
+        print('an outstanding carrier survives a restart (carriers.dat, never wallet.dat) and is swept once its window lapses')
+        r = user.yed_getinfo()['height'] - REF_LAG
+        bundle = offline_bundle_hex(self, user, r, b'', self.price_at(user, r, 'pMint')) if self.armed else ''
+        pend = user.yed_mint(10000, 48, '', bundle, False)                 # wait=false: the carrier is broadcast, the mint pending
+        assert_equal(pend['pending'], True)
+        self.sync_all()
+        self.restart(0, ['-developerencryptwallet'])                       # the pending completion lived in memory
+        user = nodes[0]
+        self.sync_all()
+        self.mine(POOLS[0])                                                # the carrier confirms; nobody completes the mint
+        assert_equal(user.yed_sweepcarriers()['outstanding'], 1)          # reading needs no passphrase; nothing lapsed yet
+        self.mine_round_robin(POOLS, REF_WINDOW)
+        assert_rpc_error('walletpassphrase', user.yed_sweepcarriers)      # the sweep signs
+        user.walletpassphrase('pass', 120)
+        swept = user.yed_sweepcarriers()
+        assert_equal((swept['count'], swept['outstanding']), (1, 0))
+        assert_equal([v['txid'] for v in user.getrawtransaction(swept['txid'], 1)['vin']], [pend['carrierTxid']])
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_equal(user.gettxout(pend['carrierTxid'], 0), None)
+        assert_equal(restored.yed_sweepcarriers()['outstanding'], 0)      # the restored wallet never knew the carrier (W7)
 
 
 if __name__ == '__main__':

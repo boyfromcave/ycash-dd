@@ -36,6 +36,8 @@
 #include "utilstrencodings.h"
 #include "wallet/wallet.h"
 #include "yellowback/address.h"
+#include "yellowback/attest.h"
+#include "yellowback/bundle.h"
 #include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/payload.h"
@@ -92,9 +94,16 @@ bool StartsWith(const std::string& s, const char* prefix)
 {
     const std::string msg = e.what();
     static const char* const RULE[] = { "mintpol-", "mint-unsatisfiable", "vault-locked", "claim-not-yet", "claim-not-underwater",
-                                        "sweep-not-abandoned", "mempool-check-failed", nullptr };
+                                        "sweep-not-abandoned", "mempool-check-failed",
+                                        // v3 (contract: RPC_VERIFY_REJECTED unless stated), incl. the dry run's verdict strings
+                                        "bundle-insufficient", "mint9-", "mint10-", "red1-", "red5-", "afee1-", "notice-standing", "notice-not-underwater",
+                                        "bond-below-min", "lock-below-min", "bond-locked", "bond-spent", "not-dormant", "not-equivocation",
+                                        "attest-unknown-seq", "attest-key-not-held", "attest-range", "attest-stale", "equivocation-guard",
+                                        "carrier-lapsed", "carrier-unconfirmed", "register-refused", "bad-mint-", "vault-spend-", "vault-claim-",
+                                        "mint-not-active", "mint-halted-", "mint-supply-cap", "mint-dry-run", nullptr };
     static const char* const PARAM[] = { "mint-bad-lock", "bad-mint-amount", "bad-xfer-amount", "vault-not-found", "vault-not-active",
-                                         "vault-not-owned", "not-a-yellowback-address", "sweep-acknowledgement-missing", "bad-address", nullptr };
+                                         "vault-not-owned", "not-a-yellowback-address", "sweep-acknowledgement-missing", "bad-address",
+                                         "bundle-malformed", "attest-malformed", "carrier-selector", nullptr };
     for (const char* const* p = RULE; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_VERIFY_REJECTED, msg);
     for (const char* const* p = PARAM; *p; p++) if (StartsWith(msg, *p)) throw JSONRPCError(RPC_INVALID_PARAMETER, msg);
     throw JSONRPCError(RPC_WALLET_ERROR, msg);
@@ -274,6 +283,291 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
     return o;
 }
 
+// ---------------------------------------------------------------- v3: the two-step flow (W7), shared pieces
+
+UniValue PriceOrNull(const std::optional<MicroUsd>& p) { return p.has_value() ? UniValue(p.value()) : NullUniValue; }
+
+UniValue SeqsToJSON(const std::vector<uint16_t>& seqs)
+{
+    UniValue arr(UniValue::VARR);
+    for (uint16_t q : seqs) arr.push_back((int)q);
+    return arr;
+}
+
+/** bundleHex: absent / null / "" => nullopt (the pool path); else the bytes (`bundle-malformed` for bad hex). */
+std::optional<std::vector<unsigned char>> ParseBundleArg(const UniValue& params, size_t idx)
+{
+    if (params.size() <= idx || params[idx].isNull()) return std::nullopt;
+    const std::string hex = params[idx].get_str();
+    if (hex.empty()) return std::nullopt;
+    if (!IsHex(hex)) throw JSONRPCError(RPC_INVALID_PARAMETER, "bundle-malformed: bundleHex is not hex");
+    return ParseHex(hex);
+}
+
+bool ParseWaitArg(const UniValue& params, size_t idx)
+{
+    if (params.size() <= idx || params[idx].isNull()) return true;
+    if (params[idx].isBool()) return params[idx].get_bool();
+    if (params[idx].isStr()) return params[idx].get_str() != "false" && params[idx].get_str() != "0";
+    return params[idx].get_int() != 0;
+}
+
+Attestation ParseAttestationArg(const UniValue& v, const char* what)
+{
+    if (!v.isStr() || !IsHex(v.get_str())) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("attest-malformed: ") + what + " is not 74 bytes of hex");
+    std::optional<Attestation> a = DecodeAttestation(ParseHex(v.get_str()));
+    if (!a.has_value()) throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("attest-malformed: ") + what + " is not 74 bytes of hex");
+    return a.value();
+}
+
+/** The carrier step: build, (prove,) commit and persist the carrier; returns its record. */
+CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>& bundle, int refHeight,
+                          const std::vector<unsigned char>& selector, const std::string& from)
+{
+    YellowbackIndex& index = *yw.Index();
+    CReserveKey reservekey(pwalletMain);
+    BuiltTx built;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        try {
+            built = BuildCarrier(yw, bundle, refHeight, selector, reservekey, from);
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+        if (!built.NeedsProving()) {
+            Commit(yw, built, &reservekey);
+            yw.RecordCarrier(built.carrier.value());
+            return built.carrier.value();
+        }
+    }
+    try {
+        FinishSapling(built);
+    } catch (const std::runtime_error& e) {
+        throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+    }
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    Commit(yw, built, &reservekey);
+    yw.RecordCarrier(built.carrier.value());
+    return built.carrier.value();
+}
+
+/**
+ * Is the carrier a confirmed unspent coin that the wallet, too, has seen in a block? Both are
+ * needed: the block connects before the notifier thread tells the wallet, and until then the
+ * carrier's own funding input still looks unspent to AvailableCoins (its spender has depth -1).
+ */
+bool CarrierConfirmed(const COutPoint& out)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    const CCoins* c = pcoinsTip->AccessCoins(out.hash);
+    if (!(c && c->IsAvailable(out.n))) return false;
+    std::map<uint256, CWalletTx>::const_iterator it = pwalletMain->mapWallet.find(out.hash);
+    return it == pwalletMain->mapWallet.end() || it->second.GetDepthInMainChain() >= 1;
+}
+
+/** wait=true: block, releasing every lock, until the carrier confirms (-yellowbackcarriertimeout seconds, default 600). */
+void WaitForCarrier(const CarrierRecord& c)
+{
+    const int64_t timeoutMs = std::max<int64_t>(1, GetArg("-yellowbackcarriertimeout", 600)) * 1000;
+    const int64_t start = GetTimeMillis();
+    while (!CarrierConfirmed(c.outpoint)) {
+        if (ShutdownRequested()) throw JSONRPCError(RPC_WALLET_ERROR, "carrier-wait-aborted: shutting down; the carrier " + c.outpoint.ToString() + " stays outstanding (yed_sweepcarriers)");
+        if (GetTimeMillis() - start > timeoutMs) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("carrier-timeout: the carrier %s did not confirm within %d s; it stays outstanding and is swept once its window lapses",
+                                                            c.outpoint.ToString(), timeoutMs / 1000));
+        }
+        MilliSleep(200);
+    }
+}
+
+/** The zero-valued main-transaction fields of a pending two-step result (contract, Conventions). */
+void PushPendingCommon(UniValue& o, const CarrierRecord& c, bool pending)
+{
+    o.pushKV("carrierTxid", c.outpoint.hash.GetHex());
+    o.pushKV("pending", pending);
+    o.pushKV("refHeight", (int64_t)c.refHeight);
+}
+
+/** Complete a MINT on a confirmed carrier: build, sign, dry-run, gate, commit; forget the carrier. */
+UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const std::string& from, const CarrierRecord& carrier)
+{
+    YellowbackIndex& index = *yw.Index();
+    BuiltTx built;
+    CReserveKey reservekey(pwalletMain);
+    uint256 txid;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildMint(yw, cents, lockBlocks, reservekey, from, carrier);
+            } catch (const std::runtime_error& e) {
+                ThrowBuildError(e);
+            }
+            if (!built.NeedsProving()) MempoolGate(index, CTransaction(built.tx));   // K7 (trivially true for a mint)
+        }
+        if (!built.NeedsProving()) {
+            txid = Commit(yw, built, &reservekey);
+            yw.SpendCarrier(carrier.outpoint);
+        }
+    }
+    if (built.NeedsProving()) {
+        // Sapling shape (§4.6): the spend proofs take seconds; no lock is held while they are made.
+        try {
+            FinishSapling(built);
+        } catch (const std::runtime_error& e) {
+            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+        }
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                SignBuiltInputs(built, *pwalletMain, SignerBranchId());   // the carrier: scriptSigs are outside the ZIP-243 digest
+                DryRunBuilt(yw, built);                                    // MINT-1..10 with the bundle
+            } catch (const std::runtime_error& e) {
+                ThrowBuildError(e);
+            }
+            MempoolGate(index, CTransaction(built.tx));
+        }
+        txid = Commit(yw, built, &reservekey);
+        yw.SpendCarrier(carrier.outpoint);
+    }
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    o.pushKV("vault", txid.GetHex() + ":0");
+    o.pushKV("termClass", ClassName((uint8_t)built.termClass));
+    o.pushKV("lockHeight", (int64_t)built.lockHeight);
+    o.pushKV("claimHeight", (int64_t)built.claimHeight);
+    o.pushKV("collateralZat", built.collateralZat);
+    o.pushKV("feeZat", built.feeZat);
+    o.pushKV("payee", PayeeToJSON(built.payee));
+    o.pushKV("fundedFrom", built.fundedFrom);
+    o.pushKV("warning", built.warning);
+    PushPendingCommon(o, carrier, false);
+    o.pushKV("xMint", PriceOrNull(built.xMint));
+    o.pushKV("aMint", PriceOrNull(built.aMint));
+    o.pushKV("pMint", PriceOrNull(built.pMint));
+    o.pushKV("source", built.source);
+    o.pushKV("bundleSeqs", SeqsToJSON(built.bundleSeqs));
+    o.pushKV("attestFeeZat", built.attestFeeZat);
+    o.pushKV("attestPayee", PayeeToJSON(built.attestPayeeKey));
+    return o;
+}
+
+UniValue ClaimResult(const uint256& txid, const BuiltTx& built, const CarrierRecord& carrier)
+{
+    UniValue o = SpendResult(txid, built);
+    PushPendingCommon(o, carrier, false);
+    o.pushKV("xClaim", PriceOrNull(built.xClaim));
+    o.pushKV("aClaim", PriceOrNull(built.aClaim));
+    o.pushKV("pClaim", PriceOrNull(built.pClaim));
+    o.pushKV("pEmerg", built.claimPath == "b" ? PriceOrNull(built.pEmerg) : NullUniValue);
+    o.pushKV("claimPath", built.claimPath);
+    o.pushKV("bundleSeqs", SeqsToJSON(built.bundleSeqs));
+    o.pushKV("attestFeeZat", built.attestFeeZat);
+    o.pushKV("attestPayee", PayeeToJSON(built.attestPayeeKey));
+    o.pushKV("residualZat", built.residualZat);
+    return o;
+}
+
+BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool ownerPath, bool gate, uint256& txid);
+
+UniValue CompleteClaim(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to, const CarrierRecord& carrier)
+{
+    uint256 txid;
+    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to, carrier); }, false, true, txid);
+    yw.SpendCarrier(carrier.outpoint);
+    return ClaimResult(txid, built, carrier);
+}
+
+/** A carrier-bearing transaction with no Sapling shape (NOTICE, EQUIVOCATION): build under the locks, commit, forget the carrier. */
+BuiltTx CompleteSimple(YellowbackWallet& yw, std::function<BuiltTx(CReserveKey&)> build, const CarrierRecord& carrier, uint256& txid)
+{
+    YellowbackIndex& index = *yw.Index();
+    CReserveKey reservekey(pwalletMain);
+    BuiltTx built;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    {
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        try {
+            built = build(reservekey);
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+    }
+    txid = Commit(yw, built, &reservekey);
+    yw.SpendCarrier(carrier.outpoint);
+    return built;
+}
+
+UniValue CompleteNotice(YellowbackWallet& yw, const uint256& vaultTxid, const CarrierRecord& carrier)
+{
+    uint256 txid;
+    BuiltTx built = CompleteSimple(yw, [&](CReserveKey& rk) { return BuildClaimNotice(yw, vaultTxid, rk, carrier); }, carrier, txid);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    PushPendingCommon(o, carrier, false);
+    o.pushKV("vault", vaultTxid.GetHex() + ":0");
+    o.pushKV("xClaim", PriceOrNull(built.xClaim));
+    o.pushKV("aClaim", PriceOrNull(built.aClaim));
+    o.pushKV("pEmerg", PriceOrNull(built.pEmerg));
+    o.pushKV("bundleSeqs", SeqsToJSON(built.bundleSeqs));
+    o.pushKV("emergencyOpenAt", (int64_t)built.emergencyOpenAt);
+    return o;
+}
+
+UniValue CompleteEquivocation(YellowbackWallet& yw, const Attestation& a, const Attestation& b, const CarrierRecord& carrier)
+{
+    uint256 txid;
+    CompleteSimple(yw, [&](CReserveKey& rk) { return BuildEquivocation(yw, a, b, rk, carrier); }, carrier, txid);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    PushPendingCommon(o, carrier, false);
+    o.pushKV("seq", (int)a.seq);
+    o.pushKV("citedHeight", (int64_t)a.citedHeight);
+    o.pushKV("priceA", (int64_t)a.priceMicroUsd);
+    o.pushKV("priceB", (int64_t)b.priceMicroUsd);
+    return o;
+}
+
+/**
+ * wait=false (§4.6): hand the completion to the wallet's completion thread. It runs after every
+ * applied block; a lapsed carrier is abandoned to yed_sweepcarriers; any refusal is logged and
+ * the carrier likewise left outstanding (the sweep reclaims it once its window lapses).
+ */
+void SchedulePending(YellowbackWallet& yw, const CarrierRecord& carrier, std::function<UniValue()> complete, const char* what)
+{
+    yw.AddPendingCompletion(carrier.outpoint, [=, &yw]() -> bool {
+        int tip;
+        {
+            LOCK(cs_main);
+            tip = chainActive.Height();
+        }
+        if (carrier.Lapsed(tip)) {
+            LogPrintf("yellowback: pending %s on carrier %s lapsed unconfirmed at height %d; yed_sweepcarriers reclaims it\n", what, carrier.outpoint.ToString(), tip);
+            return true;
+        }
+        if (!CarrierConfirmed(carrier.outpoint)) return false;
+        try {
+            UniValue r = complete();
+            LogPrintf("yellowback: pending %s completed on carrier %s: %s\n", what, carrier.outpoint.ToString(), r["txid"].get_str());
+        } catch (const UniValue& e) {
+            LogPrintf("yellowback: pending %s on carrier %s refused: %s\n", what, carrier.outpoint.ToString(), e.write());
+        } catch (const std::exception& e) {
+            LogPrintf("yellowback: pending %s on carrier %s failed: %s\n", what, carrier.outpoint.ToString(), e.what());
+        }
+        return true;
+    });
+}
+
 } // namespace
 
 UniValue yed_getnewaddress(const UniValue& params, bool fHelp)
@@ -373,69 +667,73 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
 
 UniValue yed_mint(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 2 || params.size() > 3)
+    if (fHelp || params.size() < 2 || params.size() > 5)
         throw std::runtime_error(
-            "yed_mint cents lockBlocks ( \"from\" )\n"
+            "yed_mint cents lockBlocks ( \"from\" \"bundleHex\" wait )\n"
             "\nMint YED: locks the required YEC collateral in a vault for lockBlocks blocks (the term class follows) and creates the YED.\n"
             "The collateral requirement, the enforcement fee and its payee are fixed at the reference height (index tip minus the\n"
             "mint lag) and known before signing. Back up wallet.dat afterwards: the vault owner key is a fresh keypool key.\n"
+            "v3 (W7): two transactions — the carrier funding transaction first (carrierTxid; its redeem script commits to the\n"
+            "attestation bundle), then the MINT after one confirmation, spending the carrier as its last input. Before commit the\n"
+            "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule.\n"
             "\nArguments:\n"
             "1. cents       (numeric, required) amount of YED to mint, in cents\n"
             "2. lockBlocks  (numeric, required) lock length in blocks (class A, B or C by range)\n"
             "3. \"from\"      (string, optional) fund the collateral from this address: an s1... address (its confirmed\n"
             "               outputs only) or a ys1... address (its Sapling notes, spent in the same transaction; the change\n"
             "               returns to it). Default: any confirmed transparent output of the wallet.\n"
-            "\nResult: { \"txid\", \"vault\", \"termClass\", \"lockHeight\", \"claimHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\", \"warning\" }\n");
+            "4. \"bundleHex\" (string, optional) the attestation bundle to commit to (\"\" = the node's pool)\n"
+            "5. wait        (boolean, optional, default true) block until the MINT is committed; false returns after the\n"
+            "               carrier broadcast with pending = true and the wallet finishes on the next block\n"
+            "\nResult: { \"txid\", \"vault\", \"termClass\", \"lockHeight\", \"claimHeight\", \"collateralZat\", \"feeZat\", \"payee\", \"fundedFrom\",\n"
+            "          \"warning\", \"carrierTxid\", \"pending\", \"refHeight\", \"xMint\", \"aMint\", \"pMint\", \"source\", \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\" }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     int64_t cents = params[0].get_int64();
     int lockBlocks = params[1].get_int();
-    const std::string from = params.size() > 2 ? params[2].get_str() : "";
-    BuiltTx built;
-    CReserveKey reservekey(pwalletMain);
-    uint256 txid;
+    const std::string from = params.size() > 2 && !params[2].isNull() ? params[2].get_str() : "";
+    const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 3);
+    const bool wait = ParseWaitArg(params, 4);
+
+    // Preflight (before any transaction): MINTPOL-1, the bundle verdict at R and MINT-10.
+    MintPreflight pf;
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
-        {
-            LOCK(index.cs_yellowback);
-            EnsureHealthy(index);
-            try {
-                built = BuildMint(yw, cents, lockBlocks, reservekey, from);
-            } catch (const std::runtime_error& e) {
-                ThrowBuildError(e);
-            }
-            if (!built.NeedsProving()) MempoolGate(index, CTransaction(built.tx));   // K7 (trivially true for a mint)
-        }
-        if (!built.NeedsProving()) txid = Commit(yw, built, &reservekey);
-    }
-    if (built.NeedsProving()) {
-        // Sapling shape (§4.6): the spend proofs take seconds; no lock is held while they are made.
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
         try {
-            FinishSapling(built);
+            pf = PreflightMint(yw, cents, lockBlocks, bundleArg, from);
         } catch (const std::runtime_error& e) {
-            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+            ThrowBuildError(e);
         }
-        LOCK2(cs_main, pwalletMain->cs_wallet);
-        {
-            LOCK(index.cs_yellowback);
-            EnsureHealthy(index);
-            MempoolGate(index, CTransaction(built.tx));
-        }
-        txid = Commit(yw, built, &reservekey);
     }
-    UniValue o(UniValue::VOBJ);
-    o.pushKV("txid", txid.GetHex());
-    o.pushKV("vault", txid.GetHex() + ":0");
-    o.pushKV("termClass", ClassName((uint8_t)built.termClass));
-    o.pushKV("lockHeight", (int64_t)built.lockHeight);
-    o.pushKV("claimHeight", (int64_t)built.claimHeight);
-    o.pushKV("collateralZat", built.collateralZat);
-    o.pushKV("feeZat", built.feeZat);
-    o.pushKV("payee", PayeeToJSON(built.payee));
-    o.pushKV("fundedFrom", built.fundedFrom);
-    o.pushKV("warning", built.warning);
-    return o;
+    const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, std::vector<unsigned char>(), from);
+    if (!wait) {
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteMint(yw, cents, lockBlocks, from, carrier); }, "mint");
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", "");
+        o.pushKV("vault", "");
+        o.pushKV("termClass", "");
+        o.pushKV("lockHeight", 0);
+        o.pushKV("claimHeight", 0);
+        o.pushKV("collateralZat", 0);
+        o.pushKV("feeZat", 0);
+        o.pushKV("payee", NullUniValue);
+        o.pushKV("fundedFrom", "");
+        o.pushKV("warning", "");
+        PushPendingCommon(o, carrier, true);
+        o.pushKV("xMint", PriceOrNull(pf.xMint));
+        o.pushKV("aMint", PriceOrNull(pf.aMint));
+        o.pushKV("pMint", PriceOrNull(pf.pMint));
+        o.pushKV("source", pf.source);
+        o.pushKV("bundleSeqs", SeqsToJSON(pf.bundleSeqs));
+        o.pushKV("attestFeeZat", 0);
+        o.pushKV("attestPayee", NullUniValue);
+        return o;
+    }
+    WaitForCarrier(carrier);
+    return CompleteMint(yw, cents, lockBlocks, from, carrier);
 }
 
 static UniValue DoSend(YellowbackWallet& yw, const std::vector<std::pair<CScript, int64_t>>& recipients)
@@ -510,19 +808,393 @@ UniValue yed_redeem(const UniValue& params, bool fHelp)
 
 UniValue yed_claim(const UniValue& params, bool fHelp)
 {
-    if (fHelp || params.size() < 1 || params.size() > 2)
+    if (fHelp || params.size() < 1 || params.size() > 4)
         throw std::runtime_error(
-            "yed_claim \"vaultTxid\" ( \"to\" )\n"
+            "yed_claim \"vaultTxid\" ( \"to\" \"bundleHex\" wait )\n"
             "\nClaim somebody's underwater vault (yed_listclaimable): the claim-path spend at or past claimHeight, burning the\n"
             "vault's debt from this wallet's YED, paying the enforcement fee from the collateral and the rest to \"to\".\n"
-            "Refused unless an enforcing miner would accept it (mempool-check-failed:<verdict>).\n"
-            "\nArguments: as yed_redeem.\nResult: { \"txid\", \"burnedCents\", \"feeZat\", \"payee\", \"collateralOut\", \"to\" }\n");
+            "Refused unless an enforcing miner would accept it (mempool-check-failed:<verdict>). v3: the carrier step first\n"
+            "(selector = the vault outpoint), the attestor fee when armed, and the RED-5 residual to the vault owner when due;\n"
+            "claimPath is the RED-4 clause that opened the claim (\"a\" combined price, \"b\" the emergency notice).\n"
+            "\nArguments: as yed_redeem, then \"bundleHex\" and wait as yed_mint.\n"
+            "Result: yed_redeem's fields plus { \"carrierTxid\", \"pending\", \"refHeight\", \"xClaim\", \"aClaim\", \"pClaim\", \"pEmerg\", \"claimPath\",\n"
+            "        \"bundleSeqs\", \"attestFeeZat\", \"attestPayee\", \"residualZat\" }\n");
     YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
     uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
-    const std::string to = params.size() > 1 ? params[1].get_str() : "";
+    const std::string to = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "";
+    const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 2);
+    const bool wait = ParseWaitArg(params, 3);
+    ClaimPreflight pf;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        try {
+            pf = PreflightClaim(yw, vaultTxid, bundleArg);
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+    }
+    const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, pf.selector, "");
+    if (!wait) {
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteClaim(yw, vaultTxid, to, carrier); }, "claim");
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", "");
+        o.pushKV("burnedCents", 0);
+        o.pushKV("feeZat", 0);
+        o.pushKV("payee", NullUniValue);
+        o.pushKV("collateralOut", 0);
+        o.pushKV("to", to);
+        o.pushKV("extraBurnCents", 0);
+        PushPendingCommon(o, carrier, true);
+        o.pushKV("xClaim", PriceOrNull(pf.xClaim));
+        o.pushKV("aClaim", PriceOrNull(pf.aClaim));
+        o.pushKV("pClaim", PriceOrNull(pf.pClaim));
+        o.pushKV("pEmerg", pf.claimPath == "b" ? PriceOrNull(pf.pEmerg) : NullUniValue);
+        o.pushKV("claimPath", pf.claimPath);
+        o.pushKV("bundleSeqs", SeqsToJSON(pf.bundleSeqs));
+        o.pushKV("attestFeeZat", 0);
+        o.pushKV("attestPayee", NullUniValue);
+        o.pushKV("residualZat", pf.residualZat);
+        return o;
+    }
+    WaitForCarrier(carrier);
+    return CompleteClaim(yw, vaultTxid, to, carrier);
+}
+
+UniValue yed_claimnotice(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 3)
+        throw std::runtime_error(
+            "yed_claimnotice \"vaultTxid\" ( \"bundleHex\" wait )\n"
+            "\nStep 1 of the emergency claim (NOT-1): the carrier step (selector = the vault outpoint), then a transaction of own\n"
+            "YEC plus the carrier carrying the CLAIM_NOTICE payload. Anyone may post a notice; it needs YEC, no YED. Refused\n"
+            "with notice-standing, notice-not-underwater, bundle-insufficient, bundle-malformed.\n"
+            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"vault\", \"refHeight\", \"xClaim\", \"aClaim\", \"pEmerg\", \"bundleSeqs\", \"emergencyOpenAt\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    uint256 vaultTxid = ParseHashV(params[0], "vaultTxid");
+    const std::optional<std::vector<unsigned char>> bundleArg = ParseBundleArg(params, 1);
+    const bool wait = ParseWaitArg(params, 2);
+    NoticePreflight pf;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        try {
+            pf = PreflightNotice(yw, vaultTxid, bundleArg);
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+    }
+    const CarrierRecord carrier = CarrierStep(yw, pf.bundle, pf.refHeight, pf.selector, "");
+    if (!wait) {
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteNotice(yw, vaultTxid, carrier); }, "notice");
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", "");
+        PushPendingCommon(o, carrier, true);
+        o.pushKV("vault", vaultTxid.GetHex() + ":0");
+        o.pushKV("xClaim", PriceOrNull(pf.xClaim));
+        o.pushKV("aClaim", PriceOrNull(pf.aClaim));
+        o.pushKV("pEmerg", PriceOrNull(pf.pEmerg));
+        o.pushKV("bundleSeqs", SeqsToJSON(pf.bundleSeqs));
+        o.pushKV("emergencyOpenAt", (int64_t)pf.emergencyOpenAt);
+        return o;
+    }
+    WaitForCarrier(carrier);
+    return CompleteNotice(yw, vaultTxid, carrier);
+}
+
+UniValue yed_sweepcarriers(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 0)
+        throw std::runtime_error(
+            "yed_sweepcarriers\n"
+            "\nReclaim every outstanding carrier of this wallet (carriers.dat, W7) whose window has lapsed into one output to a\n"
+            "fresh own address. Also run at startup. Never refuses for nothing to do.\n"
+            "\nResult: { \"txid\", \"count\", \"reclaimedZat\", \"outstanding\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    UniValue o(UniValue::VOBJ);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    const int tip = chainActive.Height();
+    std::vector<CarrierRecord> lapsed = yw.LapsedCarriers(tip);
+    size_t count = 0;
+    CAmount reclaimed = 0;
+    std::string txid;
+    if (!lapsed.empty()) {
+        EnsureWalletIsUnlocked();
+        BuiltTx built;
+        bool nothing = false;
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildSweepCarriers(yw, lapsed);
+            } catch (const std::runtime_error& e) {
+                if (!StartsWith(e.what(), "nothing-to-sweep")) ThrowBuildError(e);
+                nothing = true;
+            }
+        }
+        if (!nothing) {
+            txid = Commit(yw, built, nullptr).GetHex();
+            count = built.sweptCarriers;
+            reclaimed = built.collateralOut;
+            for (const CarrierRecord& c : built.sweptRecords) yw.SpendCarrier(c.outpoint);
+        }
+        // A lapsed record whose outpoint is already spent (its main transaction did confirm) is forgotten either way.
+        for (const CarrierRecord& c : lapsed) {
+            const CCoins* coins = pcoinsTip->AccessCoins(c.outpoint.hash);
+            if (!(coins && coins->IsAvailable(c.outpoint.n))) yw.SpendCarrier(c.outpoint);
+        }
+    }
+    o.pushKV("txid", txid);
+    o.pushKV("count", (int64_t)count);
+    o.pushKV("reclaimedZat", reclaimed);
+    o.pushKV("outstanding", (int64_t)(yw.OutstandingCarriers().size()));
+    return o;
+}
+
+UniValue yed_registerattestor(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw std::runtime_error(
+            "yed_registerattestor bondYec lockBlocks ( flags )\n"
+            "\nRegister this wallet as a price attestor (REG-A1): vout[0] the bond P2SH(bondScript(bondPubKey, tip + 1 + lockBlocks))\n"
+            "of bondYec, vout[1] the ATTESTOR_REGISTER payload, change. attestorPubKey (hot) and bondPubKey are two fresh keypool\n"
+            "keys: back up wallet.dat. The bond is not IsMine; the wallet finds it through Attestors by bondPubKey. seq is null\n"
+            "until the transaction confirms (yed_listattestors). Refused with bond-below-min, lock-below-min.\n"
+            "\nArguments:\n"
+            "1. bondYec     (numeric, required) the bond in YEC (>= BOND_MIN)\n"
+            "2. lockBlocks  (numeric, required) >= BOND_MIN_LOCK; bondLocktime = tip + 1 + lockBlocks\n"
+            "3. flags       (numeric, optional, default 0) bits 0-1 source tier, bit 2 pool operator\n"
+            "\nResult: { \"txid\", \"seq\", \"attestorPubKey\", \"bondAddress\", \"bondKeyAddress\", \"bondOutpoint\", \"bondZat\", \"bondLocktime\", \"flags\", \"maturesAt\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const CAmount bondZat = AmountFromValue(params[0]);
+    const int lockBlocks = params[1].get_int();
+    const int flagsArg = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : 0;
+    if (flagsArg < 0 || flagsArg > 255) throw JSONRPCError(RPC_INVALID_PARAMETER, "flags must be a byte");
+    CReserveKey reservekey(pwalletMain);
+    BuiltTx built;
     uint256 txid;
-    BuiltTx built = RunVaultSpend(yw, [&]() { return BuildClaim(yw, vaultTxid, to); }, false, true, txid);
-    return SpendResult(txid, built);
+    int maturesAt = 0;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildRegisterAttestor(yw, bondZat, lockBlocks, (uint8_t)flagsArg, reservekey);
+            } catch (const std::runtime_error& e) {
+                ThrowBuildError(e);
+            }
+            maturesAt = chainActive.Height() + 1 + index.GetParams().bondMaturity;
+        }
+        txid = Commit(yw, built, &reservekey);
+    }
+    KeyIO keyIO(::Params());
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    o.pushKV("seq", NullUniValue);
+    o.pushKV("attestorPubKey", HexStr(built.attestorPubKey.begin(), built.attestorPubKey.end()));
+    o.pushKV("bondAddress", keyIO.EncodeDestination(CTxDestination(CScriptID(built.bondScript))));
+    o.pushKV("bondKeyAddress", keyIO.EncodeDestination(CTxDestination(built.bondPubKey.GetID())));
+    UniValue op(UniValue::VOBJ);
+    op.pushKV("txid", txid.GetHex());
+    op.pushKV("vout", 0);
+    o.pushKV("bondOutpoint", op);
+    o.pushKV("bondZat", built.bondZat);
+    o.pushKV("bondLocktime", (int64_t)built.bondLocktime);
+    UniValue fl(UniValue::VOBJ);
+    fl.pushKV("tier", (int)(built.flags & 3));
+    fl.pushKV("pool", (built.flags & 4) != 0);
+    o.pushKV("flags", fl);
+    o.pushKV("maturesAt", (int64_t)maturesAt);
+    if (!built.warning.empty()) o.pushKV("warning", built.warning);
+    return o;
+}
+
+UniValue yed_withdrawbond(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "yed_withdrawbond seq ( \"to\" )\n"
+            "\nSpend the bond of an attestor whose bondPubKey this wallet holds, after bondLocktime (nLockTime = bondLocktime, the\n"
+            "CLTV path), signed by hand. Any status may withdraw once the locktime passes; IN-2 then marks the record WITHDRAWN.\n"
+            "Refused with attest-unknown-seq, attest-key-not-held, bond-locked, bond-spent, bad-address.\n"
+            "\nResult: { \"txid\", \"seq\", \"bondZat\", \"bondOut\", \"to\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    const int seqArg = params[0].get_int();
+    if (seqArg < 0 || seqArg > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
+    const std::string to = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "";
+    YellowbackIndex& index = *yw.Index();
+    BuiltTx built;
+    uint256 txid;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildWithdrawBond(yw, (uint16_t)seqArg, to);
+            } catch (const std::runtime_error& e) {
+                ThrowBuildError(e);
+            }
+        }
+        if (!built.NeedsProving()) txid = Commit(yw, built, nullptr);
+    }
+    if (built.NeedsProving()) {
+        try {
+            FinishSapling(built);
+        } catch (const std::runtime_error& e) {
+            throw JSONRPCError(RPC_WALLET_ERROR, e.what());
+        }
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        try {
+            SignBuiltInputs(built, *pwalletMain, SignerBranchId());
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+        txid = Commit(yw, built, nullptr);
+    }
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    o.pushKV("seq", (int)built.seq);
+    o.pushKV("bondZat", built.bondZat);
+    o.pushKV("bondOut", built.collateralOut);
+    o.pushKV("to", built.collateralTo);
+    return o;
+}
+
+UniValue yed_revive(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)
+        throw std::runtime_error(
+            "yed_revive seq priceMicroUsd\n"
+            "\nRevive a DORMANT attestor whose hot key this wallet holds (REV-1): one attestation for citedHeight = tip - REF_LAG signed\n"
+            "through the equivocation guard, payload ATTESTOR_REVIVE, funded from confirmed YEC. Refused with attest-unknown-seq,\n"
+            "not-dormant, attest-key-not-held, attest-range, equivocation-guard.\n"
+            "\nResult: { \"txid\", \"seq\", \"citedHeight\", \"priceMicroUsd\", \"hex\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const int seqArg = params[0].get_int();
+    if (seqArg < 0 || seqArg > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
+    const int64_t price = params[1].get_int64();
+    CReserveKey reservekey(pwalletMain);
+    BuiltTx built;
+    uint256 txid;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        {
+            LOCK(index.cs_yellowback);
+            EnsureHealthy(index);
+            try {
+                built = BuildRevive(yw, (uint16_t)seqArg, price, reservekey);
+            } catch (const std::runtime_error& e) {
+                ThrowBuildError(e);
+            }
+        }
+        txid = Commit(yw, built, &reservekey);
+    }
+    const std::vector<unsigned char> att = EncodeAttestation(built.attestation);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", txid.GetHex());
+    o.pushKV("seq", (int)built.seq);
+    o.pushKV("citedHeight", (int64_t)built.attestation.citedHeight);
+    o.pushKV("priceMicroUsd", (int64_t)built.attestation.priceMicroUsd);
+    o.pushKV("hex", HexStr(att.begin(), att.end()));
+    return o;
+}
+
+UniValue yed_reportequivocation(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw std::runtime_error(
+            "yed_reportequivocation \"attestationHexA\" \"attestationHexB\" ( wait )\n"
+            "\nReport two attestations of one attestor for one height at two prices (EQV-1): the carrier step with a bundle of\n"
+            "exactly the two, then a transaction carrying the EQUIVOCATION payload. The attestor is EJECTED when it confirms.\n"
+            "Refused with not-equivocation (the message says which condition fails), attest-malformed.\n"
+            "\nResult: { \"txid\", \"carrierTxid\", \"pending\", \"seq\", \"citedHeight\", \"priceA\", \"priceB\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const Attestation a = ParseAttestationArg(params[0], "attestationHexA");
+    const Attestation b = ParseAttestationArg(params[1], "attestationHexB");
+    const bool wait = ParseWaitArg(params, 2);
+    int refHeight = 0;
+    {
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        EnsureWalletIsUnlocked();
+        LOCK(index.cs_yellowback);
+        EnsureHealthy(index);
+        try {
+            CheckEquivocation(yw, a, b);
+        } catch (const std::runtime_error& e) {
+            ThrowBuildError(e);
+        }
+        refHeight = IndexHeight(index) - g_yellowbackMintLag;
+    }
+    Bundle bundle;
+    bundle.atts = { a, b };
+    const CarrierRecord carrier = CarrierStep(yw, EncodeBundle(bundle), refHeight, std::vector<unsigned char>(), "");
+    if (!wait) {
+        SchedulePending(yw, carrier, [=, &yw]() { return CompleteEquivocation(yw, a, b, carrier); }, "equivocation");
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", "");
+        PushPendingCommon(o, carrier, true);
+        o.pushKV("seq", (int)a.seq);
+        o.pushKV("citedHeight", (int64_t)a.citedHeight);
+        o.pushKV("priceA", (int64_t)a.priceMicroUsd);
+        o.pushKV("priceB", (int64_t)b.priceMicroUsd);
+        return o;
+    }
+    WaitForCarrier(carrier);
+    return CompleteEquivocation(yw, a, b, carrier);
+}
+
+UniValue yed_signattestation(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+        throw std::runtime_error(
+            "yed_signattestation seq priceMicroUsd ( citedHeight )\n"
+            "\nSign one 74-byte attestation with the attestor hot key held in this wallet (the agent's RPC; the key never leaves the\n"
+            "node). Equivocation guard (S16): <datadir>/yellowback/attest-signed.dat records every (seq, citedHeight, price, sig)\n"
+            "ever signed, fsynced before returning; the same price again returns the recorded signature with reused = true, a\n"
+            "different price is refused with equivocation-guard. citedHeight defaults to tip - REF_LAG. Refused with\n"
+            "attest-unknown-seq, attest-key-not-held, attest-range, attest-stale, equivocation-guard.\n"
+            "\nResult: { \"hex\", \"seq\", \"priceMicroUsd\", \"citedHeight\", \"reused\" }\n");
+    YellowbackWallet& yw = EnsureYW();
+    YellowbackIndex& index = *yw.Index();
+    const int seqArg = params[0].get_int();
+    if (seqArg < 0 || seqArg > 65535) throw JSONRPCError(RPC_INVALID_PARAMETER, "seq must be a u16");
+    const int64_t price = params[1].get_int64();
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    const int cited = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : IndexHeight(index) - g_yellowbackMintLag;
+    bool reused = false;
+    Attestation a;
+    try {
+        a = SignAttestationGuarded(yw, (uint16_t)seqArg, price, cited, reused);
+    } catch (const std::runtime_error& e) {
+        ThrowBuildError(e);
+    }
+    const std::vector<unsigned char> att = EncodeAttestation(a);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("hex", HexStr(att.begin(), att.end()));
+    o.pushKV("seq", (int)a.seq);
+    o.pushKV("priceMicroUsd", (int64_t)a.priceMicroUsd);
+    o.pushKV("citedHeight", (int64_t)a.citedHeight);
+    o.pushKV("reused", reused);
+    return o;
 }
 
 UniValue yed_sweep(const UniValue& params, bool fHelp)
@@ -583,6 +1255,12 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     const int h = IndexHeight(index);
     const bool abandoned = index.IsAbandoned();
     const int64_t balance = yw.ConfirmedCents();
+    // v3: the tip snapshot's arming and cross-section pClaim; the emergency clause is judged under
+    // xClaim here (pEmerg = min(xClaim, aClaim) <= xClaim, so "under the ratio at xClaim" is a
+    // sufficient condition) — the pool's own aClaim joins at the A2/A3 merge.
+    const bool armedTip = ArmedAt(index.View(), p, h);
+    std::optional<Snapshot> tipSnap = SnapshotAt(st, p, h);
+    const std::optional<MicroUsd> xClaimTip = tipSnap.has_value() ? tipSnap->PClaim() : std::nullopt;
     UniValue arr(UniValue::VARR);
     index.View().Iterate("V", [&](const std::string& k, const std::string& raw) {
         VaultRecord v;
@@ -592,9 +1270,21 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         const COutPoint out(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
         UniValue o = VaultRow(out, v, st, p, h, abandoned);
         const bool active = v.Status() == VaultStatus::ACTIVE;
+        std::optional<NoticeRecord> notice = active ? st.GetNotice(out) : std::nullopt;
+        const bool noticed = notice.has_value();
+        o.pushKV("noticed", noticed);
+        o.pushKV("noticeHeight", noticed ? UniValue((int64_t)notice->height) : NullUniValue);
+        o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
+        const bool underEmergency = active && IsUnderwater(v.collateralZat, xClaimTip, v.mintedCents, p.emergencyRatioBps);
+        const bool clauseB = noticed && armedTip && (int64_t)h - notice->refHeight >= p.emergencyPersist &&
+                             (int64_t)h - notice->refHeight <= p.emergencyNoticeTtl && underEmergency && h >= v.claimHeight;
+        const bool claimable = o["claimable"].get_bool() || clauseB;
+        const bool standing = noticed && (int64_t)h - notice->height <= p.emergencyNoticeTtl;
         o.pushKV("canRedeem", v.IsOpen() && h >= v.lockHeight);
-        o.pushKV("canClaim", o["claimable"].get_bool() && balance >= v.mintedCents);
+        o.pushKV("canClaim", claimable && balance >= v.mintedCents);
         o.pushKV("canSweep", active && abandoned && h >= v.lockHeight);
+        // A2/A3 merge: with the pool's aClaim, add "and not claimable under pClaim = max(xClaim, aClaim)" (contract).
+        o.pushKV("canNotice", active && armedTip && !standing && underEmergency);
         arr.push_back(o);
         return true;
     });
@@ -845,6 +1535,14 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_lockcoins",        &yed_lockcoins,         false },
     { "yellowback", "yed_estimatesend",     &yed_estimatesend,      false },
     { "yellowback", "yed_unlockcoin",       &yed_unlockcoin,        false },
+    // v3 (plan §4.5)
+    { "yellowback", "yed_claimnotice",      &yed_claimnotice,       false },
+    { "yellowback", "yed_sweepcarriers",    &yed_sweepcarriers,     false },
+    { "yellowback", "yed_registerattestor", &yed_registerattestor,  false },
+    { "yellowback", "yed_withdrawbond",     &yed_withdrawbond,      false },
+    { "yellowback", "yed_revive",           &yed_revive,            false },
+    { "yellowback", "yed_reportequivocation", &yed_reportequivocation, false },
+    { "yellowback", "yed_signattestation",  &yed_signattestation,   false },
 };
 
 void RegisterYellowbackWalletRPCCommands(CRPCTable &tableRPC)

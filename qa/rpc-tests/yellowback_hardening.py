@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from test_framework.util import (assert_equal, assert_start_raises_init_error, start_node,
                                  stop_node, bitcoind_processes)
+from test_framework.yellowback_attest import wallet_mint, wallet_claim
 from test_framework.yellowback_util import (
     MIN_OUTPUT,
     POOLS,
@@ -46,7 +47,7 @@ class YellowbackHardeningTest(YellowbackTestFramework):
         self.mine(POOLS[0], REF_LAG + 1)
 
         # One $100.00 position: the coin set that makes the change floor bite.
-        mint = user.yed_mint(10000, 48)
+        mint = wallet_mint(self, user, 10000, 48)     # v3: the carrier step (W7)
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(user.yed_getbalance()['confirmedCents'], 10000)
@@ -57,7 +58,7 @@ class YellowbackHardeningTest(YellowbackTestFramework):
 
         # A second position of $100.50, so that after H7 burns the first coin the only YED left
         # cannot pay the first vault's $100.00 debt without a 50-cent remainder (H4).
-        mint_b = user.yed_mint(10050, 48)
+        mint_b = wallet_mint(self, user, 10050, 48)
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(user.yed_getvault(mint_b['txid'])['status'], 'ACTIVE')

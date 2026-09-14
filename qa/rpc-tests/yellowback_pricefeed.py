@@ -49,6 +49,7 @@ from test_framework.yellowback_util import (
     set_quote,
     template_coinbase,
 )
+from test_framework.yellowback_attest import wallet_mint, wallet_claim
 from test_framework import yellowback_model as ym
 
 USD = 1_000_000
@@ -139,7 +140,7 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert_equal(user.yed_getinfo()['params']['sigmaRefBps'], SIGMA_REF_BPS)
         assert_equal(user.yed_getstats()['sigmaMultBps'], 10000)
 # Rule: MINT-5 SIGMA-1
-        mint = user.yed_mint(10000, 48)
+        mint = wallet_mint(self, user, 10000, 48)     # v3: the carrier step (W7)
         assert_equal(mint['collateralZat'], 10 * COIN)        # 500 % of $100 at $50, multiplier 1
         self.sync_all()
         self.mine(POOLS[0])

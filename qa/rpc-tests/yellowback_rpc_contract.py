@@ -31,6 +31,7 @@ from decimal import Decimal
 
 from test_framework.util import assert_equal, assert_greater_than
 from test_framework.util import bytes_to_hex_str
+from test_framework.yellowback_attest import wallet_mint, wallet_claim
 from test_framework.yellowback_util import (
     ABANDON_BLOCKS,
     ATTEST_ARM_MIN,
@@ -241,9 +242,9 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         print('yed_mint (twice: one to keep, one to release as VOID) and a raw VOID mint')
         assert_rpc_error('mint-bad-lock', user.yed_mint, 10000, 10)
         assert_rpc_error('mint-unsatisfiable', user.yed_estimatecollateral, 1_000_000, 48, 100)
-        mint_a = c.check('yed_mint', user.yed_mint(10000, 48))
-        mint_b = c.check('yed_mint', user.yed_mint(10000, 48))
-        c.check('yed_mint', user.yed_mint(10000, 48))               # its YED funds the redemption of B
+        mint_a = c.check('yed_mint', wallet_mint(self, user, 10000, 48))    # v3: the carrier step (W7)
+        mint_b = c.check('yed_mint', wallet_mint(self, user, 10000, 48))
+        c.check('yed_mint', wallet_mint(self, user, 10000, 48))               # its YED funds the redemption of B
         r = user.yed_getinfo()['height'] - REF_LAG
         void_hex, _ = build_mint_tx(user, 10000, 48, r, user.yed_estimatecollateral(10000, 48)['requiredZat'] - 1000)
         void_txid = user.decoderawtransaction(void_hex)['txid']
@@ -359,7 +360,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.mine_round_robin(POOLS, 64)
         claimable = c.check('yed_listclaimable', user.yed_listclaimable())
         assert mint_a['txid'] + ':0' in [x['vault'] for x in claimable]
-        claimed = c.check('yed_claim', claimant.yed_claim(mint_a['txid']))       # 100 + 10000 in, 1 YED change
+        claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid']))       # 100 + 10000 in, 1 YED change
         assert_equal(claimed['burnedCents'], 10000)
         self.sync_all()
         self.mine(POOLS[0])
@@ -371,7 +372,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
             set_quote(nodes[i], 50)
         self.mine_round_robin(POOLS, 64 + REF_LAG)
         assert_equal(user.yed_getstats()['mintingAllowed'], True)
-        mint_c = c.check('yed_mint', user.yed_mint(10000, 48))
+        mint_c = c.check('yed_mint', wallet_mint(self, user, 10000, 48))
         self.sync_all()
         self.mine(POOLS[1])
         for i in POOLS:

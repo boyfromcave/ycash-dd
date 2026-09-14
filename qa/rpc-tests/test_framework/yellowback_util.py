@@ -907,7 +907,7 @@ def _outpoint(o):
 def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None, expiry=None,
                           to=None, ref_height=None, extra_outputs=None, owner_wif=None,
                           branch_id=SIGNING_BRANCH_ID, selector=None, carrier=None, carrier_wif=None,
-                          charge_extra=False):
+                          charge_extra=False, extra_vin=None, value_adjust=0):
     """A vault spend assembled here (section 3.4/3.5), the adversarial builder for every
     "without a burn" case (K18) and, with ``payload=encode_redeem(...)`` and ``fee=(addr, zat)``,
     the *correct* spends too.
@@ -929,7 +929,8 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     spent as the last input, signed by ``spend_carrier`` after the wallet signs the burns, and
     its ``CARRIER_VALUE`` joins ``vout[0]``; with ``charge_extra`` the values of
     ``extra_outputs`` (the attestor fee, RED-5's residual) come out of ``vout[0]`` too.
-    Returns the hex."""
+    Alternatively ``extra_vin`` (``[(txid, n, sequence)]``) appends unsigned inputs after the
+    burns and ``value_adjust`` is added to ``vout[0]`` verbatim.  Returns the hex."""
     assert path in ('owner', 'claim')
     owner = hex_str_to_bytes(vault['ownerPubKey'])
     lock_height, claim_height = int(vault['lockHeight']), int(vault['claimHeight'])
@@ -937,7 +938,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     script = ym.vault_script(lock_height, owner, claim_height)
     burns = [_outpoint(o) for o in burn_inputs]
     enforcement_fee = int(fee[1]) if fee else 0
-    value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee
+    value = collateral + TOKEN_VALUE * len(burns) - YELLOWBACK_FEE - enforcement_fee + int(value_adjust)
     if carrier is not None:
         value += CARRIER_VALUE
     if charge_extra:
@@ -961,6 +962,7 @@ def build_vault_spend_raw(node, vault, path, burn_inputs, payload=None, fee=None
     vin = [(vault['txid'], int(vault['vout']), b'', 0xFFFFFFFE)] + [(t, n, b'', 0xFFFFFFFF) for t, n in burns]
     if carrier is not None:
         vin.append((carrier['txid'], int(carrier['vout']), b'', 0xFFFFFFFF))
+    vin += [(t, n, b'', seq) for t, n, seq in (extra_vin or [])]
     raw = ym.serialize_tx_v4(vin, vout, lock_time, expiry)
     if burns:
         # the wallet signs the token inputs; it cannot solve OP_IF and leaves vin[0] empty

@@ -47,7 +47,7 @@ from . import yellowback_model as ym
 from . import yellowback_util as yu
 from .yellowback_util import (
     ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY, BOND_MIN_LOCK, BOND_MIN_ZAT,
-    BUNDLE_MAX, CARRIER_VALUE, K_SLACK, M_SELECT, Q_HIGH_BPS, Q_LOW_BPS, REF_LAG, REF_WINDOW,
+    BUNDLE_MAX, CARRIER_VALUE, K_SLACK, M_SELECT, N_SLOTS, Q_HIGH_BPS, Q_LOW_BPS, REF_LAG, REF_WINDOW,
     SIGNING_BRANCH_ID, TOKEN_VALUE, YELLOWBACK_FEE, ATTESTOR_A, ATTESTOR_B, USER, POOLS,
     FEE_VOUT_NONE, GRACE, PAYLOAD_VERSION_V3, AGE_CAP, FOUNDING_WINDOW,
 )
@@ -64,6 +64,11 @@ __all__ = [
     'build_register_tx', 'build_carrier_tx', 'spend_carrier', 'build_mint_tx_v3',
     'post_notice_raw', 'equivocation_raw', 'revive_raw', 'withdraw_bond_raw', 'bond_secret_for',
     'feed', 'feed_all', 'build_bundle', 'register_and_arm', 'assert_void_reason', 'hot_secret_for', 'send_and_lock',
+    # A3: the wallet's two-step flow and the offline registry (stand-ins for the A2 node RPCs)
+    'has_rpc', 'two_step', 'two_step_pending', 'wait_for_spender', 'wallet_mint', 'wallet_claim', 'wallet_notice',
+    'wallet_report_equivocation', 'register_wallet_attestor', 'note_attestor_status', 'offline_selection',
+    'offline_bundle', 'offline_bundle_hex', 'arming_state', 'REGISTRY', 'armed_raw_claim', 'armed_raw_mint', 'attest_fee_zat',
+    'ArmedModeMixin', 'attested_micro', 'model_check',
 ]
 
 # ---------------------------------------------------------------------------
@@ -772,6 +777,9 @@ def register_and_arm(test, n=ATTEST_ARM_MIN, funder=None, miner=None, bond_zat=B
     nodes = test.nodes
     funder = nodes[USER] if funder is None else test._node(funder)
     miner = nodes[POOLS[0]] if miner is None else test._node(miner)
+    if not has_rpc(funder, 'yed_listattestors'):
+        # A3 before A2: the node cannot list attestors; register one per block and count.
+        return _register_and_arm_offline(test, n, funder, miner, bond_zat, lock_blocks)
     hot, bond = attestor_keys(n), bond_keys(n)
     for i in range(n):
         hex_, _lt = build_register_tx(funder, hot[i][1], bond[i][1], bond_zat, lock_blocks)
@@ -802,6 +810,18 @@ def register_and_arm(test, n=ATTEST_ARM_MIN, funder=None, miner=None, bond_zat=B
             assert_equal(node.yed_getinfo()['attest']['status'], 'ARMED')
     yu.assert_same_statehash(enforcing, 'register_and_arm')
     seqs = sorted(seq for seq, s in _SEQ_SECRETS.items() if s in [h for h, _pk in hot])
+    # Mirror the chain into the offline registry so the wallet helpers work either way.
+    for node in enforcing:
+        for rec in node.yed_listattestors():
+            if int(rec['seq']) in seqs and int(rec['seq']) not in REGISTRY['attestors']:
+                REGISTRY['attestors'][int(rec['seq'])] = {'register': rec['registerHeight'], 'bond_zat': int(rec['bondZat']),
+                                                          'status': rec['status'], 'signer': None, 'secret': _SEQ_SECRETS[int(rec['seq'])],
+                                                          'bond_key_address': rec.get('bondKeyAddress')}
+        break
+    REGISTRY['next_seq'] = max(REGISTRY['next_seq'], max(seqs) + 1 if seqs else 0)
+    _recompute_arming()
+    if REGISTRY['arm'] is not None and miner.getblockcount() < REGISTRY['arm'] + REF_LAG:
+        test.mine(miner, REGISTRY['arm'] + REF_LAG - miner.getblockcount())
     return seqs
 
 
@@ -813,3 +833,438 @@ def assert_void_reason(node, txid, rule):
     reason = v['voidReason']
     assert reason == rule or reason.startswith(rule), 'voidReason %r does not name %s' % (reason, rule)
     return v
+
+
+# ---------------------------------------------------------------------------
+# A3: the wallet's two-step flow (W7) and an offline registry of attestors
+#
+# Every v3 wallet command that reads a price is two transactions: the carrier funding transaction,
+# then the main one after the carrier confirms.  With ``wait=True`` the RPC blocks until then,
+# so a single-threaded test would wait on itself for the block; ``two_step`` runs the call while
+# a helper thread mines the carrier's block on a pool as soon as it sees the carrier in that
+# pool's mempool.  ``two_step_pending`` is the ``wait=False`` flow: the pending shape comes back,
+# the test mines, and the wallet's completion thread commits the main transaction.
+#
+# The node's ``yed_listattestors`` / ``yed_getselection`` / ``yed_getinfo.attest.status`` arrive
+# with Phase A2.  Until they are present the helpers below keep an offline registry: seq is
+# assigned in block order (REG-A1's ``AttestorSeq.next++``), so registering ONE attestor per
+# block makes seq = registration order; the arming heights follow ARM-1/2 by block counting
+# (TRIGGERED when the ATTEST_ARM_MIN-th bond matures, ARMED ATTEST_ARM_DELAY later); weights are
+# ``bond_weight`` with the founding-cohort ``age_origin``; seated = the N_SLOTS heaviest
+# ELIGIBLE.  When the node RPCs exist they are preferred.
+
+import threading
+import time
+from decimal import Decimal
+
+REGISTRY = {
+    'next_seq': 0,
+    'attestors': {},     # seq -> {'register': height, 'bond_zat': zat, 'status': 'ELIGIBLE'|'DORMANT'|'EJECTED'|'WITHDRAWN', 'signer': node|None, 'secret': bytes|None}
+    'trigger': None,     # ARM-1 height
+    'arm': None,         # ARM-2 height
+}
+
+
+def has_rpc(node, name):
+    """True iff ``node`` answers ``help <name>`` without 'Method not found' / unknown command."""
+    try:
+        text = node.help(name)
+    except Exception:
+        return False
+    return not text.startswith('help: unknown command')
+
+
+def wait_for_spender(node, txid, timeout=60):
+    """The txid in ``node``'s mempool that spends an output of ``txid`` (the main transaction of
+    a two-step command); raises after ``timeout`` seconds."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for cand in node.getrawmempool():
+            try:
+                raw = node.getrawtransaction(cand, 1)
+            except Exception:
+                continue
+            if any(vin.get('txid') == txid for vin in raw['vin']):
+                return cand
+        time.sleep(0.2)
+    raise AssertionError('no transaction spending %s appeared in the mempool within %ds' % (txid, timeout))
+
+
+def _is_carrier_tx(raw):
+    return (len(raw['vout']) >= 1 and raw['vout'][0]['valueZat'] == CARRIER_VALUE
+            and raw['vout'][0]['scriptPubKey'].get('type') == 'scripthash')
+
+
+class _CarrierMiner(threading.Thread):
+    """Mine one block on node ``miner_index`` as soon as a carrier that was not in its mempool at
+    start appears there (a private RPC connection: proxies are not shared across threads)."""
+
+    def __init__(self, miner_index, timeout):
+        super().__init__(daemon=True)
+        from .util import get_rpc_proxy, rpc_url
+        self.proxy = get_rpc_proxy(rpc_url(miner_index), miner_index, timeout=timeout + 30)
+        self.timeout = timeout
+        self.before = set(self.proxy.getrawmempool())
+        self.error = None
+        self.mined = None
+
+    def run(self):
+        try:
+            deadline = time.time() + self.timeout
+            while time.time() < deadline:
+                for txid in self.proxy.getrawmempool():
+                    if txid in self.before:
+                        continue
+                    if _is_carrier_tx(self.proxy.getrawtransaction(txid, 1)):
+                        self.mined = self.proxy.generate(1)[0]
+                        return
+                time.sleep(0.1)
+            self.error = 'no carrier reached the miner within %ds' % self.timeout
+        except Exception as e:      # pragma: no cover - surfaced by two_step
+            self.error = str(e)
+
+
+def two_step(test, node, method, *args, miner=None, timeout=120):
+    """Call ``node.<method>(*args, True)`` (``wait=True``) while a helper thread mines the
+    carrier's block on ``miner`` (index; default the first pool).  Returns the RPC's full result
+    (``pending`` False).  The main transaction is left in the mempool for the caller to mine, as
+    the v2 flow scripts expect; ``test.sync_all()`` is run before returning."""
+    miner_index = POOLS[0] if miner is None else (miner if isinstance(miner, int) else test.nodes.index(miner))
+    t = _CarrierMiner(miner_index, timeout)
+    t.start()
+    try:
+        result = getattr(node, method)(*args, True)
+    finally:
+        t.join(timeout=5)
+    if t.error and result.get('pending', False):
+        raise AssertionError(t.error)
+    assert_equal(result.get('pending'), False)
+    test.sync_all()
+    return result
+
+
+def two_step_pending(test, node, method, *args, miner=None, timeout=60, sync=None):
+    """The ``wait=False`` flow: call, mine the carrier's block, wait for the wallet's completion
+    thread to commit the main transaction.  Returns ``(pending_result, main_txid)``; the main
+    transaction is in the mempool.  ``sync`` replaces ``test.sync_all`` (a split network)."""
+    sync = sync or test.sync_all
+    res = getattr(node, method)(*args, False)
+    assert_equal(res['pending'], True)
+    sync()
+    test._node(POOLS[0] if miner is None else miner).generate(1)
+    sync(blocks_only=True) if sync is test.sync_all else sync()
+    txid = wait_for_spender(node, res['carrierTxid'], timeout)
+    sync()
+    return res, txid
+
+
+def _bundle_arg(test, node, selector, prices, ref_height):
+    """``''`` when unarmed at R (the carrier is still created; the wallet ignores the bundle),
+    else the offline bundle for (R, selector) at ``prices``."""
+    if not arming_state(node, ref_height)['armed']:
+        return ''
+    if prices is None:
+        raise AssertionError('armed at %d: pass prices={seq: usd} (or a default usd) for the bundle' % ref_height)
+    return offline_bundle_hex(test, node, ref_height, selector, prices)
+
+
+def wallet_mint(test, node, cents, lock_blocks, from_addr='', prices=None, miner=None, bundle_hex=None):
+    """``yed_mint`` through ``two_step``.  ``prices``: ``{seq: usd}`` or one usd for every
+    selected attestor (needed while armed; the bundle is built offline for R = tip - REF_LAG).
+    ``bundle_hex`` overrides the bundle (the refusal cases)."""
+    ref_height = node.yed_getinfo()['height'] - REF_LAG
+    if bundle_hex is None:
+        bundle_hex = _bundle_arg(test, node, b'', prices, ref_height)
+    return two_step(test, node, 'yed_mint', cents, lock_blocks, from_addr, bundle_hex, miner=miner)
+
+
+def wallet_claim(test, node, vault_txid, to='', prices=None, miner=None, bundle_hex=None):
+    """``yed_claim`` through ``two_step``; the selector is the vault outpoint, R the index tip."""
+    ref_height = node.yed_getinfo()['height']
+    if bundle_hex is None:
+        bundle_hex = _bundle_arg(test, node, outpoint_selector(vault_txid, 0), prices, ref_height)
+    return two_step(test, node, 'yed_claim', vault_txid, to, bundle_hex, miner=miner)
+
+
+def wallet_notice(test, node, vault_txid, prices=None, miner=None, bundle_hex=None):
+    """``yed_claimnotice`` through ``two_step``."""
+    ref_height = node.yed_getinfo()['height']
+    if bundle_hex is None:
+        bundle_hex = _bundle_arg(test, node, outpoint_selector(vault_txid, 0), prices, ref_height)
+    return two_step(test, node, 'yed_claimnotice', vault_txid, bundle_hex, miner=miner)
+
+
+def wallet_report_equivocation(test, node, hex_a, hex_b, miner=None):
+    return two_step(test, node, 'yed_reportequivocation', hex_a, hex_b, miner=miner)
+
+
+# --- the offline registry ---------------------------------------------------------------------
+
+def arming_state(node, ref_height=None):
+    """``{'armed', 'status', 'trigger', 'arm'}`` at ``ref_height`` (default the tip): from
+    ``yed_getinfo().attest`` when the node renders ``status`` (A2), else from the registry."""
+    info = node.yed_getinfo()
+    attest = info.get('attest') or {}
+    if 'status' in attest and ref_height is None:
+        return {'armed': attest['status'] == 'ARMED', 'status': attest['status'],
+                'trigger': attest.get('triggerHeight'), 'arm': attest.get('armHeight')}
+    h = info['height'] if ref_height is None else ref_height
+    trigger, arm = REGISTRY['trigger'], REGISTRY['arm']
+    if arm is not None and h >= arm:
+        status = 'ARMED'
+    elif trigger is not None and h >= trigger:
+        status = 'TRIGGERED'
+    else:
+        status = 'UNARMED'
+    return {'armed': status == 'ARMED', 'status': status, 'trigger': trigger, 'arm': arm}
+
+
+def _recompute_arming():
+    """ARM-1/2 by block counting: TRIGGERED at the SNAP where the ATTEST_ARM_MIN-th registered
+    attestor matures (registerHeight + BOND_MATURITY), ARMED ATTEST_ARM_DELAY later."""
+    mature = sorted(a['register'] + BOND_MATURITY for a in REGISTRY['attestors'].values())
+    if len(mature) >= ATTEST_ARM_MIN and REGISTRY['trigger'] is None:
+        REGISTRY['trigger'] = mature[ATTEST_ARM_MIN - 1]
+        REGISTRY['arm'] = REGISTRY['trigger'] + ATTEST_ARM_DELAY
+
+
+def _note_registration(register_height, bond_zat, signer=None, secret=None, bond_key_address=None):
+    seq = REGISTRY['next_seq']
+    REGISTRY['next_seq'] += 1
+    REGISTRY['attestors'][seq] = {'register': register_height, 'bond_zat': int(bond_zat), 'status': 'ELIGIBLE',
+                                  'signer': signer, 'secret': secret, 'bond_key_address': bond_key_address}
+    if secret is not None:
+        _SEQ_SECRETS[seq] = secret
+    _recompute_arming()
+    return seq
+
+
+def note_attestor_status(seq, status):
+    """Tell the registry about a status change the test caused (EJECTED after an equivocation,
+    DORMANT after the dormancy pass, WITHDRAWN after yed_withdrawbond, ELIGIBLE after a revival)."""
+    REGISTRY['attestors'][seq]['status'] = status
+
+
+def register_wallet_attestor(test, node, bond_yec, lock_blocks=BOND_MIN_LOCK, flags=0, miner=None):
+    """``yed_registerattestor`` on ``node`` (a wallet node), mined in its own block so seq =
+    registration order; recorded in the registry with ``node`` as its signer.  Returns
+    ``(result, seq)``."""
+    res = node.yed_registerattestor(bond_yec, lock_blocks, flags)
+    test.sync_all()
+    test.mine(POOLS[0] if miner is None else miner)
+    seq = _note_registration(node.getblockcount(), res['bondZat'], signer=node, bond_key_address=res['bondKeyAddress'])
+    return res, seq
+
+
+def offline_selection(node, ref_height, selector):
+    """``selected(R, selector)`` from the registry (or ``yed_getselection`` when the node has it):
+    W9 over seated(R) \\ pinned with weight(s, R)."""
+    if has_rpc(node, 'yed_getselection'):
+        return sorted(int(s['seq']) for s in node.yed_getselection(ref_height, bytes_to_hex_str(bytes(selector)))['selected'])
+    state = arming_state(node, ref_height)
+    eligible = []
+    for seq, a in REGISTRY['attestors'].items():
+        if a['status'] != 'ELIGIBLE' or a['register'] + BOND_MATURITY > ref_height:
+            continue
+        origin = age_origin(a['register'], state['status'], state['trigger'])
+        eligible.append((seq, bond_weight(a['bond_zat'], ref_height - origin)))
+    seated = sorted(eligible, key=lambda sw: (-sw[1], sw[0]))[:N_SLOTS]
+    return select_attestors(node.getblockhash(ref_height), selector, seated)
+
+
+def _sign_for(node, seq, price_micro, cited, blockhash):
+    a = REGISTRY['attestors'].get(seq, {})
+    if a.get('secret') is not None or seq in _SEQ_SECRETS:
+        return sign_attestation(a.get('secret') or _SEQ_SECRETS[seq], seq, price_micro, cited, blockhash)
+    signer = a.get('signer')
+    assert signer is not None, 'no way to sign for seq %d' % seq
+    return hex_str_to_bytes(signer.yed_signattestation(seq, price_micro, cited)['hex'])
+
+
+def attested_micro(usd, cited_height):
+    """The micro-USD price the offline bundles attest for ``usd`` at ``cited_height``: a few
+    hundred micro-USD that depend on the height — one price per (seq, height), which the signing
+    guard (S16) demands, and a different one at every height, so no attestor repeats one price
+    across bundles and PIN-2 never pins a test attestor."""
+    return yu.usd_to_micro(usd) + ((int(cited_height) * 7) % 9) * 100
+
+
+def offline_bundle(test, node, ref_height, selector, prices, cited=None, jitter=True):
+    """The bundle for (R, selector): every selected seq that ``prices`` covers (``{seq: usd}``,
+    or one usd for all) signs citing ``cited`` (default R) — fixed-key attestors in Python,
+    wallet-registered ones through their node's ``yed_signattestation``.  ``jitter`` adds a few
+    hundred micro-USD that change per call so no attestor ever repeats one price across bundles
+    (PIN-2 would pin it and the node's selection would drift from this one).  Returns
+    ``(bundle_bytes, selected)``."""
+    selected = offline_selection(node, ref_height, selector)
+    cited = ref_height if cited is None else cited
+    blockhash = node.getblockhash(cited)
+    if not isinstance(prices, dict):
+        prices = {seq: prices for seq in selected}
+    delta = attested_micro(0, cited) if jitter else 0
+    atts = []
+    for seq in selected:
+        if seq not in prices:
+            continue
+        micro = yu.usd_to_micro(prices[seq]) + delta
+        atts.append(_sign_for(node, seq, micro, cited, blockhash))
+    return encode_bundle(atts), selected
+
+
+def offline_bundle_hex(test, node, ref_height, selector, prices, **kw):
+    return bytes_to_hex_str(offline_bundle(test, node, ref_height, selector, prices, **kw)[0])
+
+
+def _register_and_arm_offline(test, n, funder, miner, bond_zat, lock_blocks):
+    """``register_and_arm`` without the A2 node RPCs: one registration per block (seq = order),
+    the hot and bond keys imported into the attestor wallets, then mining to ARMED + REF_LAG by
+    block counting.  Returns ``[seq]``."""
+    nodes = test.nodes
+    hot, bond = attestor_keys(n), bond_keys(n)
+    seqs = []
+    for i in range(n):
+        hex_, _lt = build_register_tx(funder, hot[i][1], bond[i][1], bond_zat, lock_blocks)
+        funder.sendrawtransaction(hex_)
+        wallet = ATTESTOR_A if i < 3 else ATTESTOR_B
+        signer = None
+        if wallet < len(nodes) and nodes[wallet] is not None:
+            nodes[wallet].importprivkey(ATTESTOR_WIFS[i], 'yellowback-attestor', False)
+            nodes[wallet].importprivkey(BOND_WIFS[i], 'yellowback-bond', False)
+            signer = nodes[wallet]
+        test.sync_all()
+        test.mine(miner)
+        seqs.append(_note_registration(miner.getblockcount(), bond_zat, signer=signer, secret=hot[i][0],
+                                       bond_key_address=yu.pubkey_to_address(hex_str_to_bytes(bond[i][1]))))
+    if REGISTRY['arm'] is not None:
+        target = REGISTRY['arm'] + REF_LAG
+        if miner.getblockcount() < target:
+            test.mine(miner, target - miner.getblockcount())
+    yu.assert_same_statehash(test.enforcing_nodes(), 'register_and_arm')
+    return seqs
+
+
+# --- raw v3 shapes under arming (the flow scripts' --armed mode) ----------------------------------
+
+def attest_fee_zat(enforcement_fee_zat):
+    """AFEE-1: ``feeZat * ATTEST_FEE_BPS / 10^4``."""
+    return int(enforcement_fee_zat) * yu.ATTEST_FEE_BPS // yu.BPS
+
+
+def _attest_payee(selected, prices):
+    """``(seq, bondKeyAddress)`` of the first selected attestor the bundle carries (AFEE-1 accepts any s in A)."""
+    for seq in selected:
+        if not isinstance(prices, dict) or seq in prices:
+            return seq, REGISTRY['attestors'][seq]['bond_key_address']
+    raise AssertionError('no signer in the bundle')
+
+
+def armed_raw_mint(test, node, cents, lock_blocks, ref_height, collateral_zat, prices, fee_addr=None, miner=None, **kw):
+    """``build_mint_tx_v3`` with a carrier for (R, "") mined first and the attestor fee to a
+    signer's bondKeyAddress: the raw MINT that passes MINT-9 / AFEE-1 while armed.  Returns
+    ``(hex, owner_pubkey_hex)``; the caller mines it as ``build_mint_tx``'s."""
+    bundle, selected = offline_bundle(test, node, ref_height, b'', prices)
+    carrier = build_carrier_tx(node, bundle)
+    test.sync_all()
+    test.mine(POOLS[0] if miner is None else miner)
+    _seq, addr = _attest_payee(selected, prices)
+    fee = kw.pop('fee_zat_override', None)
+    afee = attest_fee_zat(yu.fee_zat(collateral_zat) if fee is None else fee)
+    return build_mint_tx_v3(node, cents, lock_blocks, ref_height, collateral_zat, fee_addr=fee_addr, carrier=carrier,
+                            attest_fee=(addr, afee) if fee_addr else None, fee_zat_override=fee, **kw)
+
+
+def armed_raw_claim(test, node, vault, burn_inputs, ref_height, prices, fee, miner=None, expiry=None):
+    """``build_vault_spend_raw(path='claim')`` under arming: a carrier for (R, vault outpoint) is
+    built and mined first, spent as vin[last]; the attestor fee (vout[2]) goes to a signer's
+    bondKeyAddress and the REDEEM payload (version 3) names both fee outputs.  Clause (a) only
+    (no residual).  Returns the hex."""
+    selector = outpoint_selector(vault['txid'], int(vault['vout']))
+    bundle, selected = offline_bundle(test, node, ref_height, selector, prices)
+    carrier = build_carrier_tx(node, bundle)
+    test.sync_all()
+    test.mine(POOLS[0] if miner is None else miner)
+    _seq, addr = _attest_payee(selected, prices)
+    afee = attest_fee_zat(fee[1])
+    payload = encode_redeem_v3(ref_height, 1, 2, [])
+    hex_ = yu.build_vault_spend_raw(node, vault, 'claim', burn_inputs, payload=payload, fee=fee, ref_height=ref_height,
+                                    extra_outputs=[(afee, yu._spk_of_address(addr))], extra_vin=[_carrier_vin(carrier)],
+                                    value_adjust=CARRIER_VALUE - afee, expiry=expiry)
+    return spend_carrier(node, hex_, 1 + len(burn_inputs), carrier)
+
+
+# --- the v2 flow scripts' --armed mode ----------------------------------------------------------
+
+def model_check(node, full=True):
+    """``ym.assert_model_matches(node, full)`` and, when not ``full``, still the state hash."""
+    model = ym.assert_model_matches(node, full=full)
+    if not full:
+        rpc_hash = node.yed_getstatehash()
+        if isinstance(rpc_hash, dict):
+            rpc_hash = rpc_hash.get('hash') or rpc_hash.get('statehash') or rpc_hash.get('stateHash')
+        assert_equal(str(rpc_hash).lower(), model.state_hash())
+    return model
+
+
+class ArmedModeMixin(object):
+    """``--armed`` for the v2 flow scripts: ``arm()`` runs ``register_and_arm`` after activation
+    when the option is set; ``mint`` / ``claim`` are the two-step wallet commands with the
+    offline bundle at ``attest_price`` (ignored while unarmed).  Mix in before
+    ``YellowbackTestFramework``."""
+
+    attest_price = None   # None: follow the node's cross-section at R (yed_getprice), so MINT-10 never trips as the medians move
+
+    def add_options(self, parser):
+        super().add_options(parser)
+        parser.add_option('--armed', dest='armed', action='store_true', default=False,
+                          help='run the flow under v3 arming: register_and_arm after activation, bundles on every mint and claim')
+
+    @property
+    def armed(self):
+        return bool(getattr(self.options, 'armed', False))
+
+    def arm(self):
+        if self.armed:
+            print('--armed: registering %d attestors and arming' % ATTEST_ARM_MIN)
+            register_and_arm(self)
+
+    def price_at(self, node, ref_height, field='pMint'):
+        """The attested price (usd) for a bundle at R: ``attest_price`` when set, else the node's
+        cross-section ``yed_getprice(R)[field]`` (xMint / xClaim), which is what a well-behaved
+        attestor tracks; a test that wants divergence sets ``attest_price``."""
+        if self.attest_price is not None:
+            return self.attest_price
+        micro = node.yed_getprice(ref_height).get(field)
+        assert micro is not None, 'no %s at %d to attest' % (field, ref_height)
+        return Decimal(micro) / 1_000_000
+
+    def mint(self, node, cents, lock_blocks, from_addr='', miner=None, prices=None):
+        if self.armed and prices is None:
+            prices = self.price_at(node, node.yed_getinfo()['height'] - REF_LAG, 'pMint')
+        return wallet_mint(self, node, cents, lock_blocks, from_addr, prices=prices if self.armed else None, miner=miner)
+
+    def claim(self, node, vault_txid, to='', miner=None, prices=None):
+        if self.armed and prices is None:
+            prices = self.price_at(node, node.yed_getinfo()['height'], 'pClaim')
+        return wallet_claim(self, node, vault_txid, to, prices=prices if self.armed else None, miner=miner)
+
+    def model_check(self, node):
+        """The Python model over the whole chain: the full comparison unarmed; armed, history plus
+        the state hash (compare_txinfo reads yed_gettxinfo.type, which renders the v3 types only
+        once Phase A2's TypeLower lands)."""
+        return model_check(node, full=not self.armed)
+
+    def mint_args(self, node, cents, lock_blocks, from_addr=''):
+        """Positional arguments for a direct ``yed_mint`` call that must reach a refusal past the
+        bundle check while armed (a bundle for R = tip - REF_LAG is supplied)."""
+        if not self.armed:
+            return (cents, lock_blocks, from_addr)
+        r = node.yed_getinfo()['height'] - REF_LAG
+        return (cents, lock_blocks, from_addr, offline_bundle_hex(self, node, r, b'', self.price_at(node, r, 'pMint')))
+
+    def claim_args(self, node, vault_txid, to=''):
+        """Positional arguments for a direct ``yed_claim`` call that must reach a refusal past
+        the bundle check while armed (a bundle for R = the tip is supplied)."""
+        if not self.armed:
+            return (vault_txid,) if not to else (vault_txid, to)
+        r = node.yed_getinfo()['height']
+        return (vault_txid, to, offline_bundle_hex(self, node, r, outpoint_selector(vault_txid, 0), self.price_at(node, r, 'pClaim')))
