@@ -46,7 +46,6 @@ from test_framework.yellowback_util import (
     REF_LAG,
     STOCK,
     USER,
-    YellowbackTestFramework,
     assert_banscore_zero,
     assert_best_hash,
     assert_same_statehash,

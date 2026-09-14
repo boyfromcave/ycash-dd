@@ -695,7 +695,6 @@ def withdraw_bond_raw(node, rec, bond_secret32, to=None, branch_id=SIGNING_BRANC
 
 def bond_secret_for(rec):
     """The fixed bond secret of a ``yed_listattestors`` row registered with the fixed key set."""
-    by_pubkey = {pk: secret for secret, pk in bond_keys(len(BOND_WIFS))}
     hot_by_pubkey = {pk: i for i, (_s, pk) in enumerate(attestor_keys(len(ATTESTOR_WIFS)))}
     i = hot_by_pubkey.get(rec['attestorPubKey'])
     assert i is not None, 'seq %s was not registered with a fixed key' % rec.get('seq')

@@ -69,7 +69,6 @@ from test_framework.yellowback_util import (
     DORMANCY_CHECK,
     DORMANCY_MIN_BUNDLES,
     EMERGENCY_PERSIST,
-    ENFORCING,
     OBSERVER,
     POOLS,
     REF_LAG,
@@ -460,7 +459,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         print('mint10_diverged_unbuildable: attestors at 2x the pools; yed_estimatecollateral refuses, a raw mint is VOID')
         ref = user.getblockcount() - REF_LAG
         feed_all(user, {seq: PRICE * 2 for seq in seqs}, cited=ref)
-        msg = rpc_error('mint10-diverged', user.yed_estimatecollateral, CENTS, LOCK)
+        rpc_error('mint10-diverged', user.yed_estimatecollateral, CENTS, LOCK)
         built = user.yed_buildbundle(ref, '')
         assert_equal(built['aMint'], usd_to_micro(PRICE * 2))
         est = user.yed_estimatecollateral(CENTS, LOCK, usd_to_micro(PRICE))      # MINT-5 reads min(x, a) = x
@@ -475,11 +474,11 @@ class YellowbackAttestTest(YellowbackTestFramework):
         for i in (POOLS[0], POOLS[1]):
             self.quote(i, PRICE)
         self.step(POOLS[2], 44, 'pool 4 fills the slow window')
-        pa = self.mint_fresh(USER, prices, POOLS[2])
+        self.mint_fresh(USER, prices, POOLS[2])
         self.step(POOLS[0], 1, 'pool 2 holds', jitter=False)
         self.step(POOLS[1], 1, 'pool 3 holds', jitter=False)
         moved = {seq: PRICE * Decimal('1.06') for seq in seqs}
-        pb = self.mint_fresh(USER, moved, POOLS[2])
+        self.mint_fresh(USER, moved, POOLS[2])
         self.step(POOLS[0], 1, 'pool 2 holds', jitter=False)
         self.step(POOLS[1], 1, 'pool 3 holds', jitter=False)
         self.step(POOLS[2], 3, 'pool 4')
@@ -540,7 +539,6 @@ class YellowbackAttestTest(YellowbackTestFramework):
         rows = user.yed_listclaimable()
         assert_equal([(r['vault'], r['claimPath']) for r in rows], [(v3['txid'] + ':0', 'b')])
         assert_greater_than(rows[0]['residualZat'], 100_000)
-        owner_addr = pubkey_to_address(hex_str_to_bytes(v3['owner']))
         before = nodes[ATTESTOR_A].getbalance()
         claimed = self.claim_raw(USER, v3['txid'], a1['token'], emerg, POOLS[1])
         assert_equal(claimed['row']['claimPath'], 'b')
