@@ -171,6 +171,20 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_sendmany", 0 },
     { "yed_estimatesend", 0 },      // H3: the recipients object or the plain cents number
     { "yed_unlockcoin", 1 },        // H5: the vout
+    // v3 wallet commands (doc/yellowback-rpc.md, conversion rows)
+    { "yed_mint", 4 },              // wait
+    { "yed_claim", 3 },             // wait
+    { "yed_claimnotice", 2 },       // wait
+    { "yed_registerattestor", 0 },
+    { "yed_registerattestor", 1 },
+    { "yed_registerattestor", 2 },
+    { "yed_withdrawbond", 0 },
+    { "yed_revive", 0 },
+    { "yed_revive", 1 },
+    { "yed_reportequivocation", 2 },   // wait
+    { "yed_signattestation", 0 },
+    { "yed_signattestation", 1 },
+    { "yed_signattestation", 2 },
     { "z_sendmany", 1},
     { "z_sendmany", 2},
     { "z_sendmany", 3},
