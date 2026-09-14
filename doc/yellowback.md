@@ -19,7 +19,8 @@ The normative protocol is `doc/yellowback-spec.md` (§3 of the workspace plans, 
 by `make spec`, with the v3 delta appended); the design record, the decisions and the phase plan
 are the workspace's `docs/plans/yellowback-v3-development-plan.md` (a delta on
 `yellowback-v2-development-plan.md`); the RPC surface is `doc/yellowback-rpc.md`; what a mining
-pool runs is `doc/yellowback-mining.md`; what an attestor runs is `doc/yellowback-attestor.md`.
+pool runs is `doc/yellowback-mining.md`; what an attestor runs is `doc/yellowback-attestor.md`;
+how to bring a local devnet or a regtest node up in a few minutes is `doc/yellowback-devnet.md`.
 This file is the user-facing guide to the node and its wallet commands.
 
 ## How it works

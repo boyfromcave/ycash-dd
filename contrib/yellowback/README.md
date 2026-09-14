@@ -81,3 +81,6 @@ $V -m unittest contrib/yellowback/attest/calibrate/test_calibrate.py            
 ```
 
 `attest/calibrate/README.md` explains how to read both results.
+
+A five-minute crash course on running the devnet, a regtest node and both agents:
+[`doc/yellowback-devnet.md`](../../doc/yellowback-devnet.md).
