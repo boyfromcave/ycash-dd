@@ -154,6 +154,9 @@ EXTENDED_SCRIPTS = [
     # Needs a release build of contrib/yellowback/attest (Rust); it SKIPs without one, so it is
     # nightly rather than a merge gate (v3 plan Phase A4).
     'yellowback_attest_agent.py',
+    # The devnet's role presets end to end (role-based regtest plan, R7): drives the devnet
+    # script itself, needs the same Rust binary, SKIPs without it; ~30 minutes.
+    'yellowback_devnet_roles.py',
     'yellowback_sapling.py',
     'yellowback_stockparity.py',
     # These tests are not run by the travis build process.
