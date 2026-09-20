@@ -130,7 +130,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         and ``src/rpc/yellowback*.cpp`` is empty.  Re-making the connections gives every peer a
         fresh ``CNodeState``, so the N1 assertions that follow measure Yellowback alone."""
         cross = self._cross_edges() if self.is_network_split else []
-        edges = [(a, b) for a, b in self.EDGES if (a, b) not in cross]
+        edges = [(a, b) for a, b in self.live_edges() if (a, b) not in cross]
         for a, b in edges:
             self._disconnect_pair(a, b)
         time.sleep(1.5)
@@ -581,13 +581,13 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
 
     def disconnect_all(self, i):
         """Disconnect node ``i`` from every peer (``disconnectnode``, no restart)."""
-        for a, b in self.EDGES:
+        for a, b in self.live_edges():
             if i in (a, b):
                 self._disconnect_pair(a, b)
         time.sleep(1)
 
     def connect_all_of(self, i):
-        for a, b in self.EDGES:
+        for a, b in self.live_edges():
             if i in (a, b) and self.nodes[a] is not None and self.nodes[b] is not None:
                 connect_nodes_bi(self.nodes, a, b)
         time.sleep(1)
@@ -1058,7 +1058,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         IBD) and split {1, 5} off from the rest."""
         if not self.is_network_split:
             self.split_network()
-        for a, b in self.EDGES:
+        for a, b in self.live_edges():
             if i in (a, b):
                 self._disconnect_pair(a, b)
         time.sleep(1)
@@ -1111,7 +1111,7 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
             self.nodes[pool].invalidateblock(blockhash)      # drop node 1's branch before relaying it
         except JSONRPCException:
             pass                                             # already off that branch
-        for a, b in self.EDGES:
+        for a, b in self.live_edges():
             if pool in (a, b) and (b if a == pool else a) not in (STOCK, OBSERVER):
                 connect_nodes_bi(self.nodes, a, b)
         time.sleep(1)

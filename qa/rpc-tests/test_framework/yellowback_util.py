@@ -535,15 +535,21 @@ class YellowbackTestFramework(BitcoinTestFramework):
         else:
             self.sync_all()
 
+    def live_edges(self):
+        """``EDGES`` restricted to nodes this run actually started.  ``EDGES`` declares the
+        eight-node v3 topology, including the attestor slots 6-7, but a v2 script runs the
+        six-node one -- iterating the declaration raw indexes ``self.nodes`` out of range.
+        Every edge walk goes through here; ``EDGES`` is the declaration, never the iterand."""
+        n = len(self.nodes)
+        return [(a, b) for a, b in self.EDGES if a < n and b < n]
+
     def connect_all(self):
-        for a, b in self.EDGES:
-            if a < len(self.nodes) and b < len(self.nodes):
-                connect_nodes_bi(self.nodes, a, b)
+        for a, b in self.live_edges():
+            connect_nodes_bi(self.nodes, a, b)
 
     def _cross_edges(self):
         a, b = self.SPLIT_HALVES
-        n = len(self.nodes)
-        return [(x, y) for x, y in self.EDGES if x < n and y < n and ((x in a and y in b) or (x in b and y in a))]
+        return [(x, y) for x, y in self.live_edges() if (x in a and y in b) or (x in b and y in a)]
 
     def split_network(self, timeout=30):
         """Disconnect {1, 5} from {0, 2, 3, 4} with ``disconnectnode`` (rpc/net.cpp:220); no
@@ -702,8 +708,8 @@ class YellowbackTestFramework(BitcoinTestFramework):
 
     def reconnect(self, i):
         cross = self._cross_edges() if self.is_network_split else []
-        for a, b in self.EDGES:
-            if i in (a, b) and (a, b) not in cross and a < len(self.nodes) and b < len(self.nodes) \
+        for a, b in self.live_edges():
+            if i in (a, b) and (a, b) not in cross \
                     and self.nodes[a] is not None and self.nodes[b] is not None:
                 connect_nodes_bi(self.nodes, a, b)
 

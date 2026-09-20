@@ -38,7 +38,14 @@ env:
   # tomllib (Python >= 3.11) while this job runs ubuntu-22.04's 3.10, and moving the job to 3.11
   # also moves it off the apt python3-zmq the prerequisite step imports. Its unit tests do run, in
   # the python job. Closing that gap is a CI change on its own.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening
+  #
+  # The three yellowback_attest* scripts joined the list on 2026-09-20. They are the whole of the
+  # v3 A1-A3 test evidence and each phase registered its script in qa/pull-tester/rpc-tests.py,
+  # but this variable was not updated with them and the files were not executable (the runner
+  # exec's them directly, so an un-chmodded script dies with PermissionError before the framework
+  # starts) -- the identical omission recorded above for mining/enforcement/stock_node/hardening
+  # on 2026-09-11, repeated for v3. The audit job now greps for both halves so it cannot recur.
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet
   SANITIZER_SCRIPTS: yellowback_index
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
@@ -207,9 +214,29 @@ jobs:
           ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
           # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
           ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
-          # GetTime() has two homes only: the quote RPC (stamps receivedAt) and policy.cpp (BuildTagScript), M11.
-          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy.cpp\|rpc/yellowback.cpp' || true)
-          test -z "$homes" || { echo "GetTime outside its two homes: $homes"; exit 1; }
+          # The clock has three homes: the quote RPC (stamps receivedAt), policy.cpp (BuildTagScript,
+          # M11), and the wallet RPC's carrier wait (A3's two-step mint -- a user-facing deadline in
+          # wallet-tier code, never a consensus input).  The patterns are anchored: an unescaped
+          # 'rpc/yellowback.cpp' also matched nothing but itself, which is how the third home
+          # surfaced as a failure rather than a decision.
+          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy\.cpp$\|rpc/yellowback\.cpp$\|rpc/yellowbackwallet\.cpp$' || true)
+          test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
+          # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
+          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis"
+          # Every yellowback script the runner knows must be executable (rpc-tests.py exec's it
+          # directly) and must be run by some job: registered-but-never-run is how the v2
+          # enforcement suite and then the whole v3 attestation suite sat silent in CI.
+          for f in qa/rpc-tests/yellowback_*.py; do
+            test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
+            n=$(basename "$f" .py)
+            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_reorg_stress yellowback_stockparity yellowback_quote yellowback_runbook yellowback_rc1 yellowback_rc2 yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_attest_stress " in
+              *" $n "*) ;;
+              *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
+            esac
+          done
+          # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
+          # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
+          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n'
           # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever.
           ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp src/main.cpp
           # EvaluateBlock is total (K1): no throw, no assert in the state machine or the arithmetic.
