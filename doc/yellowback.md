@@ -243,15 +243,6 @@ Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Yca
   the vault's debt; an underwater, abandoned vault can be claimed only by burning that debt; both
   pay a fee to a pool that published a price quote in the 100 blocks up to the transaction's
   reference height.
-- **v3:** prices are the *combination* of two populations — the pool medians and a bond-weighted
-  quantile over the attestations the transaction carries — by `min` for mints and `max` for
-  claims. Moving a price in the direction that pays therefore needs a hashpower majority **and** a
-  bond-weighted majority of the attestors selected for that transaction, at the same time. A
-  captured attestor set alone can halt minting or force an early liquidation at an honest price
-  with the remainder returned to the vault owner; it cannot take collateral. Attestors are not
-  slashed: the penalty is ejection and a bond that earns nothing until it unlocks. Attestations
-  travel outside the chain; if that transport fails, minting pauses and nothing else changes.
-  Every price is bounded by the depth of the markets it is read from.
 - Prices are the medians of the quotes pools publish in their own blocks; moving them needs a
   majority of *quote-tagged* blocks over a window, which is a majority of hashpower only when
   most blocks carry quotes — so the windows that decide claims are undefined until two-thirds of
@@ -298,10 +289,27 @@ Yellowback v2 is a miner-enforced, over-collateralised stablecoin overlay on Yca
   against a swept or claimed vault is unbacked from then on. A failed mint's collateral (a VOID
   vault, which never carried a debt) is released by its owner with `yed_redeem` at its lock
   height at any time, abandonment or not.
+
+
+v2's paragraph "price honesty rests on the honest-majority-hashpower assumption" becomes:
+
+> Prices come from two populations that cannot forge each other: mining pools, weighted by
+> blocks, and bonded attestors, weighted by bond and age. A mint is sized at the lower of the
+> two; a claim opens at the higher. Moving a price in the direction that pays therefore needs a
+> majority of hashpower and a bond-weighted majority of the selected attestors at once. A
+> hashpower majority alone keeps exactly the powers it has today — it can halt minting, delay or
+> censor transactions, and reorganise the chain — and gains none. A captured attestor set alone
+> can halt minting or force an early liquidation at an honest price with the remainder returned
+> to the owner; it cannot take collateral. Attestors are not slashed: their penalty is ejection
+> and a bond that earns nothing until it unlocks. Attestations travel outside the chain; if that
+> transport fails, minting pauses and nothing else changes. Every YEC/USD price is bounded by the
+> depth of the markets it is read from.
 ## Build and test baseline
 
-Everything below runs from `ycash-dd/` on `feature/yellowback-sf` (plan §6.0 item 0). Python is
-always the workspace venv (`../.venv/bin/python`), never the system interpreter.
+Everything below runs from `ycash-dd/` on the branch of record, `feature/yellowback-price-attest`
+(plan §6.0 item 0); `feature/yellowback-sf` is the delivered v2 fork and is now a frozen baseline,
+which is what the recorded numbers further down were measured on. Python is always the workspace
+venv (`../.venv/bin/python`), never the system interpreter.
 
 ```
 # host conditions (macOS, Apple Silicon; Linux CI needs none of the three exports)
