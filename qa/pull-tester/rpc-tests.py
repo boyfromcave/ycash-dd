@@ -151,6 +151,9 @@ ZMQ_SCRIPTS = [
 
 EXTENDED_SCRIPTS = [
     'yellowback_reorg_stress.py',
+    # Needs a release build of contrib/yellowback/attest (Rust); it SKIPs without one, so it is
+    # nightly rather than a merge gate (v3 plan Phase A4).
+    'yellowback_attest_agent.py',
     'yellowback_sapling.py',
     'yellowback_stockparity.py',
     # These tests are not run by the travis build process.

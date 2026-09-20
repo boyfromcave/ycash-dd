@@ -517,6 +517,24 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_reorg_stress
+      - name: Build the attestor agent for the agent script
+        # The only functional script that runs the shipped Rust binary (v3 plan Phase A4). It
+        # SKIPs when the binary is missing, so a crate build failure must fail here, loudly,
+        # rather than turning the next step into a silent pass.
+        if: ${{ !cancelled() }}
+        working-directory: contrib/yellowback/attest
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+          "$HOME/.cargo/bin/cargo" build --release
+          echo "YELLOWBACK_ATTEST_BIN=$PWD/target/release/yellowback-attest" >> "$GITHUB_ENV"
+      - name: Attestor agent end to end (extended)
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
+          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_attest_agent
       # Later phases add here (§6.0 item 6): the STOCK_BASELINE a second time with
       # BITCOIND=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
       # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
