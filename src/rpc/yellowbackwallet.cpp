@@ -110,14 +110,19 @@ bool StartsWith(const std::string& s, const char* prefix)
     throw JSONRPCError(RPC_WALLET_ERROR, msg);
 }
 
-/** Commit a built transaction through the wallet: stage-(i) locks first (§4.6), then CommitTransaction. */
+/**
+ * Commit a built transaction through the wallet: stage-(i) locks first (§4.6), then
+ * YellowbackWallet::Commit (CommitTransaction plus the removal of the blank entries the inherited
+ * commit leaves under the ids of inputs this wallet never held -- a claim's vault, a restored
+ * attestor's bond; regtest plan F-7).
+ */
 uint256 Commit(YellowbackWallet& yw, const BuiltTx& built, CReserveKey* reservekey)
 {
     yw.LockOwn(built.ownYedOutputs);
     CWalletTx wtx(pwalletMain, CTransaction(built.tx));
     std::optional<std::reference_wrapper<CReserveKey>> rk;
     if (reservekey) rk = std::ref(*reservekey);
-    if (!pwalletMain->CommitTransaction(wtx, rk)) {
+    if (!yw.Commit(wtx, rk)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "transaction commit failed: the transaction was rejected by the mempool");
     }
     return wtx.GetHash();

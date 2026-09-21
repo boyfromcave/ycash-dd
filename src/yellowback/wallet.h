@@ -23,6 +23,8 @@
 #include <vector>
 
 class CWallet;
+class CWalletTx;
+class CReserveKey;
 
 /**
  * The Yellowback wallet layer (plan §4.5): ownership, three-stage coin
@@ -115,6 +117,20 @@ public:
     /** Every YED output that is mine (for listing). */
     std::vector<YedCoin> AllCoins() const;
     int64_t ConfirmedCents() const;
+
+    // ---- committing
+    /**
+     * CWallet::CommitTransaction, then remove the blank wallet entries it leaves behind. The
+     * inherited commit "notifies that old coins are spent" with `mapWallet[txin.prevout.hash]`
+     * (src/wallet/wallet.cpp, frozen), which is safe upstream because a wallet only ever spends
+     * its own coins, and wrong for a claim (the vault output belongs to the vault owner) or a
+     * bond withdrawal after a restore: the operator[] inserts a default CWalletTx -- no inputs,
+     * no outputs, depth -1 -- under a transaction id the wallet never held. The next
+     * CWalletTx::IsTrusted over the unconfirmed spend then reads `parent->vout[n]` of that entry
+     * and the node dies (regtest plan F-7). Inputs absent from mapWallet before the commit are
+     * erased again after it; nothing else about them exists (never AddToWallet'ed, never on disk).
+     */
+    bool Commit(CWalletTx& wtx, std::optional<std::reference_wrapper<CReserveKey>> reservekey);
 
     // ---- locking
     /** Stage (i): lock the given outpoints before CommitTransaction (cs_wallet). */

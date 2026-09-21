@@ -285,7 +285,8 @@ class Preset:
         closing = self.node(0).yed_gettxinfo(row['closingTxid'])
         check(closing['path'] == 'claim', 'the closing transaction is a %s, not a claim' % closing['path'])
         check(closing['claimPath'] in ('a', 'b'), 'claimPath %r' % closing['claimPath'])
-        check(acted('liquidator', 'claim'), 'the vault was claimed but not by the liquidator persona')
+        # the tally file is rewritten every five seconds; the chain can show the claim first
+        self.wait_until(lambda: acted('liquidator', 'claim'), 10, 'the liquidator persona recording its claim')
         # the collateral went to the liquidator's wallet, not the owner's
         got = self.node(LIQUIDATOR).yed_listtransactions(50, 0)
         check(any(t['txid'] == row['closingTxid'] for t in got), 'the claim is not in the liquidator wallet\'s yed_listtransactions')

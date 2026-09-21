@@ -471,6 +471,15 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         zs = claimant.z_getnewaddress('sapling')
         c2 = wallet_claim(self, claimant, v2['txid'], zs, prices=11)
         assert_equal((c2['claimPath'], c2['to'], c2['burnedCents']), ('b', zs, 10000))
+        # F-7 (regtest plan section 8.1; v3 plan 6.2 D-R-1): the claim spends a vault this wallet never
+        # held. The inherited CommitTransaction indexes mapWallet by every input's txid and used to leave a
+        # blank entry under the vault's id; the first trust walk over the unconfirmed claim (getbalance,
+        # any AvailableCoins) then read that entry's empty vout and the node segfaulted. The claim is
+        # still unconfirmed here, which is exactly when the walk happens.
+        assert_rpc_error('non-wallet', claimant.gettransaction, v2['txid'])
+        claimant.getbalance()
+        claimant.yed_listunspent()
+        assert 'blockhash' not in claimant.getrawtransaction(c2['txid'], 1)     # still unconfirmed: the walk above was the real one
         assert_equal(c2['pEmerg'], usd_to_micro('10.20'))
         assert_equal(c2['pClaim'], c2['aClaim'])
         vault2 = user.yed_getvault(v2['txid'])

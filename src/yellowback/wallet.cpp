@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <set>
 #include <cstdio>
 #include <cstring>
 
@@ -71,7 +72,7 @@ void YellowbackWallet::StartupSweep()
     try {
         BuiltTx b = BuildSweepCarriers(*this, lapsed);
         CWalletTx wtx(wallet, CTransaction(b.tx));
-        if (wallet->CommitTransaction(wtx, std::nullopt)) {
+        if (Commit(wtx, std::nullopt)) {
             for (const CarrierRecord& c : b.sweptRecords) SpendCarrier(c.outpoint);
             LogPrintf("yellowback: startup sweep reclaimed %u lapsed carrier(s) in %s\n", b.sweptRecords.size(), wtx.GetHash().ToString());
         }
@@ -79,6 +80,27 @@ void YellowbackWallet::StartupSweep()
     } catch (const std::exception& e) {
         LogPrintf("yellowback: startup sweep skipped: %s\n", e.what());
     }
+}
+
+bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapper<CReserveKey>> reservekey)
+{
+    std::set<uint256> foreign;
+    {
+        LOCK(wallet->cs_wallet);
+        for (const CTxIn& in : wtx.vin) {
+            if (!wallet->mapWallet.count(in.prevout.hash)) foreign.insert(in.prevout.hash);
+        }
+    }
+    const bool ok = wallet->CommitTransaction(wtx, reservekey);
+    if (!foreign.empty()) {
+        LOCK(wallet->cs_wallet);
+        for (const uint256& hash : foreign) {
+            std::map<uint256, CWalletTx>::iterator it = wallet->mapWallet.find(hash);
+            // Only the blank the inherited commit made: a real transaction has inputs or outputs.
+            if (it != wallet->mapWallet.end() && it->second.vin.empty() && it->second.vout.empty()) wallet->mapWallet.erase(it);
+        }
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------------- v3: the files under <datadir>/yellowback (W7, S16)
