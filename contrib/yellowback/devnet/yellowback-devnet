@@ -899,9 +899,14 @@ def status(args):
     if not alive(state, USER):
         print("node0 is down: no chain state to report (`up --force` rebuilds, `down --wipe` removes the directory)"); return 1
     node = rpc(state, USER); activation, stats = node.yed_getactivation(), node.yed_getstats()
-    print("height %d; activation %s; minting %s%s; supply %s YED in %d active vault(s)"
-          % (node.getblockcount(), activation["status"], "allowed" if stats["mintingAllowed"] else "halted",
-             "" if stats["mintingAllowed"] else " (%s)" % ",".join(stats.get("haltMask") or []), Decimal(stats["supplyCents"]) / 100, stats["activeVaults"]))
+    mintable = stats.get("mintableClasses")
+    minting = ("allowed" if stats["mintingAllowed"] else
+               "limited to class %s (%s; W16)" % (", ".join(mintable), ",".join(stats.get("haltMask") or [])) if mintable else
+               "halted (%s)" % ",".join(stats.get("haltMask") or []))
+    print("height %d; activation %s; minting %s; global ratio %s; supply %s YED in %d active vault(s)"
+          % (node.getblockcount(), activation["status"], minting,
+             "undefined" if stats.get("globalRatioBps") is None else "%.1f %%" % (stats["globalRatioBps"] / 100),
+             Decimal(stats["supplyCents"]) / 100, stats["activeVaults"]))
     if role_of(state) != "none": print(heartbeat_line(state))
     walk = state.get("walk") or {}
     print("price: $%s%s" % (read_mock(directory), (" walking (pid %d, drift %+.2f %%/min, vol %.2f %%/tick)" % (walk["pid"], walk["drift"], walk["vol"]))

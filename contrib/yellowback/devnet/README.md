@@ -82,7 +82,7 @@ yellowback-devnet price --shock=-40%             # a step change; the walk, if r
 yellowback-devnet attestor 6 price 60            # ONE attestor diverges: an attack, not weather (stop the walk first to hold it)
 ```
 
-The walk writes the pools' mock price and every **automated** attestor's mock price together, so the two populations move honestly in agreement; your own attestor's price file (`attestor` preset) is never touched. Liquidation needs a real fall: class C vaults (300 %) go under the 110 % claim threshold at about −64 %, class A (500 %) at about −78 %. A crash also halts minting for a while (`DIVERGENCE` between the price windows, then `GLOBAL_RATIO`) — that is the product working, and `check` will say minting is halted until the windows roll and vaults are claimed.
+The walk writes the pools' mock price and every **automated** attestor's mock price together, so the two populations move honestly in agreement; your own attestor's price file (`attestor` preset) is never touched. Liquidation needs a real fall: class C vaults (300 %) go under the 110 % claim threshold at about −64 %, class A (500 %) at about −78 %. A crash also halts minting for a while: `DIVERGENCE` between the price windows stops every mint until they agree again, and `GLOBAL_RATIO` then *limits* minting to the classes whose minimum ratio reaches the recapitalisation floor — class A (500 %) — so the book can be rebuilt rather than left to the price (v3 plan W16). `status` says "limited to class A" and `yed_getstats.mintableClasses` lists what can mint; `check` still treats a limited state as not-allowed.
 
 ### The personas (`sim`, `yellowback-sim`)
 

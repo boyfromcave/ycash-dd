@@ -685,6 +685,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         classes.push_back(t);
     }
     prm.pushKV("classes", classes);
+    prm.pushKV("globalRatioHaltBps", p.globalRatioHaltBps);
+    prm.pushKV("recapRatioBps", p.recapRatioBps);          // W16: the class minimum a mint needs to pass a global-ratio halt
     UniValue policy(UniValue::VOBJ);
     policy.pushKV("penaltyBlocks", pp.penaltyBlocks);
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
@@ -790,6 +792,16 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     o.pushKV("supplyCapCents", PriceOrNull(cap));
     o.pushKV("haltMask", HaltMaskToJSON(s.haltMask));
     o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && (!cap.has_value() || t.supplyCents < cap.value()));
+    // W16: the classes a mint can use now. Every class when nothing halts; under a global-ratio
+    // halt alone, those whose minimum ratio reaches the recapitalisation floor; none otherwise.
+    UniValue mintable(UniValue::VARR);
+    const auto& P = index.GetParams();
+    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && (!cap.has_value() || t.supplyCents < cap.value())) {
+        for (int i = 0; i < NUM_CLASSES; i++) {
+            if (!(s.haltMask & HALT_GLOBAL_RATIO) || MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps) mintable.push_back(ClassLetter((uint8_t)i));
+        }
+    }
+    o.pushKV("mintableClasses", mintable);
     return o;
 }
 

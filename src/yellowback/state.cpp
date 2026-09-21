@@ -310,9 +310,12 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (S->haltMask & HALT_NOT_ACTIVE) return verdict::MINT_NOT_ACTIVE;
     if (S->haltMask & HALT_NO_PRICE) return verdict::MINT_HALTED_NO_PRICE;
     if (S->haltMask & (HALT_PARTICIPATION | HALT_ENFORCEMENT)) return verdict::MINT_HALTED_PARTICIPATION;
-    if (S->haltMask & HALT_GLOBAL_RATIO) return verdict::MINT_HALTED_GLOBAL_RATIO;
+    // HALT-2 (amended, W16): the global-ratio halt stops a mint only when the mint's own minimum
+    // ratio is below the recapitalisation floor. Every class minimum exceeds the halt floor, so a
+    // mint can only raise the global ratio; the floor keeps the best-backed class open to do so.
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && MinRatioBps(P.baseRatioBps[p.termClass], S->sigmaMultBps) < P.recapRatioBps) return verdict::MINT_HALTED_GLOBAL_RATIO;
     if (S->haltMask & HALT_DIVERGENCE) return verdict::MINT_HALTED_DIVERGENCE;
-    if (S->haltMask != 0) return verdict::MINT_NOT_ACTIVE; // an unknown bit: MINT-4 needs haltMask == 0
+    if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) return verdict::MINT_NOT_ACTIVE; // an unknown bit: MINT-4 needs every other bit clear
     const bool armed = ctx.Armed(ref);
     std::optional<MicroUsd> xMint = S->PMint();
     std::optional<MicroUsd> pMint = xMint;

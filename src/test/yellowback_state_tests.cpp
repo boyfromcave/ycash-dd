@@ -1234,8 +1234,29 @@ BOOST_AUTO_TEST_CASE(mint4_divergence_and_global_ratio)
     for (int i = 0; i < 8; i++) f.Mine(Fixture::Quote(15000, (f.tip + 1) % 3));
     BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_DIVERGENCE);
     BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_GLOBAL_RATIO);
-    MintOpts o; o.collateral = 10000000000000LL;
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-halted-global-ratio");   // precedence: GLOBAL_RATIO before DIVERGENCE
+    MintOpts a; a.collateral = 10000000000000LL;                 // class A (termClass 0), lock 48
+    MintOpts c = a; c.termClass = 2;                             // class C, lock 145
+    // W16: class C (300 %) is below the recapitalisation floor: GLOBAL_RATIO stops it, and takes precedence over DIVERGENCE
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-halted-global-ratio");
+    // class A (500 %) reaches the floor: the global-ratio clause lets it through to the next halt, DIVERGENCE
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "mint-halted-divergence");
+    // Once the windows agree again the ratio is still low (same supply, same price): class A mints, class C does not
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(15000, (f.tip + 1) % 3));
+    BOOST_CHECK(!(f.Snap(f.tip).haltMask & HALT_DIVERGENCE));
+    BOOST_CHECK(f.Snap(f.tip).haltMask & HALT_GLOBAL_RATIO);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-halted-global-ratio");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
+}
+
+// Rule: HALT-2
+BOOST_AUTO_TEST_CASE(recap_floor_is_the_class_minimum_with_sigma)
+{
+    // The floor is judged on minRatioBps(class, S), the ratio the mint actually locks: at a sigma
+    // multiplier of 1.3x class B (400 %) reaches 520 % and passes, class C (390 %) does not.
+    BOOST_CHECK(MinRatioBps(50000, 10000) >= 50000);
+    BOOST_CHECK(MinRatioBps(40000, 10000) < 50000);
+    BOOST_CHECK(MinRatioBps(40000, 13000) >= 50000);
+    BOOST_CHECK(MinRatioBps(30000, 13000) < 50000);
 }
 
 // Rule: MINT-5

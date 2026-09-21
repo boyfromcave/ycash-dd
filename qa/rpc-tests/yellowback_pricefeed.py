@@ -241,6 +241,25 @@ class YellowbackPricefeedTest(YellowbackTestFramework):
         assert 'GLOBAL_RATIO' in st['haltMask']
         for node in self.enforcing_nodes():
             assert 'GLOBAL_RATIO' in node.yed_getstats()['haltMask']
+
+# Rule: HALT-2 MINT-4 MINTPOL-1
+        print('W16: under the halt only class A (500 %) can mint; one such mint raises the ratio and clears the halt')
+        # the slow window still remembers the crash-and-recovery above, so DIVERGENCE is set beside
+        # GLOBAL_RATIO; every other halt stops every class, so let the windows agree at $24.999999 first
+        self.mine_round_robin(POOLS, P_SLOW_WINDOW)
+        st = user.yed_getstats()
+        assert_equal(st['haltMask'], ['GLOBAL_RATIO'])
+        assert_equal((st['mintingAllowed'], st['mintableClasses']), (False, ['A']))
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C, 300 %: below the recapitalisation floor
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 97)      # class B, 400 %
+        recap = wallet_mint(self, user, 10000, 48)                              # class A: 20 YEC at $25 against $100
+        self.mine(POOLS[0])
+        assert_equal(user.yed_getvault(recap['txid'])['status'], 'ACTIVE')
+        self.mine_round_robin(POOLS, REF_LAG)
+        st = user.yed_getstats()
+        assert_greater_than(st['globalRatioBps'], 25000)                        # (10 + 20) YEC * $25 against $200 = 375 %
+        assert 'GLOBAL_RATIO' not in st['haltMask']
+        assert_equal(sorted(st['mintableClasses']), ['A', 'B', 'C'])
         self.quote(50)
         self.mine_round_robin(POOLS, P_MID_WINDOW)
         assert 'GLOBAL_RATIO' not in user.yed_getstats()['haltMask']

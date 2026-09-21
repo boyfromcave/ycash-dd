@@ -60,10 +60,12 @@ Half an hour. The value is in the noticing: write against the step.
    - notes:
 
 6. **Let the price fall.** `yellowback-devnet price --shock -40%` then, a few minutes later,
-   `--shock -40%` again (the walk continues from each). Watch your own vault approach
+   `--shock=-40%` again (the walk continues from each). Watch your own vault approach
    liquidation. **Does the wallet warn you early enough to act?** Note: class A vaults are
    500 % collateralised at mint, so a claim needs roughly a 78 % fall; the personas' class C
-   vaults (300 %) go under at roughly 65 %.
+   vaults (300 %) go under at roughly 65 %. Expect the Mint page to say minting is *limited*
+   once the global ratio is under 250 %: class A still mints (and each such mint raises the
+   ratio), B and C are greyed out. Is that legible, or does it look broken?
    - notes:
 
 7. **Watch someone else be claimed.** The liquidator (node 10) posts a notice on a persona's

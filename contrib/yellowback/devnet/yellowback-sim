@@ -301,7 +301,8 @@ class Liquidator(Persona):
     `underwaterAt`, the clause-(a) price, scaled to the emergency ratio) and a claim once
     emergencyOpenAt <= tip - REF_LAG."""
     cadence_key = "liquidator"
-    inventory_cents = 40_000
+    inventory_cents = 100_000     # the owner's first walk-through ran the 400 YED inventory dry: `insufficient-yed x6`
+    top_up_below = 30_000         # mint more once the spendable YED could not cover a MIN_MINT*3 vault
 
     def setup(self):
         self.sim.liquidator_address = self.address
@@ -314,6 +315,16 @@ class Liquidator(Persona):
             result = self.mint(self.inventory_cents, CLASS_C[1])      # the longest lock: inventory, not a bet
             if result is None:
                 self.inventory_tried = False                          # try again next time (a halt, an empty pool)
+        else:
+            # Claims burn the inventory; top it up before it runs dry. Class A, the shortest lock:
+            # the one class a recapitalisation floor would keep open during a global-ratio halt.
+            try:
+                spendable = self.rpc.yed_getbalance()["confirmedCents"]
+            except Exception:
+                spendable = None
+            if spendable is not None and spendable < self.top_up_below and tip - getattr(self, "last_top_up", -100) >= 10:
+                self.last_top_up = tip
+                self.mint(self.inventory_cents // 2, CLASS_A[0])
         own = set(self.vaults)
         try:
             claimable = [row for row in self.rpc.yed_listclaimable() if row["vault"].split(":")[0] not in own]

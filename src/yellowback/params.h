@@ -145,6 +145,7 @@ struct Params
     int claimThresholdBps;               //!< 11,000
     int supplyCapBps;                    //!< 1,500; 0 = no cap
     int globalRatioHaltBps;              //!< 25,000
+    int recapRatioBps;                   //!< 50,000: under HALT-2 a MINT is accepted iff minRatioBps(class, S) >= this (W16)
     int divergenceBps;                   //!< 2,000
     int classMin[NUM_CLASSES];           //!< lock length range per class (blocks), inclusive
     int classMax[NUM_CLASSES];

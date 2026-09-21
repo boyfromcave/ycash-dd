@@ -165,7 +165,8 @@ class Params(object):
                  vol_periods_per_year, sigma_mult_max_bps, min_mint, max_mint, min_output,
                  max_output, token_value, yellowback_fee, ref_window, ref_lag,
                  price_min=100, price_max=100_000_000, attest_arm_min=5, bundle_carrier=CARRIER_SCRIPTSIG,
-                 attest=None):
+                 attest=None,
+                 recap_ratio_bps=50_000):
         self.network = network
         self.start_height = start_height
         self.sigma_ref_bps = sigma_ref_bps
@@ -196,6 +197,7 @@ class Params(object):
         self.grace = grace
         self.claim_threshold_bps = claim_threshold_bps
         self.global_ratio_halt_bps = global_ratio_halt_bps
+        self.recap_ratio_bps = recap_ratio_bps          # W16: under HALT-2 a mint needs min_ratio_bps(class) >= this
         self.divergence_bps = divergence_bps
         self.class_min = list(class_min)
         self.class_max = list(class_max)
@@ -2360,11 +2362,13 @@ class YellowbackModel(object):
             return 'mint-halted-no-price'
         if s.halt_mask & (HALT_PARTICIPATION | HALT_ENFORCEMENT):
             return 'mint-halted-participation'
-        if s.halt_mask & HALT_GLOBAL_RATIO:
+        # HALT-2 (amended, W16): the global-ratio halt stops only a mint whose own minimum
+        # ratio is below the recapitalisation floor
+        if (s.halt_mask & HALT_GLOBAL_RATIO) and min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps:
             return 'mint-halted-global-ratio'
         if s.halt_mask & HALT_DIVERGENCE:
             return 'mint-halted-divergence'
-        if s.halt_mask != 0:
+        if (s.halt_mask & ~HALT_GLOBAL_RATIO) != 0:
             return 'mint-not-active'
         armed = self.armed_at(pl.ref_height)
         x_mint = s.p_mint

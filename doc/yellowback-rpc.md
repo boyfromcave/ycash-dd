@@ -213,6 +213,8 @@ Result of `yed_getinfo`:
     "classes": [
       { "class": "A", "minBlocks": 48, "maxBlocks": 96, "baseRatioBps": 50000 }
     ],
+    "globalRatioHaltBps": 25000,
+    "recapRatioBps": 50000,
     "policy": {
       "penaltyBlocks": 12,
       "accuracyWindow": 24,
@@ -288,8 +290,12 @@ Arguments: none. `Totals` plus the tip snapshot. `pClaim` is `null` when undefin
 the minimum fill on the mid or slow window); `globalRatioBps` is `null` when there is no supply or
 no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
 `haltMask` is the decoded tip `haltMask` as an array of names (empty when minting is open);
-`mintingAllowed` is `activation == active && haltMask == [] && cap has room` — the MINTPOL-1
-gate `yed_mint` applies.
+`mintingAllowed` is `activation == active && haltMask == [] && cap has room` — every class can
+mint. **v3 (W16)** `mintableClasses` is the list of term classes a mint can use *now*: every
+class when `mintingAllowed`; under a `GLOBAL_RATIO` halt alone, the classes whose minimum ratio
+(`baseRatioBps · sigmaMultBps / 10⁴`) reaches `params.recapRatioBps` (class A on every network
+at a sigma multiplier of 1); empty under any other halt or at the cap. The MINTPOL-1 gate
+`yed_mint` applies is "the class of `lockBlocks` is in `mintableClasses`".
 
 Result of `yed_getstats`:
 
@@ -313,7 +319,8 @@ Result of `yed_getstats`:
   "globalRatioBps": 49750,
   "supplyCapCents": null,
   "haltMask": [],
-  "mintingAllowed": true
+  "mintingAllowed": true,
+  "mintableClasses": [ "A", "B", "C" ]
 }
 ```
 
@@ -1845,7 +1852,7 @@ what `yellowback_rpc_contract.py` uses.
 | Identifier | Raised by | When (provocation) |
 |---|---|---|
 | `yellowback-unhealthy` | every gated command | the index is unhealthy (`unhealthyReason` follows); provoke with `-yellowbacktestfault=storage:commit` then any non-allow-listed command |
-| `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio above `GLOBAL_RATIO_HALT_BPS`; with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap |
+| `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap |
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_sweep`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |

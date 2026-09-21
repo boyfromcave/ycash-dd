@@ -322,9 +322,28 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine_round_robin(POOLS, 8 + REF_LAG)
         assert 'GLOBAL_RATIO' in user.yed_gethistory(self.ref(), self.ref())[0]['haltMask']
         assert_greater_than(25000, user.yed_getstats()['globalRatioBps'])
-        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 48)
-        void_gr = self.send_and_mine(user, self.raw_mint(user, 10000, 48, self.ref(), 30 * COIN), POOLS[2])
+        # W16: the halt stops the classes below the recapitalisation floor (500 %): C here; a class A
+        # mint passes the global-ratio clause and meets the next halt, DIVERGENCE, for now
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)
+        assert_rpc_error('mintpol-divergence', user.yed_mint, 10000, 48)
+        assert_equal(user.yed_getstats()['mintableClasses'], [])
+        void_gr = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[2])
         self.expect_void(void_gr, 'mint-halted-global-ratio')
+
+# Rule: HALT-2 MINTPOL-1
+        print('W16 under this script\'s supply cap: the windows agree at $20, the halt persists, and the cap -- proportional to the price -- binds first')
+        self.mine_round_robin(POOLS, 64)
+        stats = user.yed_getstats()
+        assert_equal(stats['haltMask'], ['GLOBAL_RATIO'])
+        # SUPPLY_CAP_BPS is tiny here (the cap-race case above): the price drop shrank the cap under the
+        # supply, so no class can mint and mintableClasses is empty for the cap's reason, not the halt's
+        assert_greater_than(stats['supplyCents'] + 10000, stats['supplyCapCents'])
+        assert_equal((stats['mintingAllowed'], stats['mintableClasses']), (False, []))
+        assert_rpc_error('mintpol-global-ratio', user.yed_mint, 10000, 145)     # class C: the halt, before the cap
+        assert_rpc_error('mintpol-cap', user.yed_mint, 10000, 48)              # class A: through the halt, into the cap
+        void_c = self.send_and_mine(user, self.raw_mint(user, 10000, 145, self.ref(), 30 * COIN), POOLS[1])
+        self.expect_void(void_c, 'mint-halted-global-ratio')
+        self.model_check(nodes[2])
 
 # Rule: RED-1 IN-2 K3
         print('void_release_via_yed_redeem (L14): the collateral of the under-collateralised mint comes back with no burn and no fee')
@@ -354,7 +373,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
             c = nodes[i].yed_getvault(void_col)
             assert_equal((c['status'], c['unbacked'], c['burnedCents'], c['closingTxid']), ('CLOSED', False, 0, released['txid']))
         assert_greater_than(user.getbalance(), yec_before + 9)
-        assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 1)   # + cap race + global ratio - the release
+        assert_equal(nodes[2].yed_getstats()['voidVaults'], void_before + 2)   # + cap race + global ratio (C) + W16's class C - the release
         assert_equal(nodes[2].yed_gettxinfo(released['txid'])['closedVaults'], [{'txid': void_col, 'vout': 0}])
         rows = {r_['txid']: r_ for r_ in user.yed_listtransactions()}
         assert_equal(rows[released['txid']]['unbacked'], False)

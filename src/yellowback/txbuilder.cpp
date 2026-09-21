@@ -797,9 +797,15 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     if (!S.has_value() || !S->activation.IsActive() || (S->haltMask & HALT_NOT_ACTIVE)) throw std::runtime_error("mintpol-not-active: Yellowback is not active at the reference height");
     if (S->haltMask & HALT_NO_PRICE) throw std::runtime_error("mintpol-no-price: no defined price at the reference height (PRICE-1 fill)");
     if (S->haltMask & (HALT_PARTICIPATION | HALT_ENFORCEMENT)) throw std::runtime_error("mintpol-participation: minting is halted while miner participation is low (ACT-4)");
-    if (S->haltMask & HALT_GLOBAL_RATIO) throw std::runtime_error("mintpol-global-ratio: minting is halted while the global collateral ratio is low (HALT-2)");
+    if ((S->haltMask & HALT_GLOBAL_RATIO) && MinRatioBps(ctx.params.baseRatioBps[g.termClass], S->sigmaMultBps) < ctx.params.recapRatioBps) {
+        // W16: only a class whose minimum ratio reaches the recapitalisation floor mints through a global-ratio halt
+        std::string open;
+        for (int c = 0; c < NUM_CLASSES; c++) if (MinRatioBps(ctx.params.baseRatioBps[c], S->sigmaMultBps) >= ctx.params.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+        throw std::runtime_error(strprintf("mintpol-global-ratio: the global collateral ratio is below %d %% (HALT-2); only a term class whose minimum ratio is at least %d %% can mint until it recovers%s",
+                                           ctx.params.globalRatioHaltBps / 100, ctx.params.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")"));
+    }
     if (S->haltMask & HALT_DIVERGENCE) throw std::runtime_error("mintpol-divergence: minting is halted while the price windows diverge (HALT-3)");
-    if (S->haltMask != 0) throw std::runtime_error("mintpol-not-active: an unknown halt bit is set at the reference height");
+    if ((S->haltMask & ~HALT_GLOBAL_RATIO) != 0) throw std::runtime_error("mintpol-not-active: an unknown halt bit is set at the reference height");
     g.S = S.value();
     g.xMint = S->PMint();
     if (!g.xMint.has_value()) throw std::runtime_error("mintpol-no-price: pMint is undefined at the reference height");

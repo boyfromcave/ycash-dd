@@ -319,11 +319,18 @@ class Preset:
         hb = json.load(open(os.path.join(self.directory, 'heartbeat.json')))
         check(time.time() - hb['time'] < HEARTBEAT_RATE * 5, 'the heartbeat stopped (last block %d, %ds ago; see heartbeat.log)' % (hb['height'], time.time() - hb['time']))
         enforcing = [i for i in range(self.state['num_nodes']) if i != STOCK]
-        hashes = {i: self.node(i).yed_getstatehash() for i in enforcing}
-        heights = {h['height'] for h in hashes.values()}
-        # nodes may be a block apart at the moment of the call: compare at the lowest height
-        low = min(heights)
-        at = {i: self.node(i).yed_getstatehash(low)['statehash'] for i in enforcing}
+        # yed_getstatehash answers for a node's tip only, and the heartbeat keeps the tip moving:
+        # sample every node and keep the first sample in which they all sit at one height
+        at, low = {}, None
+        for _ in range(20):
+            hashes = {i: self.node(i).yed_getstatehash() for i in enforcing}
+            heights = {h['height'] for h in hashes.values()}
+            if len(heights) == 1:
+                low = heights.pop()
+                at = {i: h['statehash'] for i, h in hashes.items()}
+                break
+            time.sleep(0.5)
+        check(low is not None, 'the enforcing nodes were never sampled at one height (heights %s)' % sorted(heights))
         check(len(set(at.values())) == 1, 'state hash disagrees at %d: %s' % (low, at))
         price = self.node(0).yed_getprice()
         check(not price['pinnedSeqs'] and not price['pinnedKeys'], 'something ended pinned: %s / %s' % (price['pinnedSeqs'], price['pinnedKeys']))
