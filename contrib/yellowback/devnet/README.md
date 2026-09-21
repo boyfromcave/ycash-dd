@@ -8,7 +8,26 @@ Two scripts and four checklists:
 | `yellowback-sim` | six personas that inhabit it (started by `up --role`; `sim start|stop|stats`) |
 | `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists; `up --role` copies the role's into the session's `NOTES.md` |
 
-Run everything through the workspace venv's Python (`../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet …`), with `src/ycashd` built and `contrib/yellowback/attest` built (`cargo build --release`; `YELLOWBACK_ATTEST_BIN` names the binary if the search does not find it).
+## 0. Before you start
+
+Neither script is on your PATH, and their `#!/usr/bin/env python3` must find the **workspace
+venv's** Python: they import the inherited test framework from `qa/rpc-tests/`, which needs
+`simplejson` — present in the venv, absent from the system Python macOS ships. Three lines, once
+per terminal, make every command in this file work verbatim from any directory:
+
+```bash
+cd <workspace>/ycash-dd
+source ../.venv/bin/activate
+export PATH="$PWD/contrib/yellowback/devnet:$PATH"
+```
+
+Or skip them and spell each command out from the `ycash-dd` directory: `../.venv/bin/python
+contrib/yellowback/devnet/yellowback-devnet <command>`. Running `./yellowback-devnet` from this
+directory does **not** work on its own — the shebang then picks the system Python and dies on
+`ModuleNotFoundError: simplejson`.
+
+You also need `src/ycashd` built and `contrib/yellowback/attest` built (`cargo build --release`;
+`YELLOWBACK_ATTEST_BIN` names the binary if the search does not find it).
 
 ## 1. The plain devnet (v2 demo and v3 arming)
 

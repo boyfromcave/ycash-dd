@@ -1,5 +1,27 @@
 # Scenario 2b — "I am an attestor": operation (headless, the `attestor` seat, node 8)
 
+## Before you start
+
+`yellowback-devnet` is a script in `contrib/yellowback/devnet/`, not a command on your PATH, and
+its `#!/usr/bin/env python3` must find the **workspace venv's** Python: it imports the inherited
+test framework from `qa/rpc-tests/`, which needs `simplejson` — present in the venv, absent from
+the system Python 3.9 that macOS ships. Three lines, once per terminal, make every command below
+work verbatim from any directory:
+
+```bash
+cd <workspace>/ycash-dd
+source ../.venv/bin/activate
+export PATH="$PWD/contrib/yellowback/devnet:$PATH"
+```
+
+Or skip them and spell each command out from the `ycash-dd` directory: `../.venv/bin/python
+contrib/yellowback/devnet/yellowback-devnet <command>`.
+
+You also need `src/ycashd` built and the attestor agent built (`cd contrib/yellowback/attest &&
+cargo build --release`; `YELLOWBACK_ATTEST_BIN` points at it if the search does not find it). If a
+devnet already exists in `~/yb-devnet`, `up` refuses and tells you to pass `--force`, which
+rebuilds over it.
+
 Close the GUI. From here on, **follow `doc/yellowback-attestor.md` literally**, using only
 `ycash-cli` and the agent. This half is as much a test of that document as of the software: a
 missing step, an ambiguity, an assumption the reader does not share — that is the finding. Its
