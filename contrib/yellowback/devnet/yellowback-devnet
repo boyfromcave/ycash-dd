@@ -267,6 +267,30 @@ def mark_stopped(state, name, stopped):
     (names.add if stopped else names.discard)(name)
     state["stopped_agents"] = sorted(names)
 
+def node_pids(directory):
+    """Every ycashd whose -datadir is under this devnet, by process, not by RPC. A node whose RPC
+    is broken (one answered 500 to getblockcount after its directory was wiped under it) looks
+    "down" to `alive()` yet still holds its ports, and the next `up` dies with "Unable to start
+    HTTP server" (F-14)."""
+    try:
+        out = subprocess.run(["pgrep", "-f", "ycashd.*-datadir=%s/node" % directory], capture_output=True, text=True).stdout
+    except OSError:
+        return []
+    return [int(x) for x in out.split() if x.isdigit()]
+
+def kill_nodes(directory, grace=30):
+    """SIGTERM every remaining node process of this devnet, wait for them, SIGKILL the rest."""
+    pids = node_pids(directory)
+    for pid in pids:
+        try: os.kill(pid, 15)
+        except OSError: pass
+    deadline = time.time() + grace
+    while node_pids(directory) and time.time() < deadline: time.sleep(0.5)
+    for pid in node_pids(directory):
+        try: os.kill(pid, 9); print("killed node process %d (did not stop within %ds)" % (pid, grace))
+        except OSError: pass
+    return pids
+
 def _kill(pid, label):
     if agent_alive(pid):
         try: os.kill(pid, 15); print("stopping %s (pid %d)" % (label, pid))
@@ -533,6 +557,12 @@ def up(args):
         if any(alive(state, node) for node in range(state["num_nodes"])): sys.exit("a devnet is already running in %s; `down` it first" % directory)
         if not args.force: sys.exit("%s holds a stopped devnet; pass --force to rebuild" % directory)
     elif os.path.exists(directory) and os.listdir(directory) and not args.force: sys.exit("%s exists and is not empty; pass --force" % directory)
+    stray = node_pids(directory)
+    if stray:
+        # a node that no longer answers RPC (or a half-started `up`) still holds its ports
+        if not args.force: sys.exit("%d ycashd process(es) still run out of %s (pids %s); `down` them, or pass --force to kill them" % (len(stray), directory, " ".join(str(p) for p in stray)))
+        print("killing %d stray ycashd process(es) of an earlier run: %s" % (len(stray), " ".join(str(p) for p in stray)))
+        kill_nodes(directory)
     if os.path.exists(directory): shutil.rmtree(directory)
     binary = args.bitcoind or os.environ.get("BITCOIND") or os.path.join(REPO, "src", "ycashd")
     if not os.access(binary, os.X_OK): sys.exit("ycashd not found at %s" % binary)
@@ -1062,6 +1092,10 @@ def down(args):
         if alive(state, node):
             try: rpc(state, node).stop(); print("stopping node%d" % node)
             except Exception as error: print("node%d: %s" % (node, error))
+    # By process too: a node whose RPC is broken looks down to alive() and would survive, holding
+    # its ports for the next `up` (F-14). Wait for the clean stops, then terminate what is left.
+    left = kill_nodes(directory)
+    if left: print("%d node process(es) did not stop over RPC and were terminated" % len(left))
     if args.wipe: shutil.rmtree(directory); print("wiped %s" % directory)
 
 # ---------------------------------------------------------------------------------- sessions, scenarios, reports (R5)
