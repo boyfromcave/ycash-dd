@@ -90,7 +90,7 @@ Six strategies, each with its own cadence and characteristic failure, seeded, on
 
 | Persona | Does | Characteristic failure |
 |---|---|---|
-| leveraged | class C mints, holds two, never tops up | the first liquidated on a downswing |
+| leveraged | class C mints, holds two, never redeems early | the first liquidated on a downswing |
 | conservative | class A mints, one at a time, redeems at maturity | the happy path |
 | exiter | redeems the moment `lockHeight` passes; releases VOID vaults; runs `yed_sweepcarriers` | `vault-locked`, `insufficient-yed` when the trader moved its YED |
 | trader | never mints; `yed_send` / `yed_sendmany` between its addresses and to the liquidator | `insufficient-yec` on a wallet whose change is unconfirmed |

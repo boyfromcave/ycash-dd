@@ -11,7 +11,7 @@ an owner redeeming and is the one the attested price actually governs.
 Personas (docs/plans/role-based-regtest-plan.md section 3.4; revision 3 item I-3 on why risk
 appetite is the term class):
 
-  leveraged     class C (300 %, the longest terms): the first underwater on a downswing; never tops up
+  leveraged     class C (300 %, the longest terms): the first underwater on a downswing; never redeems early
   conservative  class A (500 %, short terms): the happy path; redeems at maturity
   exiter        redeems the moment lockHeight passes; releases VOID vaults with yed_redeem;
                 runs yed_sweepcarriers as housekeeping
@@ -220,7 +220,7 @@ class Leveraged(Persona):
 
     def act(self, tip):
         if len([r for r in self.my_positions("ACTIVE")]) >= self.max_open:
-            self.tally.note(self.name, "holding %d vaults, never tops up" % self.max_open)
+            self.tally.note(self.name, "holding %d vaults, rides them out (a vault cannot be topped up)" % self.max_open)
             return
         cents = self.rng.choice([MIN_MINT, MIN_MINT * 3 // 2, MIN_MINT * 2])
         lock = CLASS_C[0] + self.rng.randint(0, 8)          # class C: the lowest ratio, the longest term
