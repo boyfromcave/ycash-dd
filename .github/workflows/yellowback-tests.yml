@@ -705,11 +705,11 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
+          mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=address,undefined CC=clang CXX=clang++
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*'
-          mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
@@ -771,6 +771,7 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
+          mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin

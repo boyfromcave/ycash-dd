@@ -9,6 +9,10 @@
 
 #include <stdio.h>
 
+#include <map>
+#include <set>
+#include <utility>
+
 #include <boost/thread.hpp>
 
 #ifdef DEBUG_LOCKCONTENTION
