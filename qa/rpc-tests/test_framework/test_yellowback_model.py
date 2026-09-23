@@ -889,9 +889,15 @@ class MintTests(unittest.TestCase):
         s = c.model.snapshots[c.height]
         self.assertTrue(s.halt_mask & ym.HALT_GLOBAL_RATIO)
         self.assertEqual(s.halt_mask & ym.HALT_DIVERGENCE, 0)
-        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 13, fee_key=KEY1)
+        # W16: the halt stops the classes below the recapitalisation floor (class C, 300 %) ...
+        raw = c.mint_tx(10_000, 145, c.height - 1, 10 ** 13, fee_key=KEY1, term_class=2)
         c.mine((1, 9_000, 0, KEY1), [raw])
         self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, 'mint-halted-global-ratio')
+        # ... and lets class A (500 %) through, which is what repairs the ratio
+        self.assertTrue(c.model.snapshots[c.height].halt_mask & ym.HALT_GLOBAL_RATIO)
+        raw = c.mint_tx(10_000, 48, c.height - 1, 10 ** 13, fee_key=KEY1)
+        c.mine((1, 9_000, 0, KEY1), [raw])
+        self.assertEqual(c.model.vaults[(txid_of(raw), 0)].void_reason, '')
 
     # Rule: MINT-5
     def test_mint5_collateral(self):
