@@ -824,9 +824,10 @@ void CombineMint(const Context& ctx, const MintGateFacts& g, const BundleFactsW&
     source = "x";
     if (!f.armed) return;
     const MicroUsd x = g.xMint.value(), a = f.aMint.value();
-    const arith_uint256 diff = x >= a ? arith_uint256(x - a) : arith_uint256(a - x);
-    if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, ctx.params.divergeBpsAttest)) * arith_uint256(std::min(x, a))) {
-        throw std::runtime_error(strprintf("mint10-diverged: pools quote %d and attestors %d micro-USD at height %d; they differ by more than %d bps, so minting is paused", x, a, g.S.blockHash.IsNull() ? 0 : 0, ctx.params.divergeBpsAttest));
+    const MicroUsd fast = g.S.PFast().value_or(x);         // W17: the agreement test reads the fast median
+    const arith_uint256 diff = fast >= a ? arith_uint256(fast - a) : arith_uint256(a - fast);
+    if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, ctx.params.divergeBpsAttest)) * arith_uint256(std::min(fast, a))) {
+        throw std::runtime_error(strprintf("mint10-diverged: the pools' fast median %d and the attestors' %d micro-USD differ by more than %d bps, so minting is paused until they agree", fast, a, ctx.params.divergeBpsAttest));
     }
     pMint = std::min(x, a);
     source = a < x ? "a" : "x";

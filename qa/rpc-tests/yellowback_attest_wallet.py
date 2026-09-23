@@ -32,7 +32,7 @@ from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
     TOKEN_VALUE, YELLOWBACK_FEE, YellowbackTestFramework, assert_same_statehash, pubkey_to_address, set_quote,
-    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT,
+    usd_to_micro, DORMANCY_CHECK, K_SLACK, M_SELECT, P_FAST_WINDOW,
 )
 from test_framework.yellowback_attest import (
     REGISTRY, arming_state, decode_bundle, note_attestor_status, offline_bundle, offline_bundle_hex, offline_selection,
@@ -205,6 +205,7 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal(user.yed_sweepcarriers()['outstanding'], 0)               # nothing was built
         assert_equal(user.getrawmempool(), [])
         self.mine(POOLS[1])
+
 
 # Rule: W6 BUNDLE-1
         print('mint_from_pool: one attestor fed, bundle-insufficient from the pool names the missing seqs; feed_all, then yed_mint with no bundleHex')
@@ -527,6 +528,22 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_rpc_error('bond-spent', wa.yed_withdrawbond, 0)
         assert_rpc_error('bond-spent', claimant.yed_withdrawbond, 0)
         assert_same_statehash(self.enforcing_nodes(), 'withdrawal')
+
+# Rule: MINT-10 MINT-5 PRICE-2
+        print('W17: a rally -- pools jump to $90; after a fast window the attestors agree with the fast median, the mint goes through, priced at the lagging minimum')
+        self.price(90)                                                          # ($100 is PRICE_MAX itself, which yed_signattestation refuses)
+        self.mine_round_robin(POOLS, P_FAST_WINDOW + REF_LAG)
+        pr = user.yed_getprice()
+        assert abs(pr['pFast'] - usd_to_micro(90)) < usd_to_micro(1), pr        # the pools' quotes carry a small per-pool jitter
+        assert_greater_than(usd_to_micro(80), pr['pMint'])                      # the slow window still remembers the old price
+        rally = wallet_mint(self, user, 10000, 48, prices=90)                   # the offline bundle at $90: agreeing with pFast, not with xMint
+        assert_equal((rally['pending'], rally['source']), (False, 'x'))
+        assert abs(rally['aMint'] - usd_to_micro(90)) < usd_to_micro(1), rally   # the offline bundle follows the jittered quotes
+        assert_equal(rally['pMint'], rally['xMint'])                            # MINT-5 at the conservative minimum
+        assert_greater_than(rally['aMint'], rally['pMint'])
+        self.mine(POOLS[2])
+        assert_equal(user.yed_getvault(rally['txid'])['status'], 'ACTIVE')
+        assert_same_statehash(self.enforcing_nodes(), 'rally')
 
         print('the Python model over the whole chain')
         model_check(nodes[2], full=True)

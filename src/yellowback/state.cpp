@@ -363,9 +363,12 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     }
     // MINT-5 (ARMED: after MINT-9, with the combined pMint)
     if (const char* v = mint5()) return v;
-    // MINT-10 (ARMED: |xMint - aMint| * 10^4 <= DIVERGE_BPS_ATTEST * min(xMint, aMint))
+    // MINT-10 (ARMED, amended W17: |pFast(R) - aMint| * 10^4 <= DIVERGE_BPS_ATTEST * min(pFast(R), aMint)).
+    // The agreement test reads the pools' fast median -- the current market -- not the min-of-windows
+    // xMint that MINT-5 prices collateral at: an honest rally lags xMint by a whole slow window and
+    // looked like a pool/attestor disagreement. pFast is defined whenever xMint is (PRICE-1).
     {
-        const MicroUsd x = xMint.value(), a = facts.bundle.aMint.value();
+        const MicroUsd x = S->PFast().value_or(xMint.value()), a = facts.bundle.aMint.value();
         const arith_uint256 diff = x >= a ? arith_uint256(x - a) : arith_uint256(a - x);
         if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, P.divergeBpsAttest)) * arith_uint256(std::min(x, a))) return verdict::MINT10_DIVERGED;
     }

@@ -2429,9 +2429,11 @@ class YellowbackModel(object):
         v = mint5(p_mint)
         if v is not None:
             return v
-        # MINT-10
+        # MINT-10 (amended W17): the agreement test reads the pools' fast median, not the
+        # min-of-windows x_mint that MINT-5 prices collateral at
         a = facts['bundle']['a_mint']
-        if abs(x_mint - a) * BPS > p.diverge_bps_attest * min(x_mint, a):
+        fast = s.p_fast if s.p_fast is not None else x_mint
+        if abs(fast - a) * BPS > p.diverge_bps_attest * min(fast, a):
             return 'mint10-diverged'
         return VERDICT_OK
 

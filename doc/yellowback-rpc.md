@@ -848,7 +848,7 @@ aMint)` of PRICE-2 with the bundle this node would build from its pool for a MIN
 selector, W9): `xMint` and `aMint` are both reported, `source` says which bound (`"x"` or
 `"a"`; `""` when not armed or a `priceMicroUsd` override was given), `armed` is the snapshot's
 arming state, `bundleSeqs` the `seq`s the estimate used (empty when not armed), `attestFeeZat`
-the AFEE-1 fee that mint would pay on top of `feeZat`, and `divergenceBps` = `|xMint − aMint| ·
+the AFEE-1 fee that mint would pay on top of `feeZat`, and `divergenceBps` = `|pFast − aMint| ·
 10⁴ / min(xMint, aMint)` (`null` when either is undefined). Refuses with `bundle-insufficient`
 when armed and fewer than `M_SELECT` of the selected attestors have a fresh attestation in the
 pool (the message names the missing `seq`s), and with `mint10-diverged` when `divergenceBps >
@@ -1886,7 +1886,7 @@ provokes each.
 | `attest-malformed` | `yed_addattestation`, `yed_reportequivocation` | not 74 bytes of hex (`RPC_INVALID_PARAMETER`) |
 | `bundle-insufficient` | `yed_buildbundle`, `yed_estimatecollateral`, `yed_mint`, `yed_claim`, `yed_claimnotice` | armed and fewer than `M_SELECT` of `selected(R, selector)` have a usable attestation in the pool; also a given `bundleHex` that fails BUNDLE-1 at `R` (the message ends with the BUNDLE-1 reason). Message grammar: `bundle-insufficient: <count> of <selected> selected attestors have a fresh attestation; missing seq <a,b,…>` — the GUI reads the two numbers. Provoke: arm, feed one attestor only |
 | `bundle-malformed` | `yed_mint`, `yed_claim`, `yed_claimnotice` | `bundleHex` is not `"YA" ‖ 0x01 ‖ count ‖ count × 74 bytes` (`RPC_INVALID_PARAMETER`) |
-| `mint10-diverged` | `yed_estimatecollateral`, `yed_mint` | armed and `\|xMint − aMint\| · 10⁴ > DIVERGE_BPS_ATTEST · min(xMint, aMint)` — refused before any transaction is built: attestors at 2× the pools |
+| `mint10-diverged` | `yed_estimatecollateral`, `yed_mint` | armed and `\|pFast − aMint\| · 10⁴ > DIVERGE_BPS_ATTEST · min(pFast, aMint)` (W17: the pools' fast median, the current market, not the lagging minimum `xMint`) — refused before any transaction is built: attestors at 2× the pools |
 | `notice-standing` | `yed_claimnotice` | a `Notices` record for the vault exists with `tip − notice.height ≤ EMERGENCY_NOTICE_TTL` (NOT-1's no-reset clause): post twice |
 | `notice-not-underwater` | `yed_claimnotice` | `collateralZat · pEmerg ≥ mintedCents · EMERGENCY_RATIO_BPS · COIN` under this node's bundle, or the snapshot at `R` is not armed: notice on a healthy vault |
 | `bond-below-min` | `yed_registerattestor` | `bondYec < BOND_MIN` (10 YEC on regtest): register with 9 |

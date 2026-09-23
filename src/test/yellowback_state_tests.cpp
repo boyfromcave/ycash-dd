@@ -2435,6 +2435,26 @@ BOOST_AUTO_TEST_CASE(mint10_diverged_void)
 }
 
 // Rule: MINT-10
+BOOST_AUTO_TEST_CASE(mint10_reads_the_fast_median_so_a_rally_mints)
+{
+    // W17: the pools double their quotes; after a fast window the fast median is at the new
+    // price while the slow window (and so xMint, the minimum) still says the old one. Attestors
+    // at the new price agree with the fast median, so the mint passes MINT-10 -- and MINT-5
+    // still prices its collateral at the old, lower xMint.
+    Fixture f;
+    f.Arm();
+    for (int i = 0; i < 10; i++) f.Mine(Fixture::Quote(100000, (f.tip + 1) % 3));
+    const Snapshot S = f.Snap(f.tip - 1);
+    BOOST_REQUIRE(S.PFast().has_value() && S.PMint().has_value());
+    BOOST_CHECK_EQUAL(S.PFast().value(), 100000);
+    BOOST_CHECK_EQUAL(S.PMint().value(), 50000);
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 100000)), "");                 // MINT-5 sized it at the minimum, 50,000
+    BOOST_CHECK_EQUAL(f.Log(f.evals[f.tip].txlogs[0].first)->aMint, 100000);
+    // attestors that stayed at the old price now disagree with the market: refused
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintV3(10000, 50000)), verdict::MINT10_DIVERGED);
+}
+
+// Rule: MINT-10
 BOOST_AUTO_TEST_CASE(mint10_exact_boundary_ok)
 {
     Fixture f;

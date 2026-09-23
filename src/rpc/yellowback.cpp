@@ -1478,12 +1478,13 @@ UniValue yed_estimatecollateral(const UniValue& params, bool fHelp)
             bundleSeqs = built.seqs;
             if (xMint.has_value()) {
                 const MicroUsd x = xMint.value(), a = aMint.value();
-                const arith_uint256 diff = x >= a ? arith_uint256(x - a) : arith_uint256(a - x);
-                const arith_uint256 lo(std::min(x, a));
+                const MicroUsd fast = snap->PFast().value_or(x);           // W17: MINT-10 reads the fast median
+                const arith_uint256 diff = fast >= a ? arith_uint256(fast - a) : arith_uint256(a - fast);
+                const arith_uint256 lo(std::min(fast, a));
                 const arith_uint256 d = diff * arith_uint256(BPS) / lo;
                 divergenceBps = FitsInt64(d) ? (int64_t)d.GetLow64() : std::numeric_limits<int64_t>::max();
                 if (diff * arith_uint256(BPS) > arith_uint256(std::max(0, p.divergeBpsAttest)) * lo) {
-                    throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("mint10-diverged: xMint %d and aMint %d differ by %d bps (DIVERGE_BPS_ATTEST %d)", (int)x, (int)a, (int)divergenceBps.value(), p.divergeBpsAttest));
+                    throw JSONRPCError(RPC_VERIFY_REJECTED, strprintf("mint10-diverged: pFast %d and aMint %d differ by %d bps (DIVERGE_BPS_ATTEST %d)", (int)fast, (int)a, (int)divergenceBps.value(), p.divergeBpsAttest));
                 }
                 pMint = std::min(x, a);
                 source = pMint.value() == a && a < x ? "a" : "x";
