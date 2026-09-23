@@ -37,10 +37,10 @@ env:
   # written after that list). Each phase registered its script in qa/pull-tester/rpc-tests.py but
   # this variable was not updated with it, so mining, enforcement, stock_node and hardening — the
   # soft fork's own safety evidence among them — were never run by CI. Added 2026-09-11.
-  # yellowback_quote is still absent: it starts the quote agent, which reads TOML with the stdlib
-  # tomllib (Python >= 3.11) while this job runs ubuntu-22.04's 3.10, and moving the job to 3.11
-  # also moves it off the apt python3-zmq the prerequisite step imports. Its unit tests do run, in
-  # the python job. Closing that gap is a CI change on its own.
+  # yellowback_quote joined on 2026-09-22: the quote agent reads TOML with the stdlib tomllib
+  # (Python >= 3.11) and the main and nightly jobs ran ubuntu-22.04's 3.10, which is also why the
+  # nightly devnet role presets died at "quote agents did not publish" (the agents crashed on
+  # import). Both jobs now take 3.11 from actions/setup-python and pyzmq/simplejson from pip.
   #
   # The three yellowback_attest* scripts joined the list on 2026-09-20. They are the whole of the
   # v3 A1-A3 test evidence and each phase registered its script in qa/pull-tester/rpc-tests.py,
@@ -48,7 +48,7 @@ env:
   # exec's them directly, so an un-chmodded script dies with PermissionError before the framework
   # starts) -- the identical omission recorded above for mining/enforcement/stock_node/hardening
   # on 2026-09-11, repeated for v3. The audit job now greps for both halves so it cannot recur.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote
   SANITIZER_SCRIPTS: yellowback_index
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
@@ -73,12 +73,19 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
 
+      - uses: actions/setup-python@v5
+        # 3.11, not the runner's 3.10: yellowback_quote and the devnet role presets start the quote
+        # agent, which reads TOML with the stdlib tomllib. Not newer: the inherited framework still
+        # imports asyncore, which 3.12 removed. pyzmq comes from pip because apt's python3-zmq is
+        # bound to the runner's interpreter.
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
         # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
         # one-line shim stands in for it). No framework file is changed.
         run: |
-          python3 -m pip install --user simplejson
+          python3 -m pip install --user simplejson pyzmq
           site=$(python3 -c 'import site; print(site.getusersitepackages())')
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
@@ -481,14 +488,18 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
+      - uses: actions/setup-python@v5
+        # 3.11 for the quote agent's tomllib (see the main job); the devnet role presets need it.
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
-          python3 -m pip install --user simplejson
+          python3 -m pip install --user simplejson pyzmq
           site=$(python3 -c 'import site; print(site.getusersitepackages())')
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, zmq, simplejson, pyblake2'
+          python3 -c 'import asyncore, zmq, simplejson, pyblake2, tomllib'
       - uses: actions/cache@v4
         with:
           path: |
@@ -502,8 +513,17 @@ jobs:
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
       - run: ./zcutil/build.sh -j$(nproc)
-      - name: Full make check
-        run: make check
+      - name: Full make check (minus the pin's broken ycash-tx vectors)
+        # `make check` is check-TESTS (test_bitcoin and ycash-gtest, every suite) then check-local:
+        # test/bitcoin-util-test.py, secp256k1 check, univalue check. The util script cannot pass
+        # at the v4.5.0 pin: its inherited vectors execute ./zcash-tx (Ycash builds ycash-tx) and,
+        # with that name linked, ten cases still expect Zcash t1... addresses where Ycash prints
+        # s1... (chainparams.cpp PUBKEY_ADDRESS 0x1C,0x28). Both files are frozen at the pin, so
+        # the step runs the other three parts by hand. Recorded in doc/yellowback.md (baseline).
+        run: |
+          make -C src check-TESTS
+          make -C src/secp256k1 check
+          make -C src/univalue check
       - name: Inherited functional tests recorded as passing in Phase 0
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
@@ -565,11 +585,16 @@ jobs:
         run: |
           set -e
           sudo apt-get install -y clang
+          # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
+          # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
+          # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
+          # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
+            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            || { tail -n 60 config.log; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
-            make -C src -j$(nproc) ycashd
+            make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=600
           done
@@ -831,11 +856,16 @@ jobs:
       - name: Fuzz every target for two hours and minimise the corpus
         run: |
           set -e
+          # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
+          # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
+          # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
+          # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address' LDFLAGS='-fsanitize=fuzzer,address'
+            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            || { tail -n 60 config.log; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
-            make -C src -j$(nproc) ycashd
+            make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=7200 || true
             # Crashes become permanent replay cases; the minimised corpus (seeds + new coverage) replaces input/.

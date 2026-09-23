@@ -334,8 +334,9 @@ export DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up && ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet check
 
 # fuzz (Ycash's own harness: --enable-fuzz-main replaces main(); zcutil/clean.sh removes src/fuzz.cpp, confirming the layout)
-CONFIG_SITE="$PWD/depends/<triple>/share/config.site" ./configure --enable-fuzz-main CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer,address'
-ln -sf fuzzing/YellowbackEvaluate/fuzz.cpp src/fuzz.cpp && make -C src -j8 ycashd
+# fuzzer-no-link at configure time: -fsanitize=fuzzer links libFuzzer's main(), and configure's own "C++ compiler works" program has one ("cannot create executables")
+CONFIG_SITE="$PWD/depends/<triple>/share/config.site" ./configure --enable-fuzz-main CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address'
+ln -sf fuzzing/YellowbackEvaluate/fuzz.cpp src/fuzz.cpp && make -C src -j8 ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
 src/ycashd src/fuzzing/YellowbackEvaluate/output src/fuzzing/YellowbackEvaluate/input -max_len=4096   # libFuzzer; corpus in, findings out
 ../.venv/bin/python src/test/gen_yellowback_corpus.py --check                                          # embedded C++ corpus == input/ files
 ```
@@ -388,6 +389,13 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
   framework and `main.cpp`/`net.cpp`/`miner.cpp`/`rpc/mining.cpp`/`chainparams.cpp` are
   byte-identical to `ycash-legacy`, and the failure reproduces with the one framework fix of this
   phase reverted, so they are the pin's, not the fork's.
+- `make check` cannot pass at the pin (found by the CI nightly, 2026-09-22): the inherited
+  `src/test/bitcoin-util-test.py` executes `./zcash-tx`, which Ycash v4.5.0 renamed to `ycash-tx`
+  (`src/Makefile.am`) without touching `src/test/data/bitcoin-util-test.json`, and with the name
+  linked ten of its 22 cases still expect Zcash `t1…` addresses where Ycash prints `s1…`
+  (`chainparams.cpp` `PUBKEY_ADDRESS` = 0x1C,0x28). Both files are byte-identical to
+  `ycash-legacy`. CI runs the rest of `make check` by hand: `make -C src check-TESTS`
+  (`test_bitcoin`, `ycash-gtest`), then `secp256k1` and `univalue` `check`.
 - `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py`: 52 tests OK (Phase 7 replaced `test_yellowback_fed.py`). `pyflakes` over
   `qa/rpc-tests/yellowback_*.py` and `yellowback_util.py`: clean.
 - Consensus set (`src/consensus`, `src/script`, `src/primitives`, `src/pow`, `chainparams.cpp`,
