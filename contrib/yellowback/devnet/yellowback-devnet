@@ -404,24 +404,21 @@ def lightwalletd_binary(baseline=False, override=None):
     if baseline: return os.path.join(WORKSPACE, "wt", "lightwalletd-legacy-bin", "lightwalletd-legacy")
     return os.environ.get("YELLOWBACK_LWD_BIN") or os.path.join(WORKSPACE, "wt", "lightwalletd-dd-bin", "lightwalletd")
 
-def lightwalletd_conf(directory, node=USER):
-    """lightwalletd reads rpcbind/rpcport/rpcuser/rpcpassword from a conf file; the node's own
-    ycash.conf has no rpcbind, so write a sibling file with the four keys and nothing else."""
-    user, password = rpc_auth_pair(node)
-    conf = os.path.join(node_dir(directory, node), "lightwalletd.conf")
-    with open(conf, "w") as file:
-        file.write("rpcbind=127.0.0.1\nrpcport=%d\nrpcuser=%s\nrpcpassword=%s\n" % (rpc_port(node), user, password))
-    return conf
-
 def lightwalletd_command(directory, binary, port, node=USER, extra=None):
-    return [binary, "-conf-file", lightwalletd_conf(directory, node), "-no-tls", "-bind-addr", "127.0.0.1:%d" % port,
-            "-log-file", os.path.join(node_dir(directory, node), "lightwalletd.log"),
-            "-params-port", str(port + 1000), "-metrics-port", str(port + 2000)] + list(extra or [])
+    """The zcash/lightwalletd 0.4.6 lineage (yodl): the four --rpc* flags bypass its conf file
+    (frontend/rpc_client.go), --data-dir must be writable (its default is /var/lib/lightwalletd),
+    --no-tls-very-insecure serves plaintext gRPC on --grpc-bind-addr, metrics on --http-bind-addr."""
+    user, password = rpc_auth_pair(node)
+    data_dir = os.path.join(node_dir(directory, node), "lightwalletd")
+    os.makedirs(data_dir, exist_ok=True)
+    return [binary, "--rpcuser", user, "--rpcpassword", password, "--rpchost", "127.0.0.1", "--rpcport", str(rpc_port(node)),
+            "--no-tls-very-insecure", "--grpc-bind-addr", "127.0.0.1:%d" % port, "--http-bind-addr", "127.0.0.1:%d" % (port + 2000),
+            "--data-dir", data_dir, "--log-file", os.path.join(node_dir(directory, node), "lightwalletd.log")] + list(extra or [])
 
 def lightwalletd_probe(port, timeout=5, yellowback=False):
     """GetLightdInfo + GetLatestBlock (and, with yellowback, every YellowbackStreamer method once)
     through the fork's cmd/lwdinfo (needs go); dict or raises."""
-    command = ["go", "run", "./cmd/lwdinfo", "-server", "127.0.0.1:%d" % port, "-timeout", "%ds" % timeout]
+    command = ["go", "run", "-mod=vendor", "./testtools/lwdinfo", "-server", "127.0.0.1:%d" % port, "-timeout", "%ds" % timeout]
     if yellowback: command.append("-yellowback")
     out = subprocess.check_output(command, cwd=LWD_REPO, text=True, stderr=subprocess.PIPE)
     return json.loads(out)
@@ -440,7 +437,7 @@ def lightwalletd_check(state):
     height = rpc(state, USER).getblockcount()
     if "latestHeight" not in info: return "lightwalletd has no cached block after 20s (%s)" % info.get("latestError")
     if abs(int(info["latestHeight"]) - height) > 2: return "lightwalletd is at %s, node0 at %d" % (info["latestHeight"], height)
-    if "-yellowback" in (lwd.get("extra") or []):
+    if "--yellowback" in (lwd.get("extra") or []):   # this lineage's cobra flag (the yecdev build took -yellowback)
         # Started with the flag: every YellowbackStreamer method must answer (ok, or the node's own
         # FailedPrecondition for a harmless input); Unimplemented means the service is not registered.
         try: yed = lightwalletd_probe(lwd["port"], yellowback=True)["yellowback"]
@@ -466,7 +463,7 @@ def lightwalletd(args):
     if not args.baseline and not args.bin and not os.access(binary, os.X_OK):
         os.makedirs(os.path.dirname(binary), exist_ok=True)
         print("building %s from %s" % (binary, LWD_REPO))
-        subprocess.check_call(["go", "build", "-o", binary, "./cmd/server"], cwd=LWD_REPO, env=dict(os.environ, CGO_ENABLED="0"))
+        subprocess.check_call(["go", "build", "-mod=vendor", "-o", binary, "."], cwd=LWD_REPO, env=dict(os.environ, CGO_ENABLED="0"))
     if not os.access(binary, os.X_OK):
         sys.exit("lightwalletd not found at %s%s" % (binary, "; build it with lightwalletd-dd/scripts/build-baseline.sh" if args.baseline else ""))
     import shlex
