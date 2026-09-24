@@ -383,8 +383,33 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
   while `SendMessages` takes `TRY cs_vSend` > `cs_main` (`net.cpp:1741`), and `sync.cpp:132`
   asserts. All four files are byte-identical to `ycash-legacy` at those sites; every functional
   script with a peer fails the same way (only `reindex.py` passes). Reproduced locally
-  2026-09-23. The CI `lockorder` job therefore cannot produce evidence about Yellowback's own
-  `cs_yellowback` ordering without a debug-only switch in `sync.cpp` (owner decision pending).
+  2026-09-23. So the CI `lockorder` job builds with `CPPFLAGS=-DDEBUG_LOCKORDER_LOGONLY`
+  (owner decision, 2026-09-23): `sync.cpp` still detects and logs every inversion, the process
+  no longer aborts, and the job fails on any report that names `cs_yellowback`, a `yellowback/`
+  site or a `yed_` RPC. The switch is dead code in every other build.
+- What the armed detector then found (2026-09-23), all fixed in the same commit: (1) two
+  fork-side inversions of the order the fork documents (N25: `cs_main` > `cs_wallet` >
+  `mempool.cs` > `cs_yellowback`) — `YellowbackWallet::Reconcile` and the raw-transaction burn
+  check took `cs_wallet` under `cs_yellowback`, and the wallet RPCs held `cs_yellowback` while
+  building or committing, which reaches `mempool.cs` through `FetchInputs`,
+  `CommitTransaction` and `AcceptToMemoryPool`; every RPC site now takes `mempool.cs` first, the
+  two wallet sites take `cs_wallet` first, and `Bonds`/`HotKeys` (no callers) demand both from
+  the caller. (2) An **inherited missing lock**: `AsyncRPCOperation_sendmany::find_utxos`
+  (`src/wallet/asyncrpcoperation_sendmany.cpp`, not frozen) calls `CWallet::AvailableCoins`,
+  which asserts `cs_wallet`, on the async worker thread with no lock at all — a wallet-map data
+  race in every Ycash v4.5.0 `z_sendmany`, and under `DEBUG_LOCKORDER` a segfault (the worker's
+  lock stack is NULL; `AssertLockHeldInternal` dereferenced it). `find_utxos` now takes
+  `LOCK2(cs_main, cs_wallet)` as later Zcash releases do, and `sync.cpp`'s assertion helpers
+  treat a NULL stack as "nothing held". Surfaced by the Sapling-funded mint in
+  `yellowback_attest_wallet`, which is a `z_sendmany` underneath. (3) With those gone, two more
+  pairs surfaced: `yed_getinfo` read the wallet's locked-output count (`cs_wallet`) under
+  `cs_yellowback` — it now reads it under `cs_main` alone, first; and the miner's `TemplateView`
+  holds `cs_yellowback` across `TestBlockValidity` (script-check queue `ControlMutex`) while
+  `ConnectTip` takes `ControlMutex` before `CheckConnect`'s `cs_yellowback`. Both paths hold
+  `cs_main` from their first line, so that pair cannot deadlock; `qa/yellowback-lockorder-check.py`
+  allow-lists exactly it with the proof, and the structural fix (drop the view before
+  `TestBlockValidity`, one line in the frozen `miner.cpp`) is an open item. The CI job runs the
+  checker over every node's `debug.log`.
 - Variant builds and `config.site`: the depends `config.site` assigns `CC`/`CXX` *after*
   autoconf has read the command line and nothing restores them, so `./configure CC=clang` under
   `CONFIG_SITE` silently builds with depends' clang 18 (`-target x86_64-pc-linux-gnu`,

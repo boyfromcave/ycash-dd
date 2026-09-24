@@ -571,6 +571,11 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     YellowbackIndex& index = EnsureIndex();
     const int64_t now = GetTime();
     LOCK(cs_main);
+#ifdef ENABLE_WALLET
+    // Lock order (N25): LockedCount takes cs_wallet, so it is read before mempool.cs and cs_yellowback.
+    const int64_t lockedOutputs = yellowback::g_yellowbackWallet ? (int64_t)yellowback::g_yellowbackWallet->LockedCount() : (int64_t)0;
+#endif
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     const yellowback::Params& p = index.GetParams();
     State st(index.View());
@@ -601,7 +606,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
 #ifdef ENABLE_WALLET
     // H10: what the Yellowback wallet layer holds locked, and that it is there at all. The GUI
     // reads a mismatch between lockedOutputs and yed_listunspent as the trigger for yed_lockcoins.
-    o.pushKV("lockedOutputs", yellowback::g_yellowbackWallet ? (int64_t)yellowback::g_yellowbackWallet->LockedCount() : (int64_t)0);
+    o.pushKV("lockedOutputs", lockedOutputs);
     o.pushKV("protectedByIndex", yellowback::g_yellowbackWallet != nullptr);
 #else
     o.pushKV("lockedOutputs", (int64_t)0);
@@ -814,6 +819,7 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(cs_main);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const yellowback::Params& p = index.GetParams();
@@ -1331,6 +1337,7 @@ UniValue yed_validaterawtransaction(const UniValue& params, bool fHelp)
     CTransaction tx;
     if (!DecodeHexTx(tx, params[0].get_str())) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
     LOCK(cs_main);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const int next = IndexHeight(index) + 1;
@@ -1391,6 +1398,7 @@ UniValue yed_getblockverdict(const UniValue& params, bool fHelp)
     YellowbackIndex& index = EnsureIndex();
     uint256 hash = ParseHashV(params[0], "blockhash");
     LOCK(cs_main);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     BlockMap::iterator mi = mapBlockIndex.find(hash);
     if (mi == mapBlockIndex.end()) throw JSONRPCError(RPC_INVALID_PARAMETER, "block not found");
@@ -1788,6 +1796,7 @@ UniValue yed_getnotice(const UniValue& params, bool fHelp)
     YellowbackIndex& index = EnsureIndex();
     uint256 txid = ParseHashV(params[0], "vaultTxid");
     LOCK(cs_main);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());

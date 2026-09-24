@@ -239,6 +239,7 @@ BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -262,6 +263,7 @@ BuiltTx RunVaultSpend(YellowbackWallet& yw, std::function<BuiltTx()> build, bool
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureWalletIsUnlocked();
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     try {
@@ -336,6 +338,7 @@ CarrierRecord CarrierStep(YellowbackWallet& yw, const std::vector<unsigned char>
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -408,6 +411,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -431,6 +435,7 @@ UniValue CompleteMint(YellowbackWallet& yw, Cents cents, int lockBlocks, const s
         }
         LOCK2(cs_main, pwalletMain->cs_wallet);
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -501,6 +506,7 @@ BuiltTx CompleteSimple(YellowbackWallet& yw, std::function<BuiltTx(CReserveKey&)
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureWalletIsUnlocked();
     {
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -652,6 +658,7 @@ UniValue yed_listunspent(const UniValue& params, bool fHelp)
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     UniValue arr(UniValue::VARR);
@@ -706,6 +713,7 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -750,6 +758,7 @@ static UniValue DoSend(YellowbackWallet& yw, const std::vector<std::pair<CScript
     BuiltTx built;
     CReserveKey reservekey(pwalletMain);
     {
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -835,6 +844,7 @@ UniValue yed_claim(const UniValue& params, bool fHelp)
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -888,6 +898,7 @@ UniValue yed_claimnotice(const UniValue& params, bool fHelp)
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -936,6 +947,7 @@ UniValue yed_sweepcarriers(const UniValue& params, bool fHelp)
         BuiltTx built;
         bool nothing = false;
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -992,6 +1004,7 @@ UniValue yed_registerattestor(const UniValue& params, bool fHelp)
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -1045,6 +1058,7 @@ UniValue yed_withdrawbond(const UniValue& params, bool fHelp)
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -1100,6 +1114,7 @@ UniValue yed_revive(const UniValue& params, bool fHelp)
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
         {
+            LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
             LOCK(index.cs_yellowback);
             EnsureHealthy(index);
             try {
@@ -1138,6 +1153,7 @@ UniValue yed_reportequivocation(const UniValue& params, bool fHelp)
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureWalletIsUnlocked();
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         EnsureHealthy(index);
         try {
@@ -1183,6 +1199,7 @@ UniValue yed_signattestation(const UniValue& params, bool fHelp)
     const int64_t price = params[1].get_int64();
     LOCK2(cs_main, pwalletMain->cs_wallet);
     EnsureWalletIsUnlocked();
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const int cited = params.size() > 2 && !params[2].isNull() ? params[2].get_int() : IndexHeight(index) - g_yellowbackMintLag;
@@ -1254,6 +1271,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
     YellowbackIndex& index = *yw.Index();
     std::string status = params.size() > 0 && !params[0].isNull() ? params[0].get_str() : "";
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     State st(index.View());
@@ -1437,6 +1455,7 @@ UniValue yed_estimatesend(const UniValue& params, bool fHelp)
         amount = params[0].get_int64();
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
     LOCK(index.cs_yellowback);
     EnsureHealthy(index);
     const yellowback::Params& p = index.GetParams();
@@ -1498,6 +1517,7 @@ UniValue yed_unlockcoin(const UniValue& params, bool fHelp)
     LOCK2(cs_main, pwalletMain->cs_wallet);
     int64_t cents = 0;
     {
+        LOCK(mempool.cs);              // lock order (N25): mempool.cs before cs_yellowback
         LOCK(index.cs_yellowback);
         if (index.IsHealthy()) {
             std::optional<TokenRecord> t = State(index.View()).GetToken(out);

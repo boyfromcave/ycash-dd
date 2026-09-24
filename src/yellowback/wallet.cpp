@@ -210,9 +210,10 @@ std::vector<CarrierRecord> YellowbackWallet::LapsedCarriers(int tipHeight) const
 
 std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::Bonds() const
 {
+    // Lock order (N25): the caller holds cs_wallet before cs_yellowback; neither is taken here.
+    AssertLockHeld(wallet->cs_wallet);
     AssertLockHeld(index->cs_yellowback);
     std::vector<std::pair<uint16_t, AttestorRecord>> out;
-    LOCK(wallet->cs_wallet);
     for (const auto& kv : State(index->View()).Attestors()) {
         const CPubKey k = kv.second.BondKey();
         if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
@@ -222,9 +223,10 @@ std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::Bonds() const
 
 std::vector<std::pair<uint16_t, AttestorRecord>> YellowbackWallet::HotKeys() const
 {
+    // Lock order (N25): the caller holds cs_wallet before cs_yellowback; neither is taken here.
+    AssertLockHeld(wallet->cs_wallet);
     AssertLockHeld(index->cs_yellowback);
     std::vector<std::pair<uint16_t, AttestorRecord>> out;
-    LOCK(wallet->cs_wallet);
     for (const auto& kv : State(index->View()).Attestors()) {
         const CPubKey k = kv.second.AttestorKey();
         if (k.IsValid() && wallet->HaveKey(k.GetID())) out.push_back(kv);
@@ -426,10 +428,16 @@ void YellowbackWallet::PreLock(const CTransaction& tx)
 
 void YellowbackWallet::Reconcile()
 {
-    // Collect under cs_yellowback, then act under cs_wallet (B15).
+    // Collect under cs_yellowback, then act under cs_wallet (B15). Lock order (N25): cs_wallet is
+    // never taken under cs_yellowback, so the copy of ourLocks comes first.
     std::set<COutPoint> tokensMine;
     std::set<COutPoint> release;
     int tipHeight = -1;
+    std::set<COutPoint> ours;
+    {
+        LOCK(wallet->cs_wallet);
+        ours = ourLocks;
+    }
     {
         LOCK(index->cs_yellowback);
         if (!index->IsHealthy()) return;
@@ -437,11 +445,6 @@ void YellowbackWallet::Reconcile()
         std::optional<TipRecord> tip = st.GetTip();
         if (tip.has_value()) tipHeight = tip->height;
         for (const YedCoin& c : AllCoins()) tokensMine.insert(c.outpoint);
-        std::set<COutPoint> ours;
-        {
-            LOCK(wallet->cs_wallet);
-            ours = ourLocks;
-        }
         for (const COutPoint& o : ours) {
             if (tokensMine.count(o)) continue;
             // Release only when the outpoint's transaction is confirmed in the index and assigned it no cents
@@ -519,10 +522,10 @@ bool YedBurnedByRawTransaction(const CTransaction& tx, std::string& reason)
     int64_t cents = 0;
     std::string outpoints;
     {
+        LOCK(yw.Wallet()->cs_wallet);           // lock order (N25): cs_wallet before cs_yellowback
         LOCK(index->cs_yellowback);
         if (!index->IsHealthy()) return false;
         State st(index->View());
-        LOCK(yw.Wallet()->cs_wallet);
         for (const CTxIn& in : tx.vin) {
             std::optional<TokenRecord> t = st.GetToken(in.prevout);
             if (!t.has_value()) continue;

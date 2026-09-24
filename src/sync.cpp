@@ -129,7 +129,15 @@ static void potential_deadlock_detected(const std::pair<void*, void*>& mismatch,
         }
         LogPrintf(" %s\n", i.second.ToString());
     }
+#ifdef DEBUG_LOCKORDER_LOGONLY
+    // Yellowback CI (the lockorder job): Ycash v4.5.0 itself trips this assertion on the first
+    // peer connection (getpeerinfo's cs_main > cs_vNodes > cs_vSend against SendMessages' TRY
+    // cs_vSend > cs_main) before any Yellowback code runs. With this switch every inversion is
+    // still detected and logged as above; the job fails on any that names Yellowback.
+    (void)onlyMaybeDeadlock;
+#else
     assert(onlyMaybeDeadlock);
+#endif
 }
 
 static void push_lock(void* c, const CLockLocation& locklocation, bool fTry)
@@ -185,6 +193,10 @@ std::string LocksHeld()
 
 void AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine, void* cs)
 {
+    // A thread that has never taken a lock has no stack yet: report the missing lock instead of
+    // dereferencing NULL (the async RPC worker did exactly that on Ycash v4.5.0).
+    if (lockstack.get() == NULL)
+        lockstack.reset(new LockStack);
     for (const std::pair<void*, CLockLocation> & i : *lockstack)
         if (i.first == cs)
             return;
@@ -194,6 +206,8 @@ void AssertLockHeldInternal(const char* pszName, const char* pszFile, int nLine,
 
 void AssertLockNotHeldInternal(const char* pszName, const char* pszFile, int nLine, void* cs)
 {
+    if (lockstack.get() == NULL)
+        return;
     for (const std::pair<void*, CLockLocation>& i : *lockstack) {
         if (i.first == cs) {
             fprintf(stderr, "Assertion failed: lock %s held in %s:%i; locks held:\n%s", pszName, pszFile, nLine, LocksHeld().c_str());

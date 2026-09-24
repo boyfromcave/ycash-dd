@@ -851,6 +851,11 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase, TxValues& txVa
     if (!useanyutxo_) {
         destinations.insert(fromtaddr_);
     }
+    // AvailableCoins asserts cs_wallet held and reads the wallet maps; this runs on the async RPC
+    // worker thread, which Ycash v4.5.0 never locked here (the fix later Zcash releases carry).
+    // Found by the Yellowback lockorder CI job: under DEBUG_LOCKORDER the unlocked assertion
+    // dereferenced the worker's empty lock stack during a Sapling-funded mint.
+    LOCK2(cs_main, pwalletMain->cs_wallet);
     pwalletMain->AvailableCoins(
             t_inputs_,
             false,              // fOnlyConfirmed
