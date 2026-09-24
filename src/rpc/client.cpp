@@ -156,6 +156,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_getfeepayee", 0 },
     { "yed_getfeepayee", 1 },
     { "yed_listvaults", 1 },
+    { "yed_listtokens", 0 },
+    { "yed_listtokens", 1 },
     { "yed_listvaults", 2 },
     { "yed_estimatecollateral", 0 },
     { "yed_estimatecollateral", 1 },

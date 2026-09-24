@@ -619,6 +619,35 @@ Result of `yed_listvaults`:
 ]
 ```
 
+### `yed_listtokens <addresses> [minHeight]`
+
+Arguments: `addresses` (array of strings, 1..100; each a YED address `ye…`/`yt…`/`yr…` or the
+transparent P2PKH form `s1…`/`sm…` of the same key hash — the two name one script), `minHeight`
+(number, default `0`: only tokens created at or above it). **Node context**: the `Tokens` records
+(§3.6) whose `scriptPubKey` pays one of the addresses, whoever holds the keys — the authoritative
+YED UTXO set of an address, which `yed_listunspent` gives only for the node's own wallet. This is
+the RPC a light-client server proxies for a wallet it has never seen (lightwalletd plan D-L-7,
+`GetAddressTokens`). A full scan of the live token set (spent tokens are erased by IN-1), sorted
+by `(height, txid, vout)`; `address` is the YED form, `transparentAddress` the `s…` form. Refuses
+with `too-many-addresses` (none, or more than 100) and `invalid-address` (a string that is neither
+form on this network).
+
+Result of `yed_listtokens`:
+
+```json
+[
+  {
+    "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
+    "vout": 1,
+    "cents": 100000,
+    "valueZat": 10000,
+    "height": 332,
+    "address": "yrExampleOwnerAddress111111111111111",
+    "transparentAddress": "smQvTmAz2ExamplePayoutAddress1111111"
+  }
+]
+```
+
 ### `yed_listclaimable`
 
 Arguments: none. ACTIVE vaults past `claimHeight` that are underwater at the tip snapshot — the
@@ -1855,6 +1884,8 @@ what `yellowback_rpc_contract.py` uses.
 | `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap |
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
+| `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |
+| `invalid-address` | `yed_listtokens` | a string that is neither a YED nor a transparent P2PKH address of this network |
 | `vault-not-found`, `vault-not-active`, `vault-not-owned` | `yed_redeem`, `yed_claim`, `yed_sweep`, `yed_getvault` | an unknown txid; a CLOSED or CLAIMED vault (a VOID vault is releasable by `yed_redeem`, L14); another wallet's vault |
 | `vault-locked` | `yed_redeem`, `yed_sweep` | tip below `lockHeight` (ACTIVE and VOID alike) |
 | `claim-not-yet` | `yed_claim` | tip below `claimHeight` |

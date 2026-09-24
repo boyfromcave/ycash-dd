@@ -1157,6 +1157,75 @@ UniValue yed_listvaults(const UniValue& params, bool fHelp)
     return list;
 }
 
+UniValue yed_listtokens(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "yed_listtokens [\"address\",...] ( minHeight )\n"
+            "\nThe YED outputs (Tokens records) paying the given addresses, whoever holds the keys: the node-context\n"
+            "answer to yed_listunspent for a light client (lightwalletd plan D-L-7). Addresses may be YED (ye/yt/yr)\n"
+            "or transparent P2PKH (s1/sm) forms of the same key hash; 1..100 of them. minHeight (default 0) keeps\n"
+            "only tokens created at or above that height. Sorted by (height, txid, vout).\n");
+
+    YellowbackIndex& index = EnsureIndex();
+    const yellowback::Params& p = index.GetParams();
+    if (!params[0].isArray()) throw JSONRPCError(RPC_INVALID_PARAMETER, "addresses must be an array");
+    const UniValue& addresses = params[0].get_array();
+    if (addresses.empty() || addresses.size() > 100) throw JSONRPCError(RPC_INVALID_PARAMETER, "too-many-addresses: 1..100 addresses");
+    int minHeight = params.size() > 1 && !params[1].isNull() ? params[1].get_int() : 0;
+    if (minHeight < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "minHeight must be >= 0");
+    // Every accepted address is one P2PKH script; both forms of one key hash are the same script.
+    std::map<CScript, CKeyID> wanted;
+    for (size_t i = 0; i < addresses.size(); i++) {
+        if (!addresses[i].isStr()) throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid-address: addresses must be strings");
+        const std::string str = addresses[i].get_str();
+        CKeyID keyID;
+        if (!DecodeAddress(str, p, keyID)) {
+            KeyIO keyIO(::Params());
+            CTxDestination dest = keyIO.DecodeDestination(str);
+            const CKeyID* id = std::get_if<CKeyID>(&dest);
+            if (!id) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid-address: " + str + " is not a YED or transparent P2PKH address of this network");
+            keyID = *id;
+        }
+        wanted[GetScriptForDestination(keyID)] = keyID;
+    }
+    LOCK(index.cs_yellowback);
+    EnsureHealthy(index);
+    struct Row { int32_t height; COutPoint out; CKeyID keyID; TokenRecord owned; };
+    std::vector<Row> rows;
+    index.View().Iterate("K", [&](const std::string& k, const std::string& raw) {
+        TokenRecord t;
+        if (!DeserializeRecord(raw, t)) return true;
+        auto it = wanted.find(t.scriptPubKey);
+        if (it == wanted.end() || t.height < minHeight) return true;
+        Row r;
+        r.height = t.height;
+        r.out = COutPoint(keys::OutPointHashOf(k), keys::OutPointIndexOf(k));
+        r.owned = t;
+        r.keyID = it->second;
+        rows.push_back(r);
+        return true;
+    });
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+        if (a.height != b.height) return a.height < b.height;
+        if (a.out.hash != b.out.hash) return a.out.hash < b.out.hash;
+        return a.out.n < b.out.n;
+    });
+    UniValue list(UniValue::VARR);
+    for (const Row& r : rows) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("txid", r.out.hash.GetHex());
+        o.pushKV("vout", (int)r.out.n);
+        o.pushKV("cents", r.owned.cents);
+        o.pushKV("valueZat", r.owned.nValue);
+        o.pushKV("height", r.height);
+        o.pushKV("address", EncodeAddress(r.keyID, p));
+        o.pushKV("transparentAddress", P2PKHAddress(r.keyID));
+        list.push_back(o);
+    }
+    return list;
+}
+
 UniValue yed_listclaimable(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
@@ -1836,6 +1905,7 @@ static const CRPCCommand commands[] =
     { "yellowback", "yed_getvault",                &yed_getvault,                 true  },
     { "yellowback", "yed_listvaults",              &yed_listvaults,               true  },
     { "yellowback", "yed_listclaimable",           &yed_listclaimable,            true  },
+    { "yellowback", "yed_listtokens",              &yed_listtokens,               true  },
     { "yellowback", "yed_gettxinfo",               &yed_gettxinfo,                true  },
     { "yellowback", "yed_decodepayload",           &yed_decodepayload,            true  },
     { "yellowback", "yed_validaterawtransaction",  &yed_validaterawtransaction,   true  },
