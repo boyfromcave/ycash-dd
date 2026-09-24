@@ -260,6 +260,19 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         c.check('yed_gettxinfo', user.yed_gettxinfo(mint_a['txid']))
         assert_rpc_error('vault-not-found', user.yed_getvault, '22' * 32)
         rows = c.check('yed_listunspent', user.yed_listunspent())
+        # yed_listtokens (N1, lightwalletd plan D-L-7): node context; for the wallet's own addresses it
+        # is yed_listunspent minus the wallet-only columns, in (height, txid, vout) order.
+        own = sorted({r['address'] for r in rows})
+        tokens = c.check('yed_listtokens', user.yed_listtokens(own))
+        assert_equal(sorted((t['txid'], t['vout'], t['cents'], t['valueZat'], t['height'], t['address']) for t in tokens),
+                     sorted((r['txid'], r['vout'], r['cents'], r['valueZat'], r['height'], r['address']) for r in rows))
+        assert_equal([(t['height'], t['txid'], t['vout']) for t in tokens], sorted((t['height'], t['txid'], t['vout']) for t in tokens))
+        transparent = [user.yed_validateaddress(a)['transparentAddress'] for a in own]
+        assert_equal(user.yed_listtokens(transparent), tokens)                          # the s… form names the same script
+        assert_equal(user.yed_listtokens(own, max(t['height'] for t in tokens) + 1), [])  # minHeight past every token
+        assert_rpc_error('too-many-addresses', user.yed_listtokens, [])
+        assert_rpc_error('too-many-addresses', user.yed_listtokens, own * 101)
+        assert_rpc_error('invalid-address', user.yed_listtokens, ['ys1notanaddress'])
         assert_equal(len(rows), 3)
         c.check('yed_lockcoins', user.yed_lockcoins())
         positions = c.check('yed_listpositions', user.yed_listpositions())

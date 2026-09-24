@@ -503,6 +503,18 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_equal(nodes[4].yed_getinfo()['rebuilt'], False)
         assert_equal(self.statehash(4), self.statehash(0))
         self.sync_all(blocks_only=True)
+
+        print('listtokens_matches_wallets: yed_listtokens on every enforcing node equals each wallet node\'s yed_listunspent')
+        # N1 (lightwalletd plan D-L-7): the node-context scan of Tokens by script must agree, on every node,
+        # with what a wallet node sees as its own YED — the wallet reads the same records through IsMine.
+        for wallet_node in self.enforcing_nodes():
+            unspent = wallet_node.yed_listunspent()
+            if not unspent: continue
+            addresses = sorted({r['address'] for r in unspent})
+            listed = nodes[0].yed_listtokens(addresses)
+            assert_equal(sorted((t['txid'], t['vout'], t['cents'], t['height']) for t in listed),
+                         sorted((r['txid'], r['vout'], r['cents'], r['height']) for r in unspent))
+            for node in self.enforcing_nodes(): assert_equal(node.yed_listtokens(addresses), listed)
         self.checkpoint('v3 cases')
 
 
