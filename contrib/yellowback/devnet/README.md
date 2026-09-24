@@ -37,6 +37,7 @@ yellowback-devnet up --agents       # the pools quote through real yellowback-qu
 yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
 yellowback-devnet status | check | mine N [node] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
+yellowback-devnet lightwalletd [start|stop|status] [--baseline] [--port 9067] [--extra=-yellowback]   # lightwalletd-dd against node0 (docs/plans/yellowback-lightwalletd-plan.md)
 ```
 
 `check` exits 0 iff activation is active, minting is allowed, every automated pool is eligible, the layer is ARMED with `poolFresh ≥ M_SELECT`, and every automated agent and process is alive. It is the machine-checkable gate; `status` is the human one.

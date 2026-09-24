@@ -392,6 +392,100 @@ def wallet_command(directory, node=USER, app=None):
             WORKSPACE, "yecwallet-dd", "build", "macos-arm64", "bin", "yecwallet.app", "Contents", "MacOS", "yecwallet")
     return [os.path.expanduser(app), "--conf", os.path.join(node_dir(directory, node), "ycash.conf"), "--no-embedded"]
 
+# ---------------------------------------------------------------------------------- lightwalletd
+
+LWD_REPO = os.path.join(WORKSPACE, "lightwalletd-dd")
+LWD_PORT = 9067
+
+def lightwalletd_binary(baseline=False, override=None):
+    """The server to run: the fork's build (built here with `go build` if missing), or the baseline
+    binary scripts/build-baseline.sh makes from lightwalletd-legacy (plan section 6.3's gate)."""
+    if override: return os.path.expanduser(override)
+    if baseline: return os.path.join(WORKSPACE, "wt", "lightwalletd-legacy-bin", "lightwalletd-legacy")
+    return os.environ.get("YELLOWBACK_LWD_BIN") or os.path.join(WORKSPACE, "wt", "lightwalletd-dd-bin", "lightwalletd")
+
+def lightwalletd_conf(directory, node=USER):
+    """lightwalletd reads rpcbind/rpcport/rpcuser/rpcpassword from a conf file; the node's own
+    ycash.conf has no rpcbind, so write a sibling file with the four keys and nothing else."""
+    user, password = rpc_auth_pair(node)
+    conf = os.path.join(node_dir(directory, node), "lightwalletd.conf")
+    with open(conf, "w") as file:
+        file.write("rpcbind=127.0.0.1\nrpcport=%d\nrpcuser=%s\nrpcpassword=%s\n" % (rpc_port(node), user, password))
+    return conf
+
+def lightwalletd_command(directory, binary, port, node=USER, extra=None):
+    return [binary, "-conf-file", lightwalletd_conf(directory, node), "-no-tls", "-bind-addr", "127.0.0.1:%d" % port,
+            "-log-file", os.path.join(node_dir(directory, node), "lightwalletd.log"),
+            "-params-port", str(port + 1000), "-metrics-port", str(port + 2000)] + list(extra or [])
+
+def lightwalletd_probe(port, timeout=5, yellowback=False):
+    """GetLightdInfo + GetLatestBlock (and, with yellowback, every YellowbackStreamer method once)
+    through the fork's cmd/lwdinfo (needs go); dict or raises."""
+    command = ["go", "run", "./cmd/lwdinfo", "-server", "127.0.0.1:%d" % port, "-timeout", "%ds" % timeout]
+    if yellowback: command.append("-yellowback")
+    out = subprocess.check_output(command, cwd=LWD_REPO, text=True, stderr=subprocess.PIPE)
+    return json.loads(out)
+
+def lightwalletd_check(state):
+    """None when the recorded server answers and follows node 0; else the problem."""
+    lwd = state.get("lightwalletd") or {}
+    if not agent_alive(lwd.get("pid")): return "lightwalletd (pid %s) is not running" % lwd.get("pid")
+    # The ingestor polls the node every 5 s; right after `start` the cache is legitimately empty.
+    for _ in range(4):
+        try: info = lightwalletd_probe(lwd["port"])
+        except subprocess.CalledProcessError as error: return "lightwalletd probe failed: %s" % error.stderr.strip()
+        if "latestHeight" in info: break
+        time.sleep(5)
+    if info.get("chainName") != "regtest": return "lightwalletd reports chain %r, not regtest" % info.get("chainName")
+    height = rpc(state, USER).getblockcount()
+    if "latestHeight" not in info: return "lightwalletd has no cached block after 20s (%s)" % info.get("latestError")
+    if abs(int(info["latestHeight"]) - height) > 2: return "lightwalletd is at %s, node0 at %d" % (info["latestHeight"], height)
+    if "-yellowback" in (lwd.get("extra") or []):
+        # Started with the flag: every YellowbackStreamer method must answer (ok, or the node's own
+        # FailedPrecondition for a harmless input); Unimplemented means the service is not registered.
+        try: yed = lightwalletd_probe(lwd["port"], yellowback=True)["yellowback"]
+        except subprocess.CalledProcessError as error: return "lightwalletd yellowback probe failed: %s" % error.stderr.strip()
+        bad = {k: v for k, v in yed.items() if "#" not in k and not (v == "ok" or v.startswith("FailedPrecondition"))}
+        if bad: return "lightwalletd Yellowback methods not answering: %s" % json.dumps(bad, sort_keys=True)
+        if yed.get("GetYellowbackInfo#rpcversion") != "3": return "lightwalletd reports yed rpcversion %s" % yed.get("GetYellowbackInfo#rpcversion")
+    return None
+
+def lightwalletd(args):
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    lwd = state.get("lightwalletd") or {}
+    if args.action == "status":
+        if not lwd: print("no lightwalletd started (`lightwalletd start`)"); return
+        print("lightwalletd pid %s port %s %s, %s" % (lwd.get("pid"), lwd.get("port"), lwd.get("binary"), "running" if agent_alive(lwd.get("pid")) else "not running"))
+        if agent_alive(lwd.get("pid")):
+            try: print(json.dumps(lightwalletd_probe(lwd["port"]), indent=2))
+            except subprocess.CalledProcessError as error: print("probe failed: %s" % error.stderr.strip()); return 1
+        return
+    if args.action == "stop":
+        _kill(lwd.get("pid"), "lightwalletd"); state.pop("lightwalletd", None); save(directory, state); return
+    binary = lightwalletd_binary(args.baseline, args.bin)
+    if not args.baseline and not args.bin and not os.access(binary, os.X_OK):
+        os.makedirs(os.path.dirname(binary), exist_ok=True)
+        print("building %s from %s" % (binary, LWD_REPO))
+        subprocess.check_call(["go", "build", "-o", binary, "./cmd/server"], cwd=LWD_REPO, env=dict(os.environ, CGO_ENABLED="0"))
+    if not os.access(binary, os.X_OK):
+        sys.exit("lightwalletd not found at %s%s" % (binary, "; build it with lightwalletd-dd/scripts/build-baseline.sh" if args.baseline else ""))
+    import shlex
+    extra = shlex.split(args.extra)
+    command = lightwalletd_command(directory, binary, args.port, extra=extra)
+    if args.print: print(" ".join(command)); return
+    if agent_alive(lwd.get("pid")): sys.exit("lightwalletd already running (pid %d); `lightwalletd stop` first" % lwd["pid"])
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    state["lightwalletd"] = {"pid": process.pid, "port": args.port, "binary": binary, "baseline": bool(args.baseline), "extra": extra}
+    save(directory, state)
+    print("lightwalletd started on 127.0.0.1:%d against node0 (pid %d): %s" % (args.port, process.pid, binary))
+    for _ in range(30):
+        time.sleep(1)
+        try: info = lightwalletd_probe(args.port, timeout=3)
+        except subprocess.CalledProcessError: continue
+        print("GetLightdInfo: %s %s chain=%s height=%s" % (info.get("vendor"), info.get("version"), info.get("chainName"), info.get("latestHeight", info.get("blockHeight"))))
+        return
+    print("started, but GetLightdInfo did not answer within 30s (see node0/lightwalletd.log)", file=sys.stderr); return 1
+
 def wait(nodes, state=None):
     sync_blocks(nodes)
     pools = auto_pools(state) if state else POOLS
@@ -581,7 +675,9 @@ def up(args):
     steps = 7 if role != "none" else (6 if attest else 4)
     addresses = [address_of(wif) for wif in POOL_WIFS]
     pool_extra = ["-yellowbackquotemaxage=%d" % QUOTE_MAX_AGE] if agents_wanted else None
-    node_args = {USER: yellowback_node_args(), STOCK: yellowback_node_args(yellowback=False)}
+    # node 0 also serves lightwalletd (`lightwalletd` below): the server's getaddresstxids needs the
+    # address index, which is experimental and needs -txindex (both are only ever set on a fresh datadir here).
+    node_args = {USER: yellowback_node_args() + ["-insightexplorer", "-txindex"], STOCK: yellowback_node_args(yellowback=False)}
     for index, pool in enumerate(POOLS):
         if pool in preset["auto_pools"] or role == "none": node_args[pool] = pool_args(addresses[index], pool_extra)
         else: node_args[pool] = yellowback_node_args(pool_extra)      # your pool: a plain miner, no payout, no signal
@@ -986,8 +1082,12 @@ def status(args):
 # ---------------------------------------------------------------------------------- the small commands
 
 def command_check(args):
-    try: check(load(os.path.abspath(args.dir)))
+    state = load(os.path.abspath(args.dir))
+    try: check(state)
     except Exception as error: print(error, file=sys.stderr); return 1
+    if (state.get("lightwalletd") or {}).get("pid"):
+        problem = lightwalletd_check(state)
+        if problem: print(problem, file=sys.stderr); return 1
     print("devnet check passed")
 
 def mine(args):
@@ -1085,7 +1185,7 @@ def cli(args):
 
 def down(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
-    for name in ("sim", "walk", "heartbeat"):
+    for name in ("sim", "walk", "heartbeat", "lightwalletd"):
         _kill((state.get(name) or {}).get("pid"), name)
     stop_agents(state); stop_attest_agents(state)
     for node in range(state["num_nodes"]):
@@ -1213,6 +1313,11 @@ def main():
     command = add("notice", notice); command.add_argument("vaulttxid")
     command = add("scenario", scenario); command.add_argument("name", nargs="?")
     add("report", report)
+    command = add("lightwalletd", lightwalletd, help="run lightwalletd-dd (or the baseline) against node0: start | stop | status")
+    command.add_argument("action", choices=("start", "stop", "status"), nargs="?", default="start")
+    command.add_argument("--port", type=int, default=LWD_PORT); command.add_argument("--bin", help="server binary (default: build lightwalletd-dd into wt/lightwalletd-dd-bin)")
+    command.add_argument("--baseline", action="store_true", help="run the lightwalletd-legacy build from wt/lightwalletd-legacy-bin instead")
+    command.add_argument("--print", action="store_true"); command.add_argument("--extra", default="", help="extra server flags, one quoted string")
     command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--node", type=int, help="the node to open on (default: your seat)"); command.add_argument("--print", action="store_true")
     command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("--datadir", type=int, metavar="N", help="print node N's datadir and exit"); command.add_argument("args", nargs=argparse.REMAINDER)
     command = add("down", down); command.add_argument("--wipe", action="store_true")
