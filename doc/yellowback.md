@@ -376,7 +376,23 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
 - Yellowback functional scripts (run one process each, `--portseed` 11–15, `BITCOIND` set,
   `DYLD_LIBRARY_PATH` for the Python co-signer): `yellowback_index`, `yellowback_lifecycle`,
   `yellowback_void_mint`, `yellowback_wallet_restore`, `yellowback_sapling` — **all five green**.
-  `yellowback_reorg_stress` (nightly) was not run in this session.
+  `yellowback_reorg_stress` is still the v1 federation script (its v2 adaptation is the open
+  Phase 6 checklist item) and is not run by CI (2026-09-23).
+- `DEBUG_LOCKORDER` (`--enable-debug`) aborts Ycash v4.5.0 itself on the first peer connection:
+  `getpeerinfo` takes `cs_main` > `cs_vNodes` > `cs_vSend` (`rpc/net.cpp:117,68`, `net.cpp:687`)
+  while `SendMessages` takes `TRY cs_vSend` > `cs_main` (`net.cpp:1741`), and `sync.cpp:132`
+  asserts. All four files are byte-identical to `ycash-legacy` at those sites; every functional
+  script with a peer fails the same way (only `reindex.py` passes). Reproduced locally
+  2026-09-23. The CI `lockorder` job therefore cannot produce evidence about Yellowback's own
+  `cs_yellowback` ordering without a debug-only switch in `sync.cpp` (owner decision pending).
+- Variant builds and `config.site`: the depends `config.site` assigns `CC`/`CXX` *after*
+  autoconf has read the command line and nothing restores them, so `./configure CC=clang` under
+  `CONFIG_SITE` silently builds with depends' clang 18 (`-target x86_64-pc-linux-gnu`,
+  `-stdlib=libc++`). That clang keeps its compiler-rt runtimes under the LLVM tarball's
+  `x86_64-unknown-linux-gnu` per-target directory (the mismatch `native_clang.mk` already patches
+  for libc++'s `__config_site`), so `-fsanitize=…`, `--coverage` and `-fsanitize=fuzzer` link
+  tests fail in configure ("linker did not accept requested flags", "Cannot enable RELRO",
+  "cannot create executables"). CI links the host-triple directory to it before configuring.
 - Inherited stock baseline, `qa/pull-tester/rpc-tests.py -j4 --nozmq` over the eleven scripts of
   plan §6.0 item 6, against the fork binary without `-yellowback`: **7 pass** — `mempool_reorg`,
   `mempool_tx_expiry`, `reorg_limit`, `reindex`, `wallet`, `rawtransactions`, `txn_doublespend`

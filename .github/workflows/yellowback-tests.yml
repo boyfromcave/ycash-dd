@@ -534,12 +534,11 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
-      - name: Reorg stress (extended)
-        env:
-          TMPDIR: ${{ runner.temp }}/yellowback-tests
-        run: |
-          mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup yellowback_reorg_stress
+      # Reorg stress (extended) is not run: qa/rpc-tests/yellowback_reorg_stress.py is still the v1
+      # federation script (rosters, anchors, cosigned price transactions) and dies at its first
+      # yed_getinfo field. Its v2 adaptation is the unchecked item of the v2 plan's Phase 6
+      # checklist; reorgs themselves are exercised by index, lifecycle, enforcement, mining,
+      # void_mint, activation, stock_node and the three attest scripts. Removed 2026-09-23 (F-30).
       - name: Build the attestor agent for the agent script
         # The only functional script that runs the shipped Rust binary (v3 plan Phase A4). It
         # SKIPs when the binary is missing, so a crate build failure must fail here, loudly,
@@ -589,9 +588,18 @@ jobs:
           # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
           # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
+          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
+          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
+          # works around for libc++'s __config_site. Without the link the runtime archives are not
+          # found and every -fsanitize/--coverage link test fails.
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
-            || { tail -n 60 config.log; exit 1; }
+            CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
@@ -732,14 +740,25 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=address,undefined CC=clang CXX=clang++
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
+          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
+          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
+          # works around for libc++'s __config_site. Without the link the runtime archives are not
+          # found and every -fsanitize/--coverage link test fails.
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=address,undefined \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*'
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
           make -C src clean
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread CC=clang CXX=clang++
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
       - name: Upload node logs on failure
@@ -798,7 +817,17 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
+          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
+          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
+          # works around for libc++'s __config_site. Without the link the runtime archives are not
+          # found and every -fsanitize/--coverage link test fails.
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
           make check || true
           src/test/test_bitcoin
@@ -860,9 +889,18 @@ jobs:
           # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
           # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
+          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
+          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
+          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
+          # works around for libc++'s __config_site. Without the link the runtime archives are not
+          # found and every -fsanitize/--coverage link test fails.
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
-            || { tail -n 60 config.log; exit 1; }
+            CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
             ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'

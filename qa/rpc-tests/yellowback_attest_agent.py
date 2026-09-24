@@ -184,12 +184,17 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
             except Exception as e:                  # never mask the real failure
                 print('stopping %s: %s' % (name, e))
 
+    def print_agent_logs(self, names=None):
+        """The CI runner keeps node debug.logs on failure but not the agents' own logs, so a
+        stalled wait prints their tails here (the whole of the evidence for a slow signer)."""
+        for name in sorted(names or self.procs):
+            tail = open(os.path.join(self.workdir, '%s.log' % name)).read()[-2000:]
+            print('--- %s.log (tail) ---\n%s' % (name, tail))
+
     def assert_agents_alive(self, where):
         dead = [name for name, p in self.procs.items() if p.poll() is not None]
         if dead:
-            for name in dead:
-                tail = open(os.path.join(self.workdir, '%s.log' % name)).read()[-2000:]
-                print('--- %s.log (tail) ---\n%s' % (name, tail))
+            self.print_agent_logs(dead)
             raise AssertionError('agent(s) %s exited during %s' % (', '.join(sorted(dead)), where))
 
     # ------------------------------------------------------------------ chain helpers
@@ -213,6 +218,7 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
             if seen['poolFresh'] >= want:
                 return seen
             time.sleep(0.5)
+        self.print_agent_logs()
         raise AssertionError('poolFresh stayed at %d (wanted %d) for %ds during %s; logs in %s'
                              % (seen['poolFresh'], want, timeout, label, self.workdir))
 

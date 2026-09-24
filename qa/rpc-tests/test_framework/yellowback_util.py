@@ -1156,24 +1156,18 @@ def genesis_args(genesis):
 
 
 def assert_yed_synced(nodes):
-    """v1: after sync_blocks the index is at the tip on every -yellowback node."""
+    """After sync_blocks the index is healthy and at the chain tip on every -yellowback node.
+    (v1 read a `synced` field; v2's yed_getinfo reports `healthy` and `height` instead.)"""
     sync_blocks(nodes)
     for node in nodes:
         info = node.yed_getinfo()
         assert_equal(info['healthy'], True, "index unhealthy: " + info['unhealthyReason'])
-        assert_equal(info['synced'], True)
+        assert_equal(info['height'], node.getblockcount())
 
 
 def wait_yed_synced(node, timeout=30):
-    """v1: poll until the index tip equals the chain tip (v2: wait_yed_healthy)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        info = node.yed_getinfo()
-        assert_equal(info['healthy'], True, "index unhealthy: " + info['unhealthyReason'])
-        if info['synced']:
-            return
-        time.sleep(0.1)
-    raise AssertionError("index did not reach the chain tip within %ds" % timeout)
+    """Poll until the index is healthy and at the chain tip (the v1 name of wait_yed_healthy)."""
+    wait_yed_healthy(node, timeout)
 
 
 def make_regtest_roster(signer_nodes, k, extra_pubkeys=None):
