@@ -568,6 +568,22 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+      - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
+        # The light-client server's regtest suite: this fork's ycashd under a five-node devnet,
+        # lightwalletd-dd (its feature branch) and the lightwalletd-legacy baseline both served
+        # from node 0, then `go test -tags devnet` — the GetBlockRange byte-equality gate, the
+        # YED views vs the wallet's, a mint built from raw parts through the server. Unverified
+        # until the next scheduled run (the F-32 precedent); the driver is the same one a laptop runs.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          git clone --quiet --branch feature/yellowback-price-attest https://github.com/boyfromcave/lightwalletd.git "$RUNNER_TEMP/lightwalletd-dd"
+          git -C "$RUNNER_TEMP/lightwalletd-dd" branch --quiet --track lightwalletd-legacy origin/lightwalletd-legacy
+          curl -sSL https://go.dev/dl/go1.24.7.linux-amd64.tar.gz | tar -C "$RUNNER_TEMP" -xz
+          export PATH="$RUNNER_TEMP/go/bin:$PATH"
+          YCASH_DD="$PWD" YELLOWBACK_LWD_REPO="$RUNNER_TEMP/lightwalletd-dd" LWD_PYTHON="$(command -v python3)" LWD_DEVNET_DIR="$RUNNER_TEMP/yb-devnet-lwd" \
+            "$RUNNER_TEMP/lightwalletd-dd/scripts/devnet-test.sh" --up --down --dir "$RUNNER_TEMP/yb-devnet-lwd" --portseed 8
       # Later phases add here (§6.0 item 6): the STOCK_BASELINE a second time with
       # BITCOIND=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
       # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
