@@ -394,7 +394,7 @@ def wallet_command(directory, node=USER, app=None):
 
 # ---------------------------------------------------------------------------------- lightwalletd
 
-LWD_REPO = os.path.join(WORKSPACE, "lightwalletd-dd")
+LWD_REPO = os.environ.get("YELLOWBACK_LWD_REPO") or os.path.join(WORKSPACE, "lightwalletd-dd")   # cmd/lwdinfo lives there
 LWD_PORT = 9067
 
 def lightwalletd_binary(baseline=False, override=None):
