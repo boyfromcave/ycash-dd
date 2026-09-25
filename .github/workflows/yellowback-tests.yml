@@ -613,11 +613,24 @@ jobs:
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
+          # The steps above already built a normal ycashd. configure only adds -DZCASH_FUZZ to
+          # the flags; make will not rebuild bitcoind.o, so src/ycashd stays the real binary and
+          # exits asking for ycash.conf. Drop those objects before the fuzz configure.
+          # -DFUZZ_WITH_LIBFUZZER compiles LLVMFuzzerTestOneInput (zcutil/libfuzzer/zcash-wrapper
+          # does the same). Without it, fuzz.cpp contributes no entry point.
+          make -C src clean
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
-            ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
+            # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
+            ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            # ycashd is libtool-linked: the make inputs are bitcoind.o and, when libtool
+            # compiles, bitcoind.lo. The binary may be src/ycashd or src/.libs/ycashd.
+            # GNU make stats the symlink target, so a new fuzz.cpp that is older than the
+            # object is not a reason to rebuild. Remove every product of this one file.
+            rm -f src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=600
@@ -939,10 +952,15 @@ jobs:
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
-            CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address' \
+            CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
-            ln -sf fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
+            # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
+            ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
+            # See the nightly fuzz step: retargeting the symlink does not rebuild, and
+            # libtool may have left bitcoind.lo and .libs/ycashd beside the .o.
+            rm -f src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
             make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
             mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
             ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=7200 || true
