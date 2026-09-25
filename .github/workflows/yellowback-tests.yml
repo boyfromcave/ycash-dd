@@ -662,6 +662,11 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
+      - uses: actions/setup-python@v5
+        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
+        # at import (exit 1) and the suite reports "agent 2 exited with 1".
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
           python3 -m pip install --user simplejson
@@ -669,6 +674,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, simplejson, pyblake2, tomllib'
       - uses: actions/cache@v4
         with:
           path: |
@@ -814,6 +820,11 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5 lcov
+      - uses: actions/setup-python@v5
+        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
+        # at import (exit 1) and the suite reports "agent 2 exited with 1".
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
           python3 -m pip install --user simplejson
@@ -821,6 +832,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, simplejson, pyblake2, tomllib'
       - uses: actions/cache@v4
         with:
           path: |
