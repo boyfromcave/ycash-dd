@@ -398,6 +398,20 @@ class YellowbackAttestTest(YellowbackTestFramework):
         print('the same shape mined by node 1 (stock): relay proves the carrier scriptSig is standard; ACTIVE everywhere')
         a1 = self.mint_fresh(USER, prices, STOCK)
         assert_equal(nodes[STOCK].getblock(nodes[STOCK].getbestblockhash())['tx'].count(a1['txid']), 1)
+        # a1's carrier and mint are tagless, and the winning branch below is tagless too. MINT-4
+        # reads Snapshots[R] before MINT-9. The fast window is 8 blocks and needs 4 quote tags, and
+        # R is whichever of tip+1..tip+4 first has two attestors selected on both branches, which
+        # follows the block hashes. Three or four blocks into that tagless run the snapshot is
+        # HALT_NO_PRICE and the vault voids as mint-halted-no-price instead of mint9-bundle-sig
+        # (main CI on 06607d94c failed; the same job passed on another run). Four tagged blocks on
+        # the common prefix are exactly the fast window's fill at the deepest candidate.
+        self.set_prices(PRICE)
+        self.pools_step(4, 'tagged cushion before the split', jitter=False)
+        # The deepest candidate's fast window is these four blocks plus four tagless stock
+        # blocks, and the fill is exactly four. A signal tag here would bring the flake back.
+        tip = user.getblockcount()
+        for h in range(tip - 3, tip + 1):
+            assert_equal(user.yed_gettag(str(h))['kind'], 'quote')
 
         # ---------------------------------------------------------------- VOID: a reorged citation (R9)
         print('a bundle citing a reorged block: split, mine both branches, pick an R whose selections intersect, join')
@@ -415,10 +429,12 @@ class YellowbackAttestTest(YellowbackTestFramework):
             sel_b = select_attestors(nodes[OBSERVER].getblockhash(r), b'', selection_pool(nodes[OBSERVER], r))
             assert user.getblockhash(r) != nodes[OBSERVER].getblockhash(r)
             both = sorted(set(sel_a) & set(sel_b))
-            if len(both) >= 2:
+            # Snapshots[R] on the winning chain. A missing pMint becomes mint-halted-no-price
+            # and hides the bundle-signature verdict this step is here to show.
+            if len(both) >= 2 and nodes[OBSERVER].yed_getprice(r)['pMint'] is not None:
                 chosen = (r, both)
                 break
-        assert chosen is not None, 'no reference height with two attestors selected on both branches (probability < 1 %)'
+        assert chosen is not None, 'no reference height with two attestors selected on both branches and a defined price'
         r_reorg, both = chosen
         # pooled on the enforcing branch (accepted against hash A), signed over hash A
         fed = feed_all(user, {seq: PRICE for seq in both}, cited=r_reorg)
@@ -431,9 +447,9 @@ class YellowbackAttestTest(YellowbackTestFramework):
         self.checkpoint('after the join')
         # the pool's attestations citing hash A no longer verify: BuildBundle drops them (R9); the seqs fed only at
         # r_reorg are unreachable. The others fall back on their pre-split attestation (cited at a1's reference
-        # height), which counts only while it is still inside the window at r_reorg: citedHeight in
-        # (R - ATTEST_MAX_AGE, R]. r_reorg is whichever of four heights the branches' selections intersected at,
-        # so with ATTEST_MAX_AGE = 8 that attestation is fresh at some of them and stale at others (CI, 2026-09-24).
+        # height). The tagged cushion puts every candidate R more than ATTEST_MAX_AGE above that citation, so
+        # the fallback is stale and reachable is 0; yed_buildbundle then reports bundle-insufficient. The raw
+        # mint below still carries the hash-A bundle, which fails MINT-9 as mint9-bundle-sig.
         pre_cited = a1['est']['refHeight']
         still_fresh = sorted(s for s in set(sel_b) - set(both) if pre_cited > r_reorg - ATTEST_MAX_AGE)
         sel = user.yed_getselection(r_reorg, '')
