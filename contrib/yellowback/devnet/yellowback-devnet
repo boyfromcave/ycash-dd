@@ -26,7 +26,8 @@ Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
-cli [--node N | --datadir N] [-- args], down [--wipe].
+cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
+(JSON signing/address/template vectors for the YEW core, wallet plan W0c).
 """
 import argparse
 import glob
@@ -51,12 +52,13 @@ import test_framework.util as _util
 # this process publishes in devnet.json rather than recomputing them (docs/mapping.md 14.2).
 _util.MAX_NODES = 12
 from test_framework.util import (PortSeed, bitcoind_processes, connect_nodes_bi,          # noqa: E402
-                                 get_rpc_proxy, initialize_chain_clean, rpc_auth_pair,
+                                 get_rpc_proxy, hex_str_to_bytes, initialize_chain_clean, rpc_auth_pair,
                                  rpc_port, rpc_url, start_node, sync_blocks, sync_mempools)
 from test_framework.yellowback_util import (ACTIVATION_BLOCKS, ATTEST_ARM_DELAY, ATTEST_ARM_MIN,  # noqa: E402
-                                            BOND_MATURITY, M_SELECT, POOL_WIFS, REF_LAG,
+                                            BOND_MATURITY, M_SELECT, POOL_WIFS, REF_LAG, SIGNING_BRANCH_ID,
                                             address_of, pool_args, set_quote, wait_yed_healthy,
                                             yellowback_node_args)
+import test_framework.yellowback_model as ym                                                # noqa: E402
 
 NODES, USER, POOLS = 5, 0, (2, 3, 4)          # the v2 core; ATTESTORS extend it to eight
 STOCK = 1
@@ -1281,6 +1283,246 @@ def report(args):
 
 # ---------------------------------------------------------------------------------- main
 
+# ---------------------------------------------------------------------------------- vectors for the YEW core (wallet plan W0c)
+
+# Base58Check version bytes, from ref/ycash/src/chainparams.cpp:149-153 (mainnet), 409-413
+# (testnet), 613-615 (regtest) and src/yellowback/params.cpp:142/156/189 (the D10 form).
+ADDRESS_VERSIONS = {
+    "mainnet": {"pubkey": "1c28", "script": "1c2c", "secret": "80", "yellowback": "1fe4", "yellowbackPrefix": "ye", "transparentPrefix": "s1"},
+    "testnet": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2007", "yellowbackPrefix": "yt", "transparentPrefix": "sm"},
+    "regtest": {"pubkey": "1c95", "script": "1c2a", "secret": "ef", "yellowback": "2002", "yellowbackPrefix": "yr", "transparentPrefix": "sm"},
+}
+VECTORS_FEE_ZAT = 10_000       # the miner fee each transparent vector pays (any value; it is what the node signed)
+
+def _der(r, s):
+    """DER-encode an ECDSA (r, s) the way libsecp256k1 does (minimal, sign-padded integers)."""
+    def integer(n):
+        b = n.to_bytes((n.bit_length() + 7) // 8, "big") or b"\x00"
+        return (b"\x00" + b) if b[0] & 0x80 else b
+    rb, sb = integer(r), integer(s)
+    body = b"\x02" + bytes([len(rb)]) + rb + b"\x02" + bytes([len(sb)]) + sb
+    return b"\x30" + bytes([len(body)]) + body
+
+def _tx_of(hex_):
+    from io import BytesIO
+    from test_framework.mininode import CTransaction
+    tx = CTransaction(); tx.deserialize(BytesIO(hex_str_to_bytes(hex_))); return tx
+
+def _payload_of(decoded):
+    """The "YB…" data push of the transaction's OP_RETURN output (hex), or None."""
+    for out in decoded["vout"]:
+        data = ym.script_single_push(hex_str_to_bytes(out["scriptPubKey"]["hex"]))
+        if data is not None: return data.hex()
+    return None
+
+def _key_record(node, address, versions):
+    """WIF, compressed pubkey, HASH160 and both renderings of one node-wallet P2PKH address."""
+    info = node.validateaddress(address)
+    assert info.get("ismine") and info.get("iscompressed"), "%s is not an own compressed-key address" % address
+    pubkey = hex_str_to_bytes(info["pubkey"]); key_hash = ym.hash160(pubkey)
+    address_ye = ym.base58check_encode(hex_str_to_bytes(versions["yellowback"]) + key_hash)
+    yed = node.yed_validateaddress(address_ye)
+    # yed_validateaddress.keyid is uint160::GetHex(): the HASH160 byte-reversed, the txid convention.
+    assert yed["isvalid"] and yed["transparentAddress"] == address and yed["keyid"] == key_hash[::-1].hex(), yed
+    return {"address": address, "address_ye": address_ye, "wif": node.dumpprivkey(address), "pubkeyHex": info["pubkey"],
+            "hash160Hex": key_hash.hex(), "keyidReversedHex": yed["keyid"], "scriptPubKeyHex": info["scriptPubKey"]}
+
+def _template(node, txid, result, mine):
+    """{hex, txid, decoded, txinfo, payloadHex, payloadDecoded, result} for a wallet transaction of
+    `node`, confirmed (mined here if needed) so the index has its record."""
+    hex_ = node.gettransaction(txid)["hex"]                      # the wallet's copy: getrawtransaction needs -txindex or an unspent output
+    decoded = node.decoderawtransaction(hex_)
+    assert decoded["txid"] == txid
+    for _ in range(6):
+        try: txinfo = node.yed_gettxinfo(txid); break
+        except Exception: mine(1)
+    else: txinfo = node.yed_gettxinfo(txid)
+    payload = _payload_of(decoded)
+    return {"hex": hex_, "txid": txid, "decoded": decoded, "txinfo": txinfo, "payloadHex": payload,
+            "payloadDecoded": node.yed_decodepayload(payload) if payload else None, "result": result}
+
+def _pool_miner(state):
+    """`mine(n)`: n blocks round-robin on the automated pools, as the heartbeat does, then let node 0
+    settle. Blocks node 0 mines carry no quote tag; 64 of them empty the price windows (PRICE-1) and
+    every mint after that fails mintpol-no-price."""
+    pools, turn = auto_pools(state), [0]
+    nodes = [rpc(state, index, timeout=60) for index in range(state["num_nodes"]) if alive(state, index)]
+    def mine(n=1):
+        for _ in range(n):                       # one block, then every node on it, before the next pool mines: no stale tips
+            rpc(state, pools[turn[0] % len(pools)], timeout=60).generate(1); turn[0] += 1
+            sync_blocks(nodes)
+        _settle(rpc(state, USER))
+    return mine
+
+def _mine_to(node, height, mine):
+    while node.getblockcount() < height: mine(min(25, height - node.getblockcount()))
+
+def _settle(node, seconds=1.5):
+    """generate returns before the wallet has digested the block it mined (SyncTransaction runs after
+    UpdateTip): a yed_send issued within ~200 ms picks inputs the wallet still thinks unspent or
+    misses the token the block just confirmed, and the mempool refuses it. A human never races this."""
+    time.sleep(seconds); node.getbalance()
+
+def _with_retry(call, attempts=5, seconds=2.0):
+    """`(result, attempts_used)` for a wallet RPC that can lose the post-block race above."""
+    for n in range(1, attempts + 1):
+        try: return call(), n
+        except Exception as error:
+            if n == attempts or "rejected by the mempool" not in str(error): raise
+            print("  attempt %d: %s; retrying" % (n, error)); time.sleep(seconds)
+
+def _two_step(call, mine):
+    """Run a wait=true two-step RPC (the carrier, then the main transaction once it confirms) while
+    mining the blocks it waits for: a plain devnet has no heartbeat."""
+    import threading
+    box = {}
+    def run():
+        try: box["result"] = call()
+        except Exception as error: box["error"] = error
+    thread = threading.Thread(target=run); thread.start()
+    while thread.is_alive():
+        thread.join(1.0)
+        if thread.is_alive(): mine(1)
+    if "error" in box: raise box["error"]
+    return box["result"]
+
+def vectors(args):
+    """`vectors DIR [--out DIR] [--seed N] [--count N]`: JSON vectors for the YEW core's tests
+    (docs/plans/yellowback-wallet-plan.md, Phase W0c, D-W-3, D-W-7, D-W-11), from a running devnet.
+
+    Everything is what node 0 (the funded wallet) produced or reported; Python only re-derives and
+    checks. Four files in --out (default DIR/vectors):
+
+    transparent.json  N transparent-only v4 transactions (1-3 P2PKH inputs, 1-3 outputs; nLockTime
+        0 or a past height; nExpiryHeight 0 or tip+20). Per entry: unsignedHex (createrawtransaction),
+        prevouts [{txid, vout, scriptPubKeyHex, valueZat}], keys [{address, address_ye, wif,
+        pubkeyHex, hash160Hex}] one per input (getnewaddress + dumpprivkey, funded from node 0),
+        branchId (the consensus branch id the node signs under, = getblockchaininfo.consensus.nextblock),
+        sighashPerInput [hex] (ZIP-243, test_framework.script.SignatureHash), signedHex
+        (signrawtransaction: the node's libsecp256k1 signatures), txid, nLockTime, nExpiryHeight, and
+        pythonMatches: whether pure-Python RFC 6979 signing with the same keys reproduces signedHex
+        byte for byte. Nothing is broadcast; the node re-verifies every signedHex (complete = true).
+    addresses.json    ~5 keys: {wif, pubkeyHex, hash160Hex, address_s (the node's P2PKH rendering;
+        s1… on mainnet, sm… here), address_ye (the Yellowback rendering, yr… on regtest, checked
+        against yed_validateaddress)}, with the network and its version bytes.
+    templates.json    one node-built MINT (yed_mint; with its carrier when the devnet is ARMED, the
+        v3 shape), TRANSFER (yed_send) and REDEEM (yed_redeem after the lock): {hex, txid, decoded,
+        txinfo (yed_gettxinfo), payloadHex, payloadDecoded (yed_decodepayload), result (the RPC's
+        own result)}, and "armed".
+    params.json       yed_getinfo, the upgrades and branch ids, relayfee/paytxfee, the framework's
+        protocol constants (TOKEN_VALUE, CARRIER_VALUE, REF_WINDOW, MIN_OUTPUT, …), the address
+        version bytes of all three networks and the v4 header constants.
+
+    --seed fixes every random choice (input/output counts, lock/expiry pattern, amounts, splits);
+    the keys themselves come from the node's keypool, so two runs differ in keys and txids but not
+    in structure. Node 0 must hold enough mature YEC for the mint (~ 5x the minimum mint at the
+    current price plus fees); --fund-from N tops it up from node N's wallet when it is short.
+    """
+    directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    node = rpc(state, USER, timeout=300)
+    rng = random.Random(args.seed)
+    out = os.path.abspath(args.out or os.path.join(directory, "vectors")); os.makedirs(out, exist_ok=True)
+    info = node.yed_getinfo(); network = info["network"]; versions = ADDRESS_VERSIONS[network]
+    chain = node.getblockchaininfo(); branch_id = chain["consensus"]["nextblock"]
+    assert int(branch_id, 16) == SIGNING_BRANCH_ID, "node signs under %s, the framework expects %08x" % (branch_id, SIGNING_BRANCH_ID)
+    from test_framework.script import CScript, SIGHASH_ALL, SignatureHash
+    from test_framework.yellowback_util import (CLASS_RANGES, FEE_BPS, FEE_MIN, GRACE, MAX_LOCK, MAX_MINT, MAX_OUTPUT, MIN_MINT,
+                                                MIN_OUTPUT, REF_WINDOW, TOKEN_VALUE, YELLOWBACK_FEE, wif_to_secret)
+    from test_framework.yellowback_attest import ecdsa_sign
+    COIN = Decimal(10 ** 8)
+    def as_yec(zat): return Decimal(zat) / COIN
+
+    # 0. Funds: the mint wants ~ 5x MIN_MINT at the price plus fees; the vectors want a few YEC.
+    price = Decimal(node.yed_getprice().get("pMint") or 0) / Decimal(1_000_000)          # micro-USD per YEC, the mint price
+    need = Decimal(12) if price <= 0 else (Decimal(MIN_MINT) / 100 / price * 5 + 2).quantize(Decimal("0.01"))
+    if node.getbalance() < need and args.fund_from is not None:
+        funder = rpc(state, args.fund_from)
+        print("node0 holds %s YEC, the run needs ~%s: node%d sends the difference" % (node.getbalance(), need, args.fund_from))
+        funder.sendtoaddress(node.getnewaddress(), need - node.getbalance() + 1); _pool_miner(state)(1)
+
+    # 1. Transparent signing vectors (D-W-3): one fresh, funded key per input.
+    plan = [(rng.randint(1, 3), rng.randint(1, 3), rng.random() < 0.5, rng.random() < 0.5) for _ in range(args.count)]
+    keys = [_key_record(node, node.getnewaddress(), versions) for _ in range(sum(p[0] for p in plan))]
+    funding = {k["address"]: as_yec(rng.randint(60_000, 3_000_000)) for k in keys}
+    mine = _pool_miner(state)
+    fund_txid = node.sendmany("", funding); mine(1)
+    fund = node.decoderawtransaction(node.gettransaction(fund_txid)["hex"])
+    utxo = {}
+    for out_ in fund["vout"]:
+        for address in out_["scriptPubKey"].get("addresses", []):
+            if address in funding: utxo[address] = {"txid": fund_txid, "vout": out_["n"], "scriptPubKeyHex": out_["scriptPubKey"]["hex"], "valueZat": int((Decimal(str(out_["value"])) * COIN).to_integral_value())}
+    assert len(utxo) == len(keys), "funding transaction lacks an output per key"
+    tip = node.getblockcount(); transparent = []; next_key = 0; matches = 0
+    for n_in, n_out, with_lock, with_expiry in plan:
+        ins = keys[next_key:next_key + n_in]; next_key += n_in
+        prevouts = [utxo[k["address"]] for k in ins]
+        total = sum(p["valueZat"] for p in prevouts) - VECTORS_FEE_ZAT
+        cuts = sorted(rng.randint(1_000, total - 1_000) for _ in range(n_out - 1)); bounds = [0] + cuts + [total]
+        amounts = [bounds[i + 1] - bounds[i] for i in range(n_out)]
+        outputs = {node.getnewaddress(): as_yec(a) for a in amounts}
+        lock_time = tip - rng.randint(1, 100) if with_lock else 0
+        expiry = tip + 20 if with_expiry else 0
+        unsigned = node.createrawtransaction([{"txid": p["txid"], "vout": p["vout"]} for p in prevouts], outputs, lock_time, expiry)
+        tx = _tx_of(unsigned)
+        assert (tx.nLockTime, tx.nExpiryHeight) == (lock_time, expiry)
+        sighashes = [SignatureHash(CScript(hex_str_to_bytes(p["scriptPubKeyHex"])), tx, i, SIGHASH_ALL, p["valueZat"], SIGNING_BRANCH_ID)[0] for i, p in enumerate(prevouts)]
+        signed = node.signrawtransaction(unsigned)
+        assert signed["complete"], signed
+        assert node.signrawtransaction(signed["hex"])["complete"]              # the node re-verifies its own signatures
+        for i, (k, digest) in enumerate(zip(ins, sighashes)):                  # pure Python, RFC 6979: must agree with libsecp256k1
+            r, s = ecdsa_sign(wif_to_secret(k["wif"]), digest)
+            tx.vin[i].scriptSig = ym.push(_der(r, s) + bytes([SIGHASH_ALL])) + ym.push(hex_str_to_bytes(k["pubkeyHex"]))
+        python_matches = tx.serialize().hex() == signed["hex"]; matches += python_matches
+        transparent.append({"unsignedHex": unsigned, "prevouts": prevouts, "keys": ins, "branchId": branch_id, "nLockTime": lock_time,
+                            "nExpiryHeight": expiry, "outputs": [{"address": a, "valueZat": z} for a, z in zip(outputs, amounts)],
+                            "feeZat": VECTORS_FEE_ZAT, "sighashPerInput": [d.hex() for d in sighashes], "signedHex": signed["hex"],
+                            "txid": node.decoderawtransaction(signed["hex"])["txid"], "pythonMatches": python_matches})
+    with open(os.path.join(out, "transparent.json"), "w") as f: json.dump({"network": network, "branchId": branch_id, "sighashType": SIGHASH_ALL, "transactions": transparent}, f, indent=1, default=str)
+    print("transparent.json: %d transactions, pythonMatches %d/%d" % (len(transparent), matches, len(transparent)))
+
+    # 2. Addresses (D-W-7 encoding, D-W-11 WIF): five more keys, both renderings.
+    addresses = [_key_record(node, node.getnewaddress(), versions) for _ in range(5)]
+    with open(os.path.join(out, "addresses.json"), "w") as f:
+        json.dump({"network": network, "versions": versions, "keys": [{"wif": k["wif"], "pubkeyHex": k["pubkeyHex"], "hash160Hex": k["hash160Hex"],
+                                                                        "address_s": k["address"], "address_ye": k["address_ye"]} for k in addresses]}, f, indent=1, default=str)
+    print("addresses.json: %d keys (%s… / %s…)" % (len(addresses), addresses[0]["address"][:2], addresses[0]["address_ye"][:2]))
+
+    # 3. Templates: MINT (with carrier when ARMED), TRANSFER, REDEEM, all built by node 0's wallet.
+    armed = bool((info.get("attest") or {}).get("armed"))
+    lock_blocks = CLASS_RANGES["A"][0]
+    for _ in range(80):                                                         # refill the price windows if a previous run drained them
+        if int(node.yed_getprice(node.getblockcount() - REF_LAG).get("pMint") or 0) > 0: break   # the mint's reference height
+        mine(1)
+    if armed: wait_pool_fresh(state)
+    mint = _two_step(lambda: node.yed_mint(MIN_MINT, lock_blocks, "", "", True), mine)
+    templates = {"network": network, "armed": armed, "mint": _template(node, mint["txid"], mint, mine)}
+    if mint.get("carrierTxid"):
+        carrier_hex = node.gettransaction(mint["carrierTxid"])["hex"]
+        templates["carrier"] = {"hex": carrier_hex, "txid": mint["carrierTxid"], "decoded": node.decoderawtransaction(carrier_hex)}
+    print("mint %s (carrier %s, lockHeight %s)" % (mint["txid"], mint.get("carrierTxid"), mint.get("lockHeight")))
+    to = node.yed_getnewaddress()
+    transfer, attempts = _with_retry(lambda: node.yed_send(to, 500)); mine(1)
+    templates["transfer"] = _template(node, transfer if isinstance(transfer, str) else transfer["txid"], transfer, mine); templates["transfer"]["sendAttempts"] = attempts
+    print("transfer %s (%d attempt(s))" % (templates["transfer"]["txid"], attempts))
+    _mine_to(node, int(mint["lockHeight"]), mine)
+    redeem, attempts = _with_retry(lambda: node.yed_redeem(mint["txid"])); mine(1)
+    templates["redeem"] = _template(node, redeem["txid"], redeem, mine); templates["redeem"]["redeemAttempts"] = attempts
+    print("redeem %s (burned %s cents)" % (redeem["txid"], redeem.get("burnedCents")))
+    with open(os.path.join(out, "templates.json"), "w") as f: json.dump(templates, f, indent=1, default=str)
+
+    # 4. Parameters as the node reports them, plus the framework's constants and the version bytes.
+    params = {"network": network, "generated": {"command": " ".join(sys.argv[1:]), "seed": args.seed, "height": node.getblockcount(), "forkCommit": fork_commit(REPO)},
+              "yed_getinfo": node.yed_getinfo(), "consensus": chain["consensus"], "upgrades": chain["upgrades"], "signingBranchId": branch_id,
+              "relayFee": "%.8f" % node.getnetworkinfo()["relayfee"], "payTxFee": "%.8f" % node.getinfo()["paytxfee"],
+              "txVersion": {"header": "80000004", "versionGroupId": "892f2085", "nVersion": 4},
+              "constants": {"TOKEN_VALUE": TOKEN_VALUE, "CARRIER_VALUE": info["params"]["attest"]["carrierValueZat"], "REF_WINDOW": REF_WINDOW, "REF_LAG": REF_LAG,
+                            "MIN_OUTPUT": MIN_OUTPUT, "MAX_OUTPUT": MAX_OUTPUT, "MIN_MINT": MIN_MINT, "MAX_MINT": MAX_MINT, "YELLOWBACK_FEE": YELLOWBACK_FEE,
+                            "FEE_MIN": FEE_MIN, "FEE_BPS": FEE_BPS, "GRACE": GRACE, "MAX_LOCK": MAX_LOCK, "CLASS_RANGES": CLASS_RANGES},
+              "addressVersions": ADDRESS_VERSIONS}
+    with open(os.path.join(out, "params.json"), "w") as f: json.dump(params, f, indent=1, default=str)
+    print("params.json; vectors in %s" % out)
+    return 0 if matches == len(transparent) else 1
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     def add(name, fn, **kw):
@@ -1318,6 +1560,10 @@ def main():
     command = add("wallet", wallet); command.add_argument("--app"); command.add_argument("--node", type=int, help="the node to open on (default: your seat)"); command.add_argument("--print", action="store_true")
     command = add("cli", cli); command.add_argument("--node", type=int, default=USER); command.add_argument("--datadir", type=int, metavar="N", help="print node N's datadir and exit"); command.add_argument("args", nargs=argparse.REMAINDER)
     command = add("down", down); command.add_argument("--wipe", action="store_true")
+    command = add("vectors", vectors, help="write JSON signing/address/template vectors for the YEW core (wallet plan W0c)")
+    command.add_argument("--out", help="output directory (default DIR/vectors)"); command.add_argument("--seed", type=int, default=1)
+    command.add_argument("--count", type=int, default=12, help="transparent transactions (default 12)")
+    command.add_argument("--fund-from", type=int, default=2, metavar="N", help="top node 0 up from node N when it is short of YEC for the mint (default 2)")
     add("_heartbeat", _heartbeat_run, help=argparse.SUPPRESS); add("_walk", _walk_run, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]

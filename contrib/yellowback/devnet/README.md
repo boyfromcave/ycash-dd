@@ -38,7 +38,10 @@ yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
 yellowback-devnet status | check | mine N [node] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
 yellowback-devnet lightwalletd [start|stop|status] [--baseline] [--port 9067] [--extra=-yellowback]   # lightwalletd-dd against node0 (docs/plans/yellowback-lightwalletd-plan.md)
+yellowback-devnet vectors [--out DIR] [--seed N] [--count N]   # JSON signing/address/template vectors for the YEW core (docs/plans/yellowback-wallet-plan.md, W0c)
 ```
+
+`vectors` writes four JSON files (default `DIR/vectors`) that `yew/core/tests/vectors/` carries: `transparent.json` (N transparent v4 transactions with `unsignedHex`, `prevouts`, per-input `keys`, `branchId`, `sighashPerInput`, the node's `signedHex`, `txid` and `pythonMatches`: whether pure-Python RFC 6979 signing reproduces the node's bytes), `addresses.json` (WIF, pubkey, HASH160, the `sm…`/`s1…` and `yr…`/`ye…` renderings of ~5 keys), `templates.json` (a node-built MINT with its carrier when ARMED, TRANSFER and REDEEM: `hex`, `decoded`, `yed_gettxinfo`, `payloadHex`, `yed_decodepayload`) and `params.json` (`yed_getinfo`, upgrades and branch ids, fees, the protocol constants, the address version bytes of all three networks). `--seed` fixes the structure; the keys come from node 0's keypool. It mines on the automated pools round-robin (blocks node 0 mines carry no quote tag and would drain the price windows) and needs node 0 to hold ~5x the minimum mint in YEC (`--fund-from N` tops it up from node N).
 
 `check` exits 0 iff activation is active, minting is allowed, every automated pool is eligible, the layer is ARMED with `poolFresh ≥ M_SELECT`, and every automated agent and process is alive. It is the machine-checkable gate; `status` is the human one.
 
