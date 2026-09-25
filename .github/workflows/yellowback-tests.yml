@@ -888,7 +888,25 @@ jobs:
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
       - name: lcov over src/yellowback and src/rpc/yellowback*, the floors of qa/yellowback-coverage-floor.sh
         run: |
-          lcov --capture --directory src --output-file lcov-all.info --rc lcov_branch_coverage=0
+          set -e
+          # --enable-lcov compiles with depends' clang 18, which writes .gcno notes as gcov
+          # version '408*'. The runner's gcov is GCC 11.4 ('B14*') and refuses them
+          # ("GCOV failed"). native_clang.mk does not stage llvm-cov; it is in the cached
+          # clang tarball, and the staged native lib/ satisfies its $ORIGIN/../lib lookup.
+          tar=$(echo depends/sources/clang-llvm-*-x86_64-linux-gnu-ubuntu-18.04.tar.xz)
+          inner=$(tar -tJf "$tar" | awk '/\/bin\/llvm-cov$/{print; exit}')
+          test -n "$inner"
+          tar -xJf "$tar" -C "$RUNNER_TEMP" "$inner"
+          cov="$RUNNER_TEMP/$inner"
+          chmod +x "$cov"
+          native="$PWD/depends/x86_64-pc-linux-gnu/native/lib"
+          wrapper="$RUNNER_TEMP/llvm-gcov"
+          printf '%s\n' '#!/bin/sh' \
+            "export LD_LIBRARY_PATH=$(printf '%q' "$native")\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" \
+            "exec $(printf '%q' "$cov") gcov \"\$@\"" > "$wrapper"
+          chmod +x "$wrapper"
+          "$wrapper" --version
+          lcov --capture --directory src --gcov-tool "$wrapper" --output-file lcov-all.info --rc lcov_branch_coverage=0
           lcov --extract lcov-all.info '*/src/yellowback/*' '*/src/rpc/yellowback*' --output-file lcov.info
           lcov --list lcov.info
           genhtml lcov.info --output-directory coverage-html
