@@ -242,7 +242,10 @@ struct Fixture
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
         CScript vs = o.vaultScriptOverride.value_or(VaultScript(lock, owner, (uint32_t)(lock + P.grace)));
         CAmount collateral = o.collateral;
-        if (collateral < 0) collateral = Required(cents, o.termClass, refHeight);
+        // An invalid class is a payload the verdict rejects (bad-mint-class). Collateral is
+        // computed from a real class so the helper does not index baseRatioBps out of range;
+        // MINT-2 checks the class before it looks at the amount.
+        if (collateral < 0) collateral = Required(cents, P.IsValidClass(o.termClass) ? o.termClass : 0, refHeight);
         CMutableTransaction m;
         m.vin.push_back(CTxIn(FakeInput()));
         for (const COutPoint& op : o.yedInputs) m.vin.push_back(CTxIn(op));
@@ -459,7 +462,8 @@ struct Fixture
         if (o.collateral < 0) {
             Snapshot s = Snap(ref);
             const MicroUsd pMint = std::min(s.PMint().value(), price);
-            o.collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[o.termClass], s.sigmaMultBps), pMint).value();
+            const int cls = P.IsValidClass(o.termClass) ? o.termClass : 0;
+            o.collateral = RequiredCollateralRounded(cents, MinRatioBps(P.baseRatioBps[cls], s.sigmaMultBps), pMint).value();
         }
         return MintTx(cents, 48, ref, o);
     }
