@@ -56,7 +56,7 @@ __all__ = [
     'ATTEST_PREFIX', 'ATTESTATION_SIZE', 'BUNDLE_MAGIC', 'BUNDLE_VERSION',
     'PAYLOAD_ATTESTOR_REGISTER', 'PAYLOAD_CLAIM_NOTICE', 'PAYLOAD_EQUIVOCATION', 'PAYLOAD_ATTESTOR_REVIVE',
     'attest_message', 'sign_attestation', 'verify_attestation', 'is_low_s', 'parse_attestation',
-    'ATTESTOR_WIFS', 'BOND_WIFS', 'attestor_keys', 'bond_keys',
+    'ATTESTOR_WIFS', 'BOND_WIFS', 'attestor_keys', 'bond_keys', 'hot_wif_for',
     'bond_script', 'carrier_script', 'p2sh_script', 'carrier_scriptsig', 'parse_carrier_script',
     'encode_mint_v3', 'encode_transfer_v3', 'encode_redeem_v3', 'encode_attestor_register',
     'encode_claim_notice', 'encode_equivocation', 'encode_revive', 'encode_bundle', 'decode_bundle',
@@ -723,6 +723,17 @@ def hot_secret_for(node, seq):
                 _SEQ_SECRETS[int(rec['seq'])] = by_pubkey[pk]
     assert seq in _SEQ_SECRETS, 'no fixed regtest key registered as seq %d' % seq
     return _SEQ_SECRETS[seq]
+
+
+def hot_wif_for(node, seq):
+    """The WIF of attestor ``seq``'s hot key. Never ``ATTESTOR_WIFS[seq]``: register_and_arm puts
+    its registrations in one block, and the block's transaction order, not the key index, decides
+    which fixed key became which seq (the intermittent failures of 2026-09-24)."""
+    secret = hot_secret_for(node, seq)
+    for wif in ATTESTOR_WIFS:
+        if yu.wif_to_secret(wif) == secret:
+            return wif
+    raise AssertionError('seq %d has no fixed hot key' % seq)
 
 
 def feed(node, seq, price_usd, cited=None, secret=None):

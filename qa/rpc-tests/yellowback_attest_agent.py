@@ -312,8 +312,8 @@ class YellowbackAttestAgentTest(YellowbackTestFramework):
         # there.  Only one agent ever signs for a seq, which is the rule doc/yellowback-attestor.md
         # states as "one hot key, one node" -- and yed_signattestation's persisted guard (S16) is
         # what makes a second holder survivable rather than an ejection.
-        from test_framework.yellowback_attest import ATTESTOR_WIFS
-        nodes[ATTESTOR_B].importprivkey(ATTESTOR_WIFS[seqs[2]], 'yellowback-attestor', False)
+        from test_framework.yellowback_attest import hot_wif_for
+        nodes[ATTESTOR_B].importprivkey(hot_wif_for(user, seqs[2]), 'yellowback-attestor', False)
         placement = {seqs[0]: ATTESTOR_A, seqs[1]: ATTESTOR_A, seqs[2]: ATTESTOR_B}
 
         print('starting %d `attest` agents on nodes 6-7 and one `subscribe` beside node 0, dir bus %s'

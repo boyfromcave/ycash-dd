@@ -77,12 +77,6 @@ def node_selection(test, node, r):
     raise AssertionError('a one-signer bundle was accepted')
 
 
-def bond_key_address(seq):
-    """The P2PKH address of a fixed-key attestor's bondPubKey (its bondKeyAddress)."""
-    from test_framework.yellowback_attest import bond_keys
-    return pubkey_to_address(hex_str_to_bytes(bond_keys(5)[seq][1]))
-
-
 class YellowbackAttestWalletTest(YellowbackTestFramework):
 
     def __init__(self):
@@ -240,7 +234,11 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         assert_equal((m1['xMint'], m1['pMint'], m1['source']), (usd_to_micro(50), m1['aMint'], 'a'))
         assert_greater_than(m1['collateralZat'], est['requiredZat'])          # sized at the lower combined price
         assert_equal(m1['attestFeeZat'], m1['feeZat'] * 2500 // 10000)
-        payable = {bond_key_addr.get(s, None) or bond_key_address(s - 2) if s >= 2 else bond_key_addr[s] for s in m1['bundleSeqs']}
+        # the bond key addresses of the bundle's seqs, from the chain: the raw registrations share one block,
+        # so which fixed key became seq 2, 3 or 4 is the block's transaction order, never `seq - 2`
+        payable = {rec['bondKeyAddress'] for rec in user.yed_listattestors() if int(rec['seq']) in m1['bundleSeqs']}
+        for s in (0, 1):
+            assert_equal(bond_key_addr[s], next(rec['bondKeyAddress'] for rec in user.yed_listattestors() if int(rec['seq']) == s))
         assert m1['attestPayee'] in payable, (m1['attestPayee'], payable)
         raw1 = user.getrawtransaction(m1['txid'], 1)
         assert_equal(raw1['vin'][-1]['txid'], m1['carrierTxid'])
