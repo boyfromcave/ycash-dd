@@ -613,7 +613,10 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
     auto seed = [&](MemoryStateView& view, VaultStatus status, MicroUsd pClaim) {
         State st(view);
         VaultRecord v;
-        v.ownerPubKey = std::vector<unsigned char>(f.owner.GetPubKey().begin(), f.owner.GetPubKey().end());
+        // One CPubKey: begin() and end() from two GetPubKey() calls are iterators into
+        // different temporaries, and the copy walks off the first key (ASan, 65-byte stack object).
+        const CPubKey ownerPub = f.owner.GetPubKey();
+        v.ownerPubKey.assign(ownerPub.begin(), ownerPub.end());
         v.termClass = 0;
         v.lockHeight = f.lockHeight;
         v.claimHeight = f.claimHeight;
