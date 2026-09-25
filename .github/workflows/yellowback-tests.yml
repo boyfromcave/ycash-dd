@@ -778,7 +778,12 @@ jobs:
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
-          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=address,undefined \
+          # --with-sanitizers=address appends -static-libasan and configure.ac (frozen at the
+          # v4.5.0 pin) aborts when the probe fails. depends' clang 18 rejects that GCC flag
+          # ("unknown argument '-static-libasan'"); compiler-rt's asan archive is already static.
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure \
+            CXXFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+            LDFLAGS='-fsanitize=address,undefined' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*'
