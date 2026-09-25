@@ -430,13 +430,17 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert user.getblockhash(r_reorg) != hash_a
         self.checkpoint('after the join')
         # the pool's attestations citing hash A no longer verify: BuildBundle drops them (R9); the seqs fed only at
-        # r_reorg are unreachable, the others still have an earlier (pre-split) attestation inside the window
+        # r_reorg are unreachable. The others fall back on their pre-split attestation (cited at a1's reference
+        # height), which counts only while it is still inside the window at r_reorg: citedHeight in
+        # (R - ATTEST_MAX_AGE, R]. r_reorg is whichever of four heights the branches' selections intersected at,
+        # so with ATTEST_MAX_AGE = 8 that attestation is fresh at some of them and stale at others (CI, 2026-09-24).
+        pre_cited = a1['est']['refHeight']
+        still_fresh = sorted(s for s in set(sel_b) - set(both) if pre_cited > r_reorg - ATTEST_MAX_AGE)
         sel = user.yed_getselection(r_reorg, '')
         assert_equal(sorted(int(e['seq']) for e in sel['selected']), sorted(sel_b))
         for e in sel['selected']:
-            if int(e['seq']) in both:
-                assert_equal((int(e['seq']), e['poolFresh']), (int(e['seq']), False))
-        assert_equal(sel['reachable'], len(set(sel_b) - set(both)))
+            assert_equal((int(e['seq']), e['poolFresh']), (int(e['seq']), int(e['seq']) in still_fresh))
+        assert_equal(sel['reachable'], len(still_fresh))
         if sel['reachable'] < 2:
             rpc_error('bundle-insufficient', user.yed_buildbundle, r_reorg, '')
         # the raw mint carrying the stale-hash bundle, mined by node 1 (TPL-2 would keep it out of a pool's template)
