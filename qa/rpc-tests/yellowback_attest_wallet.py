@@ -28,6 +28,7 @@ node.
 
 from decimal import Decimal
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import assert_equal, assert_greater_than, bytes_to_hex_str, hex_str_to_bytes, wait_and_assert_operationid_status
 from test_framework.yellowback_util import (
     ATTESTOR_A, ATTESTOR_B, BOND_MIN_LOCK, CARRIER_VALUE, COIN, EMERGENCY_PERSIST, POOLS, REF_LAG, REF_WINDOW,
@@ -281,7 +282,18 @@ class YellowbackAttestWalletTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[2])
         z_before = user.z_getbalance(ys)
-        mz = wallet_mint(self, user, 10000, 48, ys, prices=49)
+        # The note was mined one block ago; on some runs the wallet has not built its witness yet and the
+        # builder answers with its designed refusal, "missing witness for a Sapling note; retry after the next
+        # block" (txbuilder.cpp). Do what it says, at most three times, and record how many blocks it took.
+        for attempt in range(3):
+            try:
+                mz = wallet_mint(self, user, 10000, 48, ys, prices=49)
+                break
+            except JSONRPCException as e:
+                if 'missing witness' not in e.error['message'] or attempt == 2:
+                    raise
+                print('  no witness for the Sapling note yet (attempt %d): mining one block and retrying' % (attempt + 1))
+                self.mine(POOLS[2])
         assert_equal(mz['fundedFrom'], 'sapling')
         rawz = user.getrawtransaction(mz['txid'], 1)
         assert_equal(len(rawz['vin']), 1)
