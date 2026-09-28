@@ -24,6 +24,7 @@ rebuilds over it.
 
 ```bash
 yellowback-devnet up --role pool        # ~3 min; node 4 is a plain miner: no payout, no signal
+yellowback-devnet up --role pool --stratum [--stratum-mode solo|pool|cenote]   # the same, with real pool software beside node 4 (step 0)
 yellowback-devnet cli --node 4 -- yed_getinfo
 ```
 
@@ -36,9 +37,38 @@ the simulated population and the liquidator.
 
 ## Walk-through
 
+0. **The real pool.** No Ycash pool mines with `generate`. With `--stratum`, `up` starts
+   **yolo** (the Rust rewrite of `yecdev/yolo`, `<workspace>/yolo/target/release/yolo` or
+   `YOLO_BIN`) beside node 4 with node 4's RPC credentials, and every `mine N 4` below runs
+   `stratum-miner --blocks N` against it: node → `getblocktemplate` → `mining.notify` →
+   the miner's 48/5 solver → `mining.submit` → `submitblock`. The heartbeat still never
+   touches your blocks. What to look at:
+   - `yellowback-devnet status` prints one line from yolo's `GET /status`: mode, connected
+     miners, template height and age, the **tag kind yolo decoded in the coinbase it built**
+     (`none` now, `signal` after step 2, `quote` after step 3), the last `submitblock` verdict
+     and the accepted/rejected counts. `pool 4 stratum status` prints the same line alone.
+   - `<dir>/stratum-4.log` (yolo: one `work <height> … tag: …` line per template, one
+     `accepted`/`rejected: <verdict>` per submit) and `<dir>/stratum-miner-4.log` (every
+     `mine`). `report` bundles both.
+   - `pool 4 stratum stop|start [--mode solo|pool|cenote]` swaps the coinbase policy on a
+     running devnet: `solo` takes `coinbasetxn` as is, `pool` rewrites the payout output to the
+     miner's address (the stratum username: node 4's payout address here, so the reward stays
+     in node 4's wallet), `cenote` rebuilds the scriptSig as height ‖ `coinbaseaux.flags` ‖
+     text — the carrier a self-assembling stack must use. The Perl `cenote` drops the tag
+     there (Y-F1); `qa/rpc-tests/yellowback_stratum.py` pins the fixed behaviour.
+   - Cadence: a stratum `mine N 4` is about one block per second, the heartbeat one per 30 s
+     under `--lean`, so `mine 25 4` makes node 4 the whole 64-block window (`share 10000`).
+     Steps 4 and 5 assume a *share*; with `--stratum` mine one or two blocks at a time between
+     heartbeat ticks, or the pause and the pin never show.
+   - notes:
+
 1. **A plain miner.** Mine a few blocks (`yellowback-devnet mine 3 4`). Observe that your blocks
    carry no quote (`cli -- yed_gettag <height>` → `found: false`; MINER-2) and you earn no
    Yellowback fees (`yed_listminers` does not know you).
+   - with `--stratum`: `check-coinbase <height> -regtest -datadir=<dir>/node4` (in
+     `contrib/yellowback/pool/`) exits 1 with `scriptSigBytes: 4` — the height push and
+     nothing else; `getblock <height> 2` shows vout 0 paying node 4's payout address (yolo's
+     `pool` rewrite) and vout 1 the founders' reward.
    - notes:
 
 2. **Become a pool.** `yellowback-devnet pool 4 configure` restarts node 4 with its payout
@@ -46,6 +76,11 @@ the simulated population and the liquidator.
    `doc/yellowback-mining.md` §2 and check the two lines match). Mine again. Watch
    `yed_listminers` move you to registered (`N_REG` = 24 tagged blocks) and then eligible, and
    watch fees start arriving (`getbalance` on node 4; a mint's `payee`).
+   - with `--stratum`: yolo logs `node down` / `node back` across the restart and keeps
+     serving. `check-coinbase <height> -regtest -datadir=<dir>/node4` now exits 0 with `kind:
+     signal` and your `payoutAddress`, line for line with `yed_gettag`; yolo's `/status` says
+     `tag "signal"`. Registration counts **quote** tags: you become registered only once step 3's
+     agent runs and 24 more of your blocks carry a price.
    - notes:
 
 3. **The real quote agent.** `yellowback-devnet pool 4 quote start` runs `yellowback-quote
@@ -53,6 +88,10 @@ the simulated population and the liquidator.
    by hand. `cli --node 4 -- yed_getinfo` → `miner.quoteKind` "quote", `quoteAgeSeconds`.
    Then `pool 4 quote stop` and watch the quote go stale past `-yellowbackquotemaxage`
    (120 s here): `quoteKind` falls back to "signal".
+   - with `--stratum`: the very next `mine 1 4` carries the quote (`check-coinbase` → `kind:
+     quote`, `priceMicroUsd` = the mock price; `status` → `tag "quote"`). yolo re-issues work
+     when `coinbaseaux.flags` changes (Y-F2), so a template fetched before the agent published
+     is not what gets mined.
    - notes:
 
 4. **Stop signalling.** `yellowback-devnet pool 4 signal off` (you keep mining and quoting,
@@ -61,16 +100,24 @@ the simulated population and the liquidator.
    (`yed_getstats.mintingAllowed`, `haltMask` PARTICIPATION), rejection pauses below 50 %
    (`yed_getactivation.enforcementSuspended`), then recovery at 75 % / 60 % once you `signal
    on` again. Mine your share while you watch (`mine 5 4`); the window is 64 blocks.
+   - with `--stratum`: `check-coinbase` on your next block shows `signal: false` with the
+     quote intact. Mine one block per heartbeat tick, not `mine 20 4`: at one block per
+     second you *are* the window and the 60 % line never moves.
    - notes:
 
 5. **Get pinned.** Stop your agent and quote a constant: `cli --node 4 -- yed_setquote
    50000000 1` while the walk moves the attestors; after `PIN_WINDOW` (16) blocks with the
    cross-section 5 % away, PIN-1 marks you pinned (`yed_getprice.pinnedKeys`, `yed_listminers`)
    and drops you from the medians. `pool 4 quote start` to recover.
+   - with `--stratum`: `check-coinbase` shows the constant `priceMicroUsd` on every block you
+     mine; the pin needs the other pools' quote tags in the window (the cross-section), so
+     again one block per tick.
    - notes:
 
 6. **Read `doc/yellowback-mining.md`** as a pool operator would. Does it answer the questions
-   this exercise raised? Which section did you need that was not there?
+   this exercise raised? Which section did you need that was not there? Then `yolo --help` and
+   `contrib/yellowback/pool/README.md` (the three carriers and the per-stack notes): does the
+   mode you would run on mainnet (`solo`, `pool` or `cenote`) tell you which carrier it is on?
    - notes:
 
 ## What we want to know
