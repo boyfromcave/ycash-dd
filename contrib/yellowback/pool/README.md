@@ -58,6 +58,26 @@ the outreach of Phase 10, which stack it runs and whether that stack honours `co
 reading the stack's public source; **every item marked TODO is unverified against a live pool.**
 The one-line patches described are not shipped in this repository until a pool has run them.
 
+### yolo (Rust) — verified on regtest, 2026-09-28
+
+`yolo` (`boyfromcave/yolo`, the Rust rewrite of yecdev's Perl `stratumsolo` / `stratumpool` /
+`cenote`) is the first stack verified end to end, on regtest with a real stratum client
+(`contrib/yellowback/devnet/stratum-miner`) and `submitblock`:
+
+| Mode | Coinbase | Tag | Carrier |
+|---|---|---|---|
+| `solo` | `coinbasetxn.data` untouched | carried | 2 (`coinbasetxn`) |
+| `pool` | output rewritten to the miner's address, scriptSig untouched | carried | 2 (`coinbasetxn`, output rewritten) |
+| `cenote` | scriptSig rebuilt as height ‖ `coinbaseaux.flags` ‖ text | carried | 3 (`coinbaseaux.flags`) |
+
+The **Perl `cenote` drops the tag** (it rebuilds the scriptSig from the height push and its
+text alone, and on a tagging node cannot even produce a decodable block: it assumes a 5-byte
+scriptSig). The Perl `stratumsolo`/`stratumpool` carry it. A pool on the Perl should move to
+the Rust binary or stay on `stratumsolo`/`stratumpool`. Evidence: `qa/rpc-tests/yellowback_stratum.py`
+(every mode, plus the negative case), `yolo`'s `tests/regtest.rs`, and the devnet's stratum
+seat (`yellowback-devnet up --role pool --stratum`). Findings Y-F1..Y-F13 are in
+`docs/plans/role-pool-regtest-plan.md` §7 of the workspace.
+
 ### node-stratum-pool lineage (s-nomp / z-nomp / zcash-equihash stratum)
 
 - These build the coinbase themselves from `getblocktemplate` (`lib/transactions.js`

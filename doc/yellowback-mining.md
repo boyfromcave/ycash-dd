@@ -70,7 +70,15 @@ The node keeps the current tag in the coinbase flags every template carries, so:
 | `getblocktemplate` and you assemble your own coinbase | append the bytes of `coinbaseaux.flags` **verbatim** (they begin with the `0x24` push opcode) after the BIP34 height push and before your extranonce and text; keep your own text ≤ ~55 bytes so the scriptSig stays ≤ 100 bytes |
 | a stratum layer that honours neither | use the per-stack note in `contrib/yellowback/pool/README.md`, or switch to the `coinbasetxn` path |
 
-Refresh the template every block: the tag's price changes as the agent publishes.
+Refresh the template every block: the tag's price changes as the agent publishes. (The node
+caches a template for up to 5 s and rebuilds it on a new tip or a mempool change, not on a new
+quote, so the first template after a quote update can still carry the previous price — at most
+one block's worth.)
+
+**A verified stack:** `yolo` (`boyfromcave/yolo`, Rust, the rewrite of the Perl
+`stratumsolo`/`stratumpool`/`cenote`) carries the tag in every mode and is exercised on regtest by
+`qa/rpc-tests/yellowback_stratum.py` and the devnet's `--stratum` pool seat. The Perl `cenote`
+does **not** carry it; see `contrib/yellowback/pool/README.md`, per-stack notes.
 
 **Verify** on a block you mined: `contrib/yellowback/pool/check-coinbase <height>` (add `--
 -datadir=…` or any `ycash-cli` option) prints `kind: quote`, the price, the source mask and the
