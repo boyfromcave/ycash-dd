@@ -31,6 +31,11 @@ on:
     - cron: '0 3 * * *'
     - cron: '0 4 * * 0'
   workflow_dispatch:
+    inputs:
+      weekly_fuzz:
+        description: Run only the weekly fuzz job (six targets, about 12 hours)
+        type: boolean
+        default: false
 
 env:
   # Plan section 6.0 item 6's list for Phase 6 and after, plus yellowback_hardening (Phase 8,
@@ -60,7 +65,7 @@ env:
 
 jobs:
   main:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     steps:
@@ -159,7 +164,7 @@ jobs:
           if-no-files-found: ignore
 
   audit:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -350,7 +355,7 @@ jobs:
   # GitHub's `paths:` filter is workflow-wide, not per job, so the gate is the presence check below
   # plus a cargo cache keyed on Cargo.lock; the crate is small and the job is cheap.
   agent:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -412,7 +417,7 @@ jobs:
           ! ls depends/packages | grep -qi 'iroh\|yellowback-attest'
 
   python:
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -474,7 +479,7 @@ jobs:
   # never the node's depends/. Also proves fixtures/expected.json is still what the Python
   # aggregator (the reference) computes, so the Rust/Python cross-check cannot drift silently.
   nightly:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -661,7 +666,7 @@ jobs:
   # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
   # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
   lockorder:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -739,7 +744,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   sanitizers:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -824,7 +829,7 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   coverage:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -931,7 +936,7 @@ jobs:
   weekly-fuzz:
     # Two hours per Yellowback target with corpus minimisation, then a PR with the new corpus
     # files and the regenerated C++ replay table (plan §6.0 item 6, §7 "Fuzzing"). Never blocks.
-    if: github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0'
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz == true)
     runs-on: ubuntu-22.04
     timeout-minutes: 900
     permissions:
