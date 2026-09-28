@@ -188,8 +188,8 @@ class YellowbackStratumTest(BitcoinTestFramework):
             doc = self.status(status_port)
             print('/status: %s' % json.dumps(doc, sort_keys=True))
             assert 'mode' not in doc, 'yolo still reports a mode (P-6)'
-            assert_equal(doc['payout'], payout)
-            assert_equal(doc['text'], text)
+            assert_equal(doc['payout'], payout or 'username')     # the fixed address, else "username"
+            assert_equal(doc['text'], text is not None)            # a bool: whether the scriptSig is rebuilt
             assert_equal(doc['accepted'], BLOCKS_PER_CELL)
             assert_equal(doc['rejected'], 0)
             assert_equal(doc['lastSubmitVerdict'], 'accepted')

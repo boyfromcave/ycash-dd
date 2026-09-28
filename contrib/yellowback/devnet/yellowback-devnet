@@ -1111,7 +1111,7 @@ def stratum_line(state, node):
     doc = stratum_status(record)
     if not doc: return "stratum node%d: yolo (pid %d) on :%d, /status on :%d not answering" % (node, record["pid"], record["port"], record["status_port"])
     return ("stratum node%d: yolo (pid %d) on :%d; payout %s; text %s; template height %s (%s s old); miners %s; tag %s; last submit %s; accepted %s rejected %s"
-            % (node, record["pid"], record["port"], doc.get("payout"), json.dumps(doc.get("text")), doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
+            % (node, record["pid"], record["port"], doc.get("payout"), json.dumps(record.get("text")) if doc.get("text") else "none", doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
                json.dumps(doc.get("tag")), json.dumps(doc.get("lastSubmitVerdict")), doc.get("accepted"), doc.get("rejected")))
 
 def stratum_mine(state, node, blocks):
