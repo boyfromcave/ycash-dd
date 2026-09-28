@@ -969,6 +969,9 @@ jobs:
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
+          # BUILD_STAGE=depends exits before autogen.sh, so a checkout has no ./configure.
+          # The nightly fuzz step inherits one from the earlier full build; this job does not.
+          ./autogen.sh
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
