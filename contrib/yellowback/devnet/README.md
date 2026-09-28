@@ -6,6 +6,8 @@ Two scripts and four checklists:
 |---|---|
 | `yellowback-devnet` | the network: `up` builds a regtest chain that is activated and **ARMED** when it returns; every other command drives it |
 | `yellowback-sim` | six personas that inhabit it (started by `up --role`; `sim start|stop|stats`) |
+| `stratum-miner` | a headless stratum client at regtest's Equihash 48,5 (the framework's Python solver): the GPU rig's stand-in for the pool seat (`docs/plans/role-pool-regtest-plan.md` §3.3); `--record` writes the wire exchange as JSONL |
+| `stratum-perl-check` | proves `stratum-miner` against the Perl reference pools in `ref/yolo` on a two-node regtest and records `fixtures/stratum-perl-*.jsonl`; `YCASHD`/`YCASH_CLI` name the binaries |
 | `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists; `up --role` copies the role's into the session's `NOTES.md` |
 
 ## 0. Before you start
