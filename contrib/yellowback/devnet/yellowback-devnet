@@ -22,9 +22,9 @@ YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devne
 side; YELLOWBACK_WALLET_BIN and YELLOWBACK_ATTEST_BIN name the two binaries.
 
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
-[--seed N], check, status, mine N [node], heartbeat {start|stop|rate N|status},
+[--seed N] [--stratum [--stratum-mode solo|pool|cenote]], check, status, mine N [node], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
-attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop},
+attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start|stop|status [--mode M]},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
 cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
 (JSON signing/address/template vectors for the YEW core, wallet plan W0c).
@@ -45,6 +45,8 @@ from decimal import Decimal
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 WORKSPACE = os.path.dirname(REPO)
+if os.path.basename(WORKSPACE) == "wt":                 # a worktree: wt/<name>/ -> the workspace
+    WORKSPACE = os.path.dirname(WORKSPACE)
 sys.path.insert(0, os.path.join(REPO, "qa", "rpc-tests"))
 import test_framework.util as _util
 # The inherited framework asserts n <= MAX_NODES (8) in p2p_port; the role presets run eleven
@@ -115,7 +117,21 @@ def _attest_agent():
     return os.path.join(ATTEST_CRATE, "target", "release", "yellowback-attest")
 
 ATTEST_AGENT = _attest_agent()
-ATTEST_BOND_YEC = 10          # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
+STRATUM_MINER = os.path.join(HERE, "stratum-miner")
+STRATUM_MODES = ("solo", "pool", "cenote")
+STRATUM_PORT_BASE = 30000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, clear of 11000-21000 (p2p/rpc) and of 24xxx-27xxx (stratum-perl-check, other suites)
+STRATUM_STATUS_OFFSET = 5000  # yolo's GET /status port = stratum port + this
+
+def _yolo_binary():
+    """The yolo (Rust) pool: YOLO_BIN, then the workspace build, then PATH (role-pool-regtest-plan.md 3.4)."""
+    override = os.environ.get("YOLO_BIN")
+    if override: return os.path.expanduser(override)
+    candidate = os.path.join(WORKSPACE, "yolo", "target", "release", "yolo")
+    if os.access(candidate, os.X_OK): return candidate
+    return shutil.which("yolo") or candidate
+
+YOLO = _yolo_binary()
+ATTEST_BOND_YEC = 10         # regtest bondMin (src/yellowback/params.cpp, the v3 section 3.1 regtest column)
 ATTEST_LOCK_BLOCKS = 200      # regtest bondMinLock
 ATTEST_FUND_YEC = 11          # the bond plus room for the fee
 ATTEST_INTERVAL = 4           # regtest attestInterval: the agent signs every 4 new blocks
@@ -524,6 +540,11 @@ def check(state, verbose=True):
         record = state.get(name) or {}
         if record.get("pid") and not agent_alive(record["pid"]) and not record.get("stopped"):
             errors.append("%s process (pid %d) is not running; see %s/%s.log" % (name, record["pid"], state["dir"], name))
+    for node, record in sorted((state.get("stratum") or {}).items()):
+        if record.get("pid") and not agent_alive(record["pid"]) and not record.get("stopped"):
+            errors.append("yolo beside node%s (pid %d) is not running; see %s/stratum-%s.log" % (node, record["pid"], state["dir"], node))
+        elif agent_alive(record.get("pid")) and not stratum_status(record):
+            errors.append("yolo beside node%s answers nothing on /status (port %s)" % (node, record.get("status_port")))
     if errors: raise RuntimeError("devnet check failed: " + "; ".join(errors))
 
 def liveness(state):
@@ -645,6 +666,9 @@ def up(args):
     directory = os.path.abspath(args.dir)
     role = args.role
     if role != "none" and args.no_attest: sys.exit("--role needs the attestors; drop --no-attest")
+    if args.stratum and role != "pool": sys.exit("--stratum is the pool seat's: `up --role pool --stratum`")
+    if args.stratum and not os.access(YOLO, os.X_OK):
+        sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it, or drop --stratum)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
     if os.path.exists(path(directory)):
         state = load(directory)
         if any(alive(state, node) for node in range(state["num_nodes"])): sys.exit("a devnet is already running in %s; `down` it first" % directory)
@@ -752,6 +776,9 @@ def up(args):
         info = rpc(state, USER).yed_getinfo()["attest"]
         print("attestation %s: %d seated, poolFresh %d" % (info["status"], info["seatedCount"], info["poolFresh"]))
     if role != "none":
+        if args.stratum:
+            print("[stratum] starting yolo --mode %s beside node%d (your seat); `mine N %d` goes through it" % (args.stratum_mode, seat_of(state), seat_of(state)))
+            stratum_start(state, seat_of(state), args.stratum_mode); save(directory, state)
         if not args.no_heartbeat:
             heartbeat_start(state, (HEARTBEAT_RATE * 2 if args.lean else HEARTBEAT_RATE) if args.heartbeat_rate is None else args.heartbeat_rate)
         if not (args.no_walk or args.lean):
@@ -996,6 +1023,101 @@ def pool(args):
         stop_agents(state, only=node); mark_stopped(state, "quote-%d" % node, True); save(directory, state)
         print("stopped; node%d keeps its last quote for %d s, then its tags fall back to signal-only (quoteKind \"signal\")" % (node, QUOTE_MAX_AGE))
         return
+    if args.action == "stratum":
+        if args.value not in ("start", "stop", "status"): sys.exit("pool N stratum start|stop|status [--mode solo|pool|cenote]")
+        if args.value == "start": stratum_start(state, node, args.mode or (stratum_of(state, node) or {}).get("mode") or "pool"); save(directory, state); return
+        if args.value == "stop": stratum_stop(state, node); save(directory, state); return
+        print(stratum_line(state, node)); return
+
+# ---------------------------------------------------------------------------------- the stratum seat (role-pool-regtest-plan.md 3.4)
+
+def stratum_of(state, node): return (state.get("stratum") or {}).get(str(node))
+def stratum_ports(node):
+    """The stratum and /status ports of a seat: the seat's rpc port shifted above every framework
+    port, so two devnets (two portseeds) never share them."""
+    port = STRATUM_PORT_BASE + (rpc_port(node) - _util.PORT_MIN - _util.PORT_RANGE)
+    return port, port + STRATUM_STATUS_OFFSET
+
+def stratum_status(record, timeout=3):
+    """yolo's GET /status document, or None."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/status" % record["status_port"], timeout=timeout) as reply:
+            return json.load(reply)
+    except Exception:
+        return None
+
+def stratum_start(state, node, mode):
+    """`yolo --mode <mode>` beside pool `node`, on the node's RPC credentials from devnet.json; the
+    seat's blocks then come from `stratum-miner` (`mine N <node>`), never from `generate`.
+
+    The miner's username is the seat's payout address: in pool/cenote mode yolo rewrites the
+    coinbase output to it, so the block reward still lands in the seat's wallet; the tag's payout
+    key comes from -yellowbackpayoutaddress (MINER-2), not from the output, so yed_listminers sees
+    the seat whichever address the coinbase pays."""
+    if mode not in STRATUM_MODES: sys.exit("stratum mode must be one of %s" % ", ".join(STRATUM_MODES))
+    if node not in all_pools(state): sys.exit("stratum runs beside a pool node (%s)" % ", ".join(str(p) for p in all_pools(state)))
+    record = stratum_of(state, node) or {}
+    if agent_alive(record.get("pid")): print("yolo beside node%d is already running (pid %d, mode %s)" % (node, record["pid"], record.get("mode"))); return record
+    if not os.access(YOLO, os.X_OK):
+        sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
+    if not alive(state, node): sys.exit("node%d is down; yolo needs its RPC" % node)
+    creds = state["rpc"][str(node)]
+    port, status_port = stratum_ports(node)
+    # A bare URL, not devnet.json's rpc.url: the framework's credentials carry emoji, which are fine
+    # in a Basic auth header and an invalid URI character in a userinfo (F-40).
+    argv = [YOLO, "--mode", mode, "--bind", "127.0.0.1", "--port", str(port), "--status-port", str(status_port),
+            "--rpc", "http://127.0.0.1:%d" % creds["port"], "--rpc-user", creds["user"], "--rpc-password", creds["password"], "--equihash", "auto", "--log", "info"]
+    if mode == "cenote": argv += ["--text", "yellowback-devnet"]
+    pid = _spawn(state["dir"], "stratum-%d" % node, argv)
+    record = {"pid": pid, "mode": mode, "port": port, "status_port": status_port, "binary": YOLO, "user": pool_address(state, node),
+              "miner": STRATUM_MINER, "started": time.time(), "stopped": False}
+    state.setdefault("stratum", {})[str(node)] = record
+    mark_stopped(state, "stratum-%d" % node, False)
+    for _ in range(30):                        # yolo serves work once its first template poll answered
+        time.sleep(0.5)
+        if not agent_alive(pid): sys.exit("yolo exited at start; see %s/stratum-%d.log" % (state["dir"], node))
+        doc = stratum_status(record)
+        if doc and doc.get("height") is not None: break
+    else:
+        print("yolo started (pid %d) but /status has no template after 15 s; see %s/stratum-%d.log" % (pid, state["dir"], node), file=sys.stderr)
+    print("yolo started beside node%d (pid %d): mode %s, stratum 127.0.0.1:%d, status http://127.0.0.1:%d/status, log %s/stratum-%d.log"
+          % (node, pid, mode, port, status_port, state["dir"], node))
+    print("  `mine N %d` now runs stratum-miner --user %s against it; `check-coinbase <height> -regtest -datadir=%s` verifies the tag"
+          % (node, record["user"], node_dir(state["dir"], node)))
+    return record
+
+def stratum_stop(state, node):
+    record = stratum_of(state, node)
+    if not record: print("no yolo was started beside node%d" % node); return
+    if not agent_alive(record.get("pid")): print("yolo beside node%d is not running" % node)
+    else: _kill(record["pid"], "yolo beside node%d" % node)
+    record["stopped"] = True
+    mark_stopped(state, "stratum-%d" % node, True)
+    print("node%d mines with `generate` again until `pool %d stratum start`" % (node, node))
+
+def stratum_line(state, node):
+    """One line for `status`: yolo's mode, connected miners, last tag kind and last submit verdict."""
+    record = stratum_of(state, node)
+    if not record: return "stratum: none (`pool %d stratum start` runs yolo beside node%d)" % (node, node)
+    if not agent_alive(record.get("pid")):
+        return "stratum node%d: yolo %s (pid %s) %s" % (node, record.get("mode"), record.get("pid"), "stopped" if record.get("stopped") else "DEAD (see %s/stratum-%d.log)" % (state["dir"], node))
+    doc = stratum_status(record)
+    if not doc: return "stratum node%d: yolo %s (pid %d) on :%d, /status on :%d not answering" % (node, record["mode"], record["pid"], record["port"], record["status_port"])
+    return ("stratum node%d: yolo %s (pid %d) on :%d; template height %s (%s s old); miners %s; tag %s; last submit %s; accepted %s rejected %s"
+            % (node, doc.get("mode"), record["pid"], record["port"], doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
+               json.dumps(doc.get("tag")), json.dumps(doc.get("lastSubmitVerdict")), doc.get("accepted"), doc.get("rejected")))
+
+def stratum_mine(state, node, blocks):
+    """`mine N <node>` for a stratum seat: node -> yolo -> stratum-miner -> submitblock, N times."""
+    record = stratum_of(state, node)
+    if not agent_alive(record.get("pid")): sys.exit("yolo beside node%d is not running (`pool %d stratum start`)" % (node, node))
+    argv = [sys.executable, record.get("miner") or STRATUM_MINER, "--pool", "127.0.0.1:%d" % record["port"], "--user", record["user"], "--blocks", str(blocks)]
+    log = open(os.path.join(state["dir"], "stratum-miner-%d.log" % node), "a")
+    log.write("%s %s\n" % (time.strftime("%H:%M:%S"), " ".join(argv))); log.flush()
+    rc = subprocess.call(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    log.close()
+    if rc != 0: sys.exit("stratum-miner exited %d; see %s/stratum-miner-%d.log and stratum-%d.log" % (rc, state["dir"], node, node))
 
 # ---------------------------------------------------------------------------------- status
 
@@ -1041,6 +1163,7 @@ def status(args):
         miner = rpc(state, pool_node).yed_getinfo()["miner"] if alive(state, pool_node) else {}
         print("node%d next tag: %s (quote age %s s, signal %s)%s" % (pool_node, miner.get("quoteKind", "?"), miner.get("quoteAgeSeconds"), json.dumps(miner.get("signal")),
                                                                      "   <- you" if role_of(state) == "pool" and pool_node == seat_of(state) else ""))
+    for pool_node in sorted(int(k) for k in (state.get("stratum") or {})): print(stratum_line(state, pool_node))
     agents = agent_pids(state)
     if agents:
         for pool_node, pid in sorted(agents.items()): print("quote agent node%d pid %d %s" % (pool_node, pid, "up" if agent_alive(pid) else "DOWN"))
@@ -1092,9 +1215,14 @@ def command_check(args):
 def mine(args):
     state = load(os.path.abspath(args.dir))
     if not 0 <= args.node < state["num_nodes"]: sys.exit("node must be between 0 and %d" % (state["num_nodes"] - 1))
-    node = rpc(state, args.node); start = node.getblockcount(); node.generate(args.blocks)
+    node = rpc(state, args.node); start = node.getblockcount()
+    record = stratum_of(state, args.node)
+    if record and not record.get("stopped"):
+        stratum_mine(state, args.node, args.blocks)        # a stratum seat: node -> yolo -> stratum-miner -> submitblock
+    else:
+        node.generate(args.blocks)
     sync_blocks([rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)])
-    print("mined %d blocks on node%d: height %d -> %d" % (args.blocks, args.node, start, node.getblockcount()))
+    print("mined %d blocks on node%d%s: height %d -> %d" % (args.blocks, args.node, " through yolo (%s) and stratum-miner" % record["mode"] if record and not record.get("stopped") else "", start, node.getblockcount()))
 
 def attestor(args):
     """`attestor N stop|start|price USD`: the outage and divergence demos of v3 section 5.
@@ -1186,6 +1314,9 @@ def down(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
     for name in ("sim", "walk", "heartbeat", "lightwalletd"):
         _kill((state.get(name) or {}).get("pid"), name)
+    for node, record in sorted((state.get("stratum") or {}).items()):
+        _kill(record.get("pid"), "yolo beside node%s" % node)
+        subprocess.run(["pkill", "-f", "stratum-miner --pool 127.0.0.1:%d " % record["port"]], capture_output=True)    # a `mine` still solving against it
     stop_agents(state); stop_attest_agents(state)
     for node in range(state["num_nodes"]):
         if alive(state, node):
@@ -1535,10 +1666,12 @@ def main():
     command.add_argument("--lean", action="store_true", help="a constrained machine: no price walk, heartbeat at half rate")
     command.add_argument("--no-heartbeat", action="store_true"); command.add_argument("--no-walk", action="store_true"); command.add_argument("--no-sim", action="store_true")
     command.add_argument("--heartbeat-rate", type=int, help="seconds per block (default %d)" % HEARTBEAT_RATE)
-    command.add_argument("--walk-drift", type=float, default=WALK_DRIFT, help="%% per minute (default %s)" % WALK_DRIFT)
-    command.add_argument("--walk-vol", type=float, default=WALK_VOL, help="%% per tick (default %s)" % WALK_VOL)
+    command.add_argument("--walk-drift", type=float, default=WALK_DRIFT, help="%%%% per minute (default %s)" % WALK_DRIFT)
+    command.add_argument("--walk-vol", type=float, default=WALK_VOL, help="%%%% per tick (default %s)" % WALK_VOL)
     command.add_argument("--walk-tick", type=int, default=WALK_TICK, help="seconds (default %d)" % WALK_TICK)
     command.add_argument("--sim-profile", choices=("demo", "fast"), default="demo", help="persona cadences: demo (a half-hour walk-through) or fast (the regression suite)")
+    command.add_argument("--stratum", action="store_true", help="pool seat only: run yolo (the real stratum pool) beside node 4 and mine its blocks through stratum-miner (YOLO_BIN names the binary)")
+    command.add_argument("--stratum-mode", choices=STRATUM_MODES, default="pool", help="yolo's coinbase policy (default pool)")
     add("check", command_check); add("status", status)
     command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
     command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
@@ -1547,7 +1680,8 @@ def main():
     command.add_argument("--drift", type=float, default=WALK_DRIFT, help="walk: %% per minute"); command.add_argument("--vol", type=float, default=WALK_VOL, help="walk: %% per tick"); command.add_argument("--tick", type=int, default=WALK_TICK, help="walk: seconds per tick")
     command.add_argument("--shock", metavar="PCT", help="a step change, written --shock=-35%% (the = keeps the minus from reading as a flag)")
     command = add("attestor", attestor); command.add_argument("node", type=int); command.add_argument("action", choices=("stop", "start", "price")); command.add_argument("usd", nargs="?")
-    command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "signal", "quote")); command.add_argument("value", nargs="?")
+    command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "signal", "quote", "stratum")); command.add_argument("value", nargs="?")
+    command.add_argument("--mode", choices=STRATUM_MODES, help="stratum start: yolo's coinbase policy (default: the last one, else pool)")
     command = add("sim", sim); command.add_argument("action", choices=("start", "stop", "stats"), nargs="?", default="stats"); command.add_argument("--profile", choices=("demo", "fast"))
     command = add("notice", notice); command.add_argument("vaulttxid")
     command = add("scenario", scenario); command.add_argument("name", nargs="?")
@@ -1569,7 +1703,7 @@ def main():
     if args.command == "cli" and args.args[:1] == ["--"]: args.args = args.args[1:]
     if args.command == "attestor" and args.action == "price" and args.usd is None:
         parser.error("attestor N price needs a USD amount")
-    if args.command in ("pool",) and args.action in ("signal", "quote") and args.value is None:
+    if args.command in ("pool",) and args.action in ("signal", "quote", "stratum") and args.value is None:
         parser.error("pool N %s needs a value" % args.action)
     return args.fn(args) or 0
 

@@ -103,7 +103,8 @@ class Miner:
         self.target = None
         self.job = None            # the current mining.notify params
         self.accepted = self.rejected = 0
-        self.done = set()          # job ids already accepted: the Perl re-notifies them until its next template poll
+        self.done = set()          # prevhashes already built on: the Perl re-notifies an accepted job until its next
+                                   # template poll, yolo re-issues the stale template under new job ids (Y-F9)
         self.nonce2 = args.nonce_start
 
     # -- protocol -----------------------------------------------------------------------------
@@ -124,7 +125,7 @@ class Miner:
             p = msg["params"]
             if len(p) != 9 or p[8] != "ZcashPoW":
                 raise ConnectionError("unexpected mining.notify shape: %r" % (p,))
-            if p[0] in self.done: return
+            if p[2] in self.done: return       # stale: we already found the block on this tip
             if self.job is None or p[0] != self.job[0]:     # a re-notify of the same job id is a keepalive
                 self.job = p
                 self.fresh = True
@@ -197,7 +198,7 @@ class Miner:
             reply = self.expect_reply(rid)
             if reply.get("result") is True:
                 self.accepted += 1
-                self.done.add(job[0])
+                self.done.add(job[2])
                 print("accepted job %s (%d/%d)" % (job[0], self.accepted, self.args.blocks), flush=True)
             else:
                 self.rejected += 1
