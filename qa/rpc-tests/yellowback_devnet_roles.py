@@ -22,7 +22,8 @@ asserts:
      claim-path spend from the liquidator's wallet, which is the assertion that proves the
      attested price has consequences;
   4. the price walk moves both populations together: the pools' mock price and every automated
-     attestor's are byte-equal at every sample, and nothing ends pinned;
+     attestor's are byte-equal at every sample; nothing is pinned before the shock, and whatever
+     the shock pins clears within one pin window of it;
   5. ``check`` passes before the shock (after it, a halted mint under GLOBAL_RATIO is the correct
      state, and ``check`` says so), the heartbeat is still alive at the end, and the state hash
      agrees across every enforcing node.
@@ -268,6 +269,7 @@ class Preset:
         # vault ACTIVE and within EMERGENCY_PERSIST of its claim height to be worth posting)
         self.wait_until(lambda: self.tip() >= claim_at - 12, claim_at, 'approach to the claim height')
         before = self.node(0).yed_getprice()['pClaim']
+        self.assert_nothing_pinned('before the shock')
         rc = self.devnet('price', '--shock=' + SHOCK)
         check(rc == 0, 'price --shock exited %d' % rc)
         self.say('shock %s applied at height %d (pClaim was %s)' % (SHOCK, self.tip(), before))
@@ -293,6 +295,18 @@ class Preset:
         self.say('liquidated: vault %s CLAIMED by clause (%s), %s YED burned, closing %s'
                  % (row['txid'][:16], closing['claimPath'], Decimal(closing['burned']) / 100, row['closingTxid'][:16]))
 
+        # PIN-2 (state.cpp) pins an attestor whose price repeats across bundle rows while pMint
+        # moves more than PIN_DELTA over PIN_WINDOW blocks; the shock satisfies the second half
+        # by construction, so for one window after it any agent that misses a tick or is dropped
+        # by DIVERGE_BPS_ATTEST while its window average catches up reads as pinned -- the rule
+        # doing its job, and a race the nightly lost on 2026-09-25 and 2026-09-28 (pool preset,
+        # seq 3). The invariant after the shock is that the pin clears once the window has
+        # rolled past it; "nothing pinned" itself is asserted above, before the shock.
+        window = self.node(0).yed_getinfo()['params']['attest']['pinWindow']
+        pinned_after = self.pinned()
+        self.wait_until(lambda: not self.pinned(), window + EMERGENCY_PERSIST + 4, 'pinning clearing after the shock (pinned %s)' % (pinned_after,))
+        self.say('pinned after the shock: %s; clear by height %d (window %d)' % (pinned_after or 'nothing', self.tip(), window))
+
         # honesty: no persona is failing every action
         tally = self.stats()['personas']
         loud = [n for n, r in tally.items() if r.get('all_failing')]
@@ -304,6 +318,15 @@ class Preset:
         result = self.devnet_output('check')
         check(result.returncode == 0, 'check failed: %s%s' % (result.stdout, result.stderr))
         self.say('check passed')
+
+    def pinned(self):
+        price = self.node(0).yed_getprice()
+        return (price['pinnedSeqs'] or []) + (price['pinnedKeys'] or [])
+
+    def assert_nothing_pinned(self, when):
+        price = self.node(0).yed_getprice()
+        check(not price['pinnedSeqs'] and not price['pinnedKeys'], 'something is pinned %s: %s / %s' % (when, price['pinnedSeqs'], price['pinnedKeys']))
+        self.say('nothing pinned %s' % when)
 
     def assert_hash(self):
         # every node is still up: a node that died mid-scenario (F-7: the claimant's node
@@ -332,9 +355,7 @@ class Preset:
             time.sleep(0.5)
         check(low is not None, 'the enforcing nodes were never sampled at one height (heights %s)' % sorted(heights))
         check(len(set(at.values())) == 1, 'state hash disagrees at %d: %s' % (low, at))
-        price = self.node(0).yed_getprice()
-        check(not price['pinnedSeqs'] and not price['pinnedKeys'], 'something ended pinned: %s / %s' % (price['pinnedSeqs'], price['pinnedKeys']))
-        self.say('heartbeat alive; state hash %s… agrees on %d enforcing nodes at %d; nothing pinned' % (list(at.values())[0][:12], len(enforcing), low))
+        self.say('heartbeat alive; state hash %s… agrees on %d enforcing nodes at %d' % (list(at.values())[0][:12], len(enforcing), low))
 
     def down(self, keep):
         try:
