@@ -52,6 +52,9 @@ BASE_SCRIPTS= [
     'yellowback_hardening.py',
     'yellowback_enforcement.py',
     'yellowback_stock_node.py',
+    # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
+    # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
+    'yellowback_stratum.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
