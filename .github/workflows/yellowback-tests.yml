@@ -58,7 +58,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: f41f89c3ae8eeca9d6d4e436cf8553b998c7b5da
+  YOLO_COMMIT: 1343013242caa118a57d6590660d3ab317ae7908
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
