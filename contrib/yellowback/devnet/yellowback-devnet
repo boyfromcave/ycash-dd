@@ -366,6 +366,11 @@ def load(directory):
         with open(path(directory)) as file: state = json.load(file)
     except OSError: sys.exit("no devnet at %s (run `up` first)" % directory)
     PortSeed.n = state["portseed"]
+    # Every command that restarts a node (`pool N configure`, `signal`, …) starts it through the
+    # framework, which reads BITCOIND from the environment; only `up` used to export it, so a
+    # restart from a fresh shell silently launched `bitcoind` from PATH. The recorded binary wins
+    # unless the caller set one deliberately.
+    os.environ.setdefault("BITCOIND", state["bitcoind"])
     return state
 def save(directory, state):
     tmp = path(directory) + ".tmp"
