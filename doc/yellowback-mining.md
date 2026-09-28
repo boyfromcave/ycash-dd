@@ -76,7 +76,8 @@ quote, so the first template after a quote update can still carry the previous p
 one block's worth.)
 
 **A verified stack:** `yolo` (`boyfromcave/yolo`, Rust, the rewrite of the Perl
-`stratumsolo`/`stratumpool`/`cenote`) carries the tag in every mode and is exercised on regtest by
+`stratumsolo`/`stratumpool`/`cenote`, one program with `--payout` and `--text` flags) carries
+the tag in every flag combination and is exercised on regtest by
 `qa/rpc-tests/yellowback_stratum.py` and the devnet's `--stratum` pool seat. The Perl `cenote`
 does **not** carry it; see `contrib/yellowback/pool/README.md`, per-stack notes.
 

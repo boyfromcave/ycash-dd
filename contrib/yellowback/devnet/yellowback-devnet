@@ -22,9 +22,9 @@ YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devne
 side; YELLOWBACK_WALLET_BIN and YELLOWBACK_ATTEST_BIN name the two binaries.
 
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
-[--seed N] [--stratum [--stratum-mode solo|pool|cenote]], check, status, mine N [node], heartbeat {start|stop|rate N|status},
+[--seed N] [--stratum [--stratum-text TEXT]], check, status, mine N [node], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
-attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start|stop|status [--mode M]},
+attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
 cli [--node N | --datadir N] [-- args], down [--wipe], vectors [--out DIR] [--seed N] [--count N]
 (JSON signing/address/template vectors for the YEW core, wallet plan W0c).
@@ -118,7 +118,7 @@ def _attest_agent():
 
 ATTEST_AGENT = _attest_agent()
 STRATUM_MINER = os.path.join(HERE, "stratum-miner")
-STRATUM_MODES = ("solo", "pool", "cenote")
+STRATUM_WORKER = "devnet-worker"  # the miner's stratum username: with --payout set it is a free worker name, not an address
 STRATUM_PORT_BASE = 30000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, clear of 11000-21000 (p2p/rpc) and of 24xxx-27xxx (stratum-perl-check, other suites)
 STRATUM_STATUS_OFFSET = 5000  # yolo's GET /status port = stratum port + this
 
@@ -777,8 +777,8 @@ def up(args):
         print("attestation %s: %d seated, poolFresh %d" % (info["status"], info["seatedCount"], info["poolFresh"]))
     if role != "none":
         if args.stratum:
-            print("[stratum] starting yolo --mode %s beside node%d (your seat); `mine N %d` goes through it" % (args.stratum_mode, seat_of(state), seat_of(state)))
-            stratum_start(state, seat_of(state), args.stratum_mode); save(directory, state)
+            print("[stratum] starting yolo --payout <node%d's payout address> beside node%d (your seat); `mine N %d` goes through it" % ((seat_of(state),) * 3))
+            stratum_start(state, seat_of(state), args.stratum_text); save(directory, state)
         if not args.no_heartbeat:
             heartbeat_start(state, (HEARTBEAT_RATE * 2 if args.lean else HEARTBEAT_RATE) if args.heartbeat_rate is None else args.heartbeat_rate)
         if not (args.no_walk or args.lean):
@@ -1024,8 +1024,10 @@ def pool(args):
         print("stopped; node%d keeps its last quote for %d s, then its tags fall back to signal-only (quoteKind \"signal\")" % (node, QUOTE_MAX_AGE))
         return
     if args.action == "stratum":
-        if args.value not in ("start", "stop", "status"): sys.exit("pool N stratum start|stop|status [--mode solo|pool|cenote]")
-        if args.value == "start": stratum_start(state, node, args.mode or (stratum_of(state, node) or {}).get("mode") or "pool"); save(directory, state); return
+        if args.value not in ("start", "stop", "status"): sys.exit("pool N stratum start [--stratum-text TEXT]|stop|status")
+        if args.value == "start":
+            text = args.stratum_text if args.stratum_text is not None else (stratum_of(state, node) or {}).get("text")
+            stratum_start(state, node, text); save(directory, state); return
         if args.value == "stop": stratum_stop(state, node); save(directory, state); return
         print(stratum_line(state, node)); return
 
@@ -1047,18 +1049,21 @@ def stratum_status(record, timeout=3):
     except Exception:
         return None
 
-def stratum_start(state, node, mode):
-    """`yolo --mode <mode>` beside pool `node`, on the node's RPC credentials from devnet.json; the
-    seat's blocks then come from `stratum-miner` (`mine N <node>`), never from `generate`.
+def stratum_start(state, node, text=None):
+    """`yolo --payout <the seat's payout address> [--text TEXT]` beside pool `node`, on the node's
+    RPC credentials from devnet.json; the seat's blocks then come from `stratum-miner`
+    (`mine N <node>`), never from `generate`.
 
-    The miner's username is the seat's payout address: in pool/cenote mode yolo rewrites the
-    coinbase output to it, so the block reward still lands in the seat's wallet; the tag's payout
-    key comes from -yellowbackpayoutaddress (MINER-2), not from the output, so yed_listminers sees
-    the seat whichever address the coinbase pays."""
-    if mode not in STRATUM_MODES: sys.exit("stratum mode must be one of %s" % ", ".join(STRATUM_MODES))
+    yolo has no modes (P-6): `--payout` set means every block pays that address whatever the
+    miner's username (so the reward lands in the seat's wallet and the username is a free worker
+    name, STRATUM_WORKER); `--text` set means the scriptSig is rebuilt as height push ||
+    coinbaseaux.flags || text (carrier 3), unset leaves the node's scriptSig alone (carrier 2).
+    The tag's payout key comes from -yellowbackpayoutaddress (MINER-2), not from the output, so
+    yed_listminers sees the seat whichever address the coinbase pays."""
+    if text is not None and len(text.encode()) > 100: sys.exit("--stratum-text is at most 100 bytes (yolo's scriptSig limit)")
     if node not in all_pools(state): sys.exit("stratum runs beside a pool node (%s)" % ", ".join(str(p) for p in all_pools(state)))
     record = stratum_of(state, node) or {}
-    if agent_alive(record.get("pid")): print("yolo beside node%d is already running (pid %d, mode %s)" % (node, record["pid"], record.get("mode"))); return record
+    if agent_alive(record.get("pid")): print("yolo beside node%d is already running (pid %d, payout %s, text %s)" % (node, record["pid"], record.get("payout"), json.dumps(record.get("text")))); return record
     if not os.access(YOLO, os.X_OK):
         sys.exit("yolo not found at %s\n  build it with: cd %s && cargo build --release\n  (or point YOLO_BIN at it)" % (YOLO, os.path.join(WORKSPACE, "yolo")))
     if not alive(state, node): sys.exit("node%d is down; yolo needs its RPC" % node)
@@ -1066,11 +1071,12 @@ def stratum_start(state, node, mode):
     port, status_port = stratum_ports(node)
     # A bare URL, not devnet.json's rpc.url: the framework's credentials carry emoji, which are fine
     # in a Basic auth header and an invalid URI character in a userinfo (F-40).
-    argv = [YOLO, "--mode", mode, "--bind", "127.0.0.1", "--port", str(port), "--status-port", str(status_port),
+    payout = pool_address(state, node)
+    argv = [YOLO, "--payout", payout, "--bind", "127.0.0.1", "--port", str(port), "--status-port", str(status_port),
             "--rpc", "http://127.0.0.1:%d" % creds["port"], "--rpc-user", creds["user"], "--rpc-password", creds["password"], "--equihash", "auto", "--log", "info"]
-    if mode == "cenote": argv += ["--text", "yellowback-devnet"]
+    if text is not None: argv += ["--text", text]
     pid = _spawn(state["dir"], "stratum-%d" % node, argv)
-    record = {"pid": pid, "mode": mode, "port": port, "status_port": status_port, "binary": YOLO, "user": pool_address(state, node),
+    record = {"pid": pid, "payout": payout, "text": text, "port": port, "status_port": status_port, "binary": YOLO, "user": STRATUM_WORKER,
               "miner": STRATUM_MINER, "started": time.time(), "stopped": False}
     state.setdefault("stratum", {})[str(node)] = record
     mark_stopped(state, "stratum-%d" % node, False)
@@ -1081,8 +1087,8 @@ def stratum_start(state, node, mode):
         if doc and doc.get("height") is not None: break
     else:
         print("yolo started (pid %d) but /status has no template after 15 s; see %s/stratum-%d.log" % (pid, state["dir"], node), file=sys.stderr)
-    print("yolo started beside node%d (pid %d): mode %s, stratum 127.0.0.1:%d, status http://127.0.0.1:%d/status, log %s/stratum-%d.log"
-          % (node, pid, mode, port, status_port, state["dir"], node))
+    print("yolo started beside node%d (pid %d): payout %s, text %s, stratum 127.0.0.1:%d, status http://127.0.0.1:%d/status, log %s/stratum-%d.log"
+          % (node, pid, payout, json.dumps(text), port, status_port, state["dir"], node))
     print("  `mine N %d` now runs stratum-miner --user %s against it; `check-coinbase <height> -regtest -datadir=%s` verifies the tag"
           % (node, record["user"], node_dir(state["dir"], node)))
     return record
@@ -1097,15 +1103,15 @@ def stratum_stop(state, node):
     print("node%d mines with `generate` again until `pool %d stratum start`" % (node, node))
 
 def stratum_line(state, node):
-    """One line for `status`: yolo's mode, connected miners, last tag kind and last submit verdict."""
+    """One line for `status`: yolo's payout and text, connected miners, last tag kind and last submit verdict."""
     record = stratum_of(state, node)
     if not record: return "stratum: none (`pool %d stratum start` runs yolo beside node%d)" % (node, node)
     if not agent_alive(record.get("pid")):
-        return "stratum node%d: yolo %s (pid %s) %s" % (node, record.get("mode"), record.get("pid"), "stopped" if record.get("stopped") else "DEAD (see %s/stratum-%d.log)" % (state["dir"], node))
+        return "stratum node%d: yolo (pid %s) %s" % (node, record.get("pid"), "stopped" if record.get("stopped") else "DEAD (see %s/stratum-%d.log)" % (state["dir"], node))
     doc = stratum_status(record)
-    if not doc: return "stratum node%d: yolo %s (pid %d) on :%d, /status on :%d not answering" % (node, record["mode"], record["pid"], record["port"], record["status_port"])
-    return ("stratum node%d: yolo %s (pid %d) on :%d; template height %s (%s s old); miners %s; tag %s; last submit %s; accepted %s rejected %s"
-            % (node, doc.get("mode"), record["pid"], record["port"], doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
+    if not doc: return "stratum node%d: yolo (pid %d) on :%d, /status on :%d not answering" % (node, record["pid"], record["port"], record["status_port"])
+    return ("stratum node%d: yolo (pid %d) on :%d; payout %s; text %s; template height %s (%s s old); miners %s; tag %s; last submit %s; accepted %s rejected %s"
+            % (node, record["pid"], record["port"], doc.get("payout"), json.dumps(doc.get("text")), doc.get("height"), doc.get("templateAgeSeconds"), doc.get("miners"),
                json.dumps(doc.get("tag")), json.dumps(doc.get("lastSubmitVerdict")), doc.get("accepted"), doc.get("rejected")))
 
 def stratum_mine(state, node, blocks):
@@ -1222,7 +1228,7 @@ def mine(args):
     else:
         node.generate(args.blocks)
     sync_blocks([rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)])
-    print("mined %d blocks on node%d%s: height %d -> %d" % (args.blocks, args.node, " through yolo (%s) and stratum-miner" % record["mode"] if record and not record.get("stopped") else "", start, node.getblockcount()))
+    print("mined %d blocks on node%d%s: height %d -> %d" % (args.blocks, args.node, " through yolo and stratum-miner" if record and not record.get("stopped") else "", start, node.getblockcount()))
 
 def attestor(args):
     """`attestor N stop|start|price USD`: the outage and divergence demos of v3 section 5.
@@ -1671,7 +1677,7 @@ def main():
     command.add_argument("--walk-tick", type=int, default=WALK_TICK, help="seconds (default %d)" % WALK_TICK)
     command.add_argument("--sim-profile", choices=("demo", "fast"), default="demo", help="persona cadences: demo (a half-hour walk-through) or fast (the regression suite)")
     command.add_argument("--stratum", action="store_true", help="pool seat only: run yolo (the real stratum pool) beside node 4 and mine its blocks through stratum-miner (YOLO_BIN names the binary)")
-    command.add_argument("--stratum-mode", choices=STRATUM_MODES, default="pool", help="yolo's coinbase policy (default pool)")
+    command.add_argument("--stratum-text", metavar="TEXT", help="with --stratum: yolo rebuilds the coinbase scriptSig as height push + coinbaseaux.flags + TEXT (unset: the node's scriptSig as is)")
     add("check", command_check); add("status", status)
     command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
     command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
@@ -1681,7 +1687,7 @@ def main():
     command.add_argument("--shock", metavar="PCT", help="a step change, written --shock=-35%% (the = keeps the minus from reading as a flag)")
     command = add("attestor", attestor); command.add_argument("node", type=int); command.add_argument("action", choices=("stop", "start", "price")); command.add_argument("usd", nargs="?")
     command = add("pool", pool); command.add_argument("node", type=int); command.add_argument("action", choices=("configure", "signal", "quote", "stratum")); command.add_argument("value", nargs="?")
-    command.add_argument("--mode", choices=STRATUM_MODES, help="stratum start: yolo's coinbase policy (default: the last one, else pool)")
+    command.add_argument("--stratum-text", metavar="TEXT", help="stratum start: yolo's coinbase text (default: the last one, else none)")
     command = add("sim", sim); command.add_argument("action", choices=("start", "stop", "stats"), nargs="?", default="stats"); command.add_argument("--profile", choices=("demo", "fast"))
     command = add("notice", notice); command.add_argument("vaulttxid")
     command = add("scenario", scenario); command.add_argument("name", nargs="?")

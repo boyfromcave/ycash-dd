@@ -24,7 +24,7 @@ rebuilds over it.
 
 ```bash
 yellowback-devnet up --role pool        # ~3 min; node 4 is a plain miner: no payout, no signal
-yellowback-devnet up --role pool --stratum [--stratum-mode solo|pool|cenote]   # the same, with real pool software beside node 4 (step 0)
+yellowback-devnet up --role pool --stratum [--stratum-text TEXT]   # the same, with real pool software beside node 4 (step 0)
 yellowback-devnet cli --node 4 -- yed_getinfo
 ```
 
@@ -43,19 +43,22 @@ the simulated population and the liquidator.
    `stratum-miner --blocks N` against it: node → `getblocktemplate` → `mining.notify` →
    the miner's 48/5 solver → `mining.submit` → `submitblock`. The heartbeat still never
    touches your blocks. What to look at:
-   - `yellowback-devnet status` prints one line from yolo's `GET /status`: mode, connected
-     miners, template height and age, the **tag kind yolo decoded in the coinbase it built**
+   - `yellowback-devnet status` prints one line from yolo's `GET /status`: payout address,
+     coinbase text, connected miners, template height and age, the **tag kind yolo decoded in the coinbase it built**
      (`none` now, `signal` after step 2, `quote` after step 3), the last `submitblock` verdict
      and the accepted/rejected counts. `pool 4 stratum status` prints the same line alone.
    - `<dir>/stratum-4.log` (yolo: one `work <height> … tag: …` line per template, one
      `accepted`/`rejected: <verdict>` per submit) and `<dir>/stratum-miner-4.log` (every
      `mine`). `report` bundles both.
-   - `pool 4 stratum stop|start [--mode solo|pool|cenote]` swaps the coinbase policy on a
-     running devnet: `solo` takes `coinbasetxn` as is, `pool` rewrites the payout output to the
-     miner's address (the stratum username: node 4's payout address here, so the reward stays
-     in node 4's wallet), `cenote` rebuilds the scriptSig as height ‖ `coinbaseaux.flags` ‖
-     text — the carrier a self-assembling stack must use. The Perl `cenote` drops the tag
-     there (Y-F1); `qa/rpc-tests/yellowback_stratum.py` pins the fixed behaviour.
+   - yolo has no modes (P-6), two flags. The seat runs `yolo --payout <node 4's payout
+     address>`: every block pays that address whatever the miner sends as username (here the
+     worker name `devnet-worker`), so the reward stays in node 4's wallet; without `--payout`
+     the username itself must be a t-address and is paid. `--stratum-text TEXT` (on `up`, or
+     `pool 4 stratum stop` then `start --stratum-text TEXT`) passes yolo `--text`: the
+     scriptSig is rebuilt as height ‖ `coinbaseaux.flags` ‖ text — the carrier a
+     self-assembling stack must use; without it the node's scriptSig is used untouched. The
+     Perl `cenote` drops the tag on that path (Y-F1); `qa/rpc-tests/yellowback_stratum.py`
+     pins the fixed behaviour on all four payout × text cells.
    - Cadence: a stratum `mine N 4` is about one block per second, the heartbeat one per 30 s
      under `--lean`, so `mine 25 4` makes node 4 the whole 64-block window (`share 10000`).
      Steps 4 and 5 assume a *share*; with `--stratum` mine one or two blocks at a time between
@@ -68,7 +71,9 @@ the simulated population and the liquidator.
    - with `--stratum`: `check-coinbase <height> -regtest -datadir=<dir>/node4` (in
      `contrib/yellowback/pool/`) exits 1 with `scriptSigBytes: 4` — the height push and
      nothing else; `getblock <height> 2` shows vout 0 paying node 4's payout address (yolo's
-     `pool` rewrite) and vout 1 the founders' reward.
+     `--payout`) and vout 1 the founders' reward. With `--stratum-text` the scriptSig ends in
+     the text: `check-coinbase`'s `scriptSigBytes` grows by its length and `getblock <height>
+     2` → `tx[0].vin[0].coinbase` ends in its hex.
    - notes:
 
 2. **Become a pool.** `yellowback-devnet pool 4 configure` restarts node 4 with its payout
@@ -116,8 +121,8 @@ the simulated population and the liquidator.
 
 6. **Read `doc/yellowback-mining.md`** as a pool operator would. Does it answer the questions
    this exercise raised? Which section did you need that was not there? Then `yolo --help` and
-   `contrib/yellowback/pool/README.md` (the three carriers and the per-stack notes): does the
-   mode you would run on mainnet (`solo`, `pool` or `cenote`) tell you which carrier it is on?
+   `contrib/yellowback/pool/README.md` (the three carriers and the per-stack notes): do the
+   flags you would run on mainnet (`--payout`, `--text`) tell you which carrier you are on?
    - notes:
 
 ## What we want to know

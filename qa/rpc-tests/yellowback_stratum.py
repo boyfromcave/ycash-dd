@@ -10,17 +10,19 @@ Real pool software against the node: yolo (Rust) and a stratum miner, tag on eve
 Every other script mines with ``generate``, the one block-building path no Ycash pool uses.  This
 one puts the block through node -> ``getblocktemplate`` -> yolo -> ``mining.notify`` ->
 ``contrib/yellowback/devnet/stratum-miner`` (the framework's 48,5 solver) -> ``mining.submit`` ->
-``submitblock``, once per coinbase policy yolo has:
+``submitblock``, once per cell of yolo's two flags (owner decision P-6: no modes):
 
-  solo     ``coinbasetxn.data`` as is
-  pool     the payout output rewritten to the miner's address (the stratum username)
-  cenote   the scriptSig rebuilt as height push + ``coinbaseaux.flags`` + text, output rewritten
+  --payout unset   the stratum username is the payout address (must validate) and is paid
+  --payout ADDR    every block pays ADDR; the username is a free worker name
+  --text unset     the node's coinbase scriptSig is used as is (carrier 2)
+  --text TEXT      the scriptSig is rebuilt as height push + ``coinbaseaux.flags`` + TEXT (carrier 3)
 
-and asserts, per mode: two blocks accepted, both nodes at the new height, ``yed_gettag`` found
-with the quote's ``priceMicroUsd`` and the pool node's payout address, the coinbase paying the
-miner's address in pool/cenote (the node's own wallet in solo), and ``check-coinbase`` agreeing.
-Then the negative: ``cenote --no-flags`` (the Perl cenote's behaviour, Y-F1) yields an accepted
-block whose tag is ``found: false``.
+and asserts, per cell: two blocks accepted, both nodes at the new height, ``yed_gettag`` found
+with the quote's ``priceMicroUsd`` and the pool node's payout address, coinbase vout 0 paying
+the expected address (the fixed ``--payout`` or the miner's username), the scriptSig ending in
+the text exactly when ``--text`` is set, and ``check-coinbase`` agreeing.  Then the negative:
+``--text ... --no-flags`` (the Perl cenote's behaviour, Y-F1) yields an accepted block whose
+tag is ``found: false``.
 
 Needs a yolo binary: ``YOLO_BIN`` names it (the fork's CI builds boyfromcave/yolo and sets it);
 without one the script SKIPs (exit 0 with a message) so the inherited matrix does not break.  No
@@ -64,8 +66,7 @@ if os.path.basename(WORKSPACE) == 'wt':                      # a worktree: wt/<n
 STRATUM_MINER = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'stratum-miner')
 CHECK_COINBASE = os.path.join(REPO, 'contrib', 'yellowback', 'pool', 'check-coinbase')
 QUOTE_USD = '0.05'
-BLOCKS_PER_MODE = 2
-MODES = ('solo', 'pool', 'cenote')
+BLOCKS_PER_CELL = 2
 STRATUM_PORT_BASE = 30000       # + (rpc_port(0) - PORT_MIN - PORT_RANGE): follows --portseed, clear of the framework's 11000-21000
 
 
@@ -103,25 +104,25 @@ class YellowbackStratumTest(BitcoinTestFramework):
         base = STRATUM_PORT_BASE + (rpc_port(0) - PORT_MIN - PORT_RANGE) + index
         return base, base + 5000
 
-    def start_yolo(self, mode, index, extra=()):
+    def start_yolo(self, name, index, extra=()):
         user, password = rpc_auth_pair(0)
         port, status_port = self.ports(index)
-        argv = [self.yolo, '--mode', mode, '--bind', '127.0.0.1', '--port', str(port), '--status-port', str(status_port),
+        argv = [self.yolo, '--bind', '127.0.0.1', '--port', str(port), '--status-port', str(status_port),
                 '--rpc', 'http://127.0.0.1:%d' % rpc_port(0), '--rpc-user', user, '--rpc-password', password,
                 '--equihash', 'auto', '--log', 'debug'] + list(extra)
-        log = open(os.path.join(self.options.tmpdir, 'yolo-%s-%d.log' % (mode, index)), 'ab')
+        log = open(os.path.join(self.options.tmpdir, 'yolo-%s-%d.log' % (name, index)), 'ab')
         print('starting %s' % ' '.join(argv))
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         self.procs.append(proc)
         deadline = time.time() + 30
         while time.time() < deadline:
             if proc.poll() is not None:
-                raise AssertionError('yolo --mode %s exited %s at start; see %s' % (mode, proc.returncode, log.name))
+                raise AssertionError('yolo (%s) exited %s at start; see %s' % (name, proc.returncode, log.name))
             doc = self.status(status_port)
             if doc and doc.get('height') is not None:
                 return proc, port, status_port
             time.sleep(0.5)
-        raise AssertionError('yolo --mode %s served no template within 30 s; see %s' % (mode, log.name))
+        raise AssertionError('yolo (%s) served no template within 30 s; see %s' % (name, log.name))
 
     @staticmethod
     def status(status_port):
@@ -165,42 +166,78 @@ class YellowbackStratumTest(BitcoinTestFramework):
         vouts = [o for o in block['tx'][0]['vout'] if o['value'] > 0]
         return [a for o in vouts for a in o['scriptPubKey'].get('addresses', [])]
 
-    def run_mode(self, mode, index, miner_user, extra=(), expect_tag=True):
-        proc, port, status_port = self.start_yolo(mode, index, extra)
+    def run_cell(self, index, miner_user, payout=None, text=None, no_flags=False, expect_tag=True):
+        """One yolo start: ``payout`` is the fixed --payout address (None: the username is paid),
+        ``text`` the --text (None: scriptSig untouched); ``no_flags`` adds the hidden switch."""
+        name = '%s-%s%s' % ('payout' if payout else 'username', 'text' if text is not None else 'notext', '-noflags' if no_flags else '')
+        extra = []
+        if payout:
+            extra += ['--payout', payout]
+        if text is not None:
+            extra += ['--text', text]
+        if no_flags:
+            extra += ['--no-flags']
+        expected_payee = payout or miner_user
+        proc, port, status_port = self.start_yolo(name, index, extra)
         before = self.nodes[0].getblockcount()
         try:
-            self.mine(port, miner_user, BLOCKS_PER_MODE)
+            self.mine(port, miner_user, BLOCKS_PER_CELL)
             sync_blocks(self.nodes)
-            height = before + BLOCKS_PER_MODE
+            height = before + BLOCKS_PER_CELL
             assert_equal([n.getblockcount() for n in self.nodes], [height, height])
             doc = self.status(status_port)
             print('/status: %s' % json.dumps(doc, sort_keys=True))
-            assert_equal(doc['mode'], mode)
-            assert_equal(doc['accepted'], BLOCKS_PER_MODE)
+            assert 'mode' not in doc, 'yolo still reports a mode (P-6)'
+            assert_equal(doc['payout'], payout)
+            assert_equal(doc['text'], text)
+            assert_equal(doc['accepted'], BLOCKS_PER_CELL)
             assert_equal(doc['rejected'], 0)
             assert_equal(doc['lastSubmitVerdict'], 'accepted')
             for h in range(before + 1, height + 1):
                 for n in self.nodes:
                     tag = n.yed_gettag(str(h))
-                    print('%s: node %d yed_gettag %d -> %s' % (mode, self.nodes.index(n), h, json.dumps(tag, sort_keys=True)))
+                    print('%s: node %d yed_gettag %d -> %s' % (name, self.nodes.index(n), h, json.dumps(tag, sort_keys=True)))
                     assert_equal(tag['found'], expect_tag)
                     if expect_tag:
                         assert_equal(tag['kind'], 'quote')
                         assert_equal(tag['priceMicroUsd'], usd_to_micro(QUOTE_USD))
                         assert_equal(tag['payoutAddress'], self.pool_address)
-                sig = self.nodes[0].getblock(str(h), 2)['tx'][0]['vin'][0]['coinbase']
-                print('%s: coinbase scriptSig at %d: %s' % (mode, h, sig))
+                sig = bytes.fromhex(self.nodes[0].getblock(str(h), 2)['tx'][0]['vin'][0]['coinbase'])
+                print('%s: coinbase scriptSig at %d: %s' % (name, h, sig.hex()))
+                self.check_scriptsig(sig, h, text, no_flags)
                 assert_equal(self.check_coinbase(h), 0 if expect_tag else 1)
                 # vout 0 is the block reward; vout 1 the founders' reward (regtest pays one too)
                 payees = self.coinbase_payee(h)
-                print('%s: coinbase pays %s' % (mode, payees))
-                if mode == 'solo':
-                    assert self.nodes[0].validateaddress(payees[0])['ismine'], payees
-                else:
-                    assert_equal(payees[0], miner_user)
+                print('%s: coinbase pays %s' % (name, payees))
+                assert_equal(payees[0], expected_payee)
             assert_equal(doc['tag'], 'quote' if expect_tag else 'none')
         finally:
             self.stop_proc(proc)
+
+    def check_scriptsig(self, sig, height, text, no_flags):
+        """The shape: a height push first; with --text the script ends in the text (pushed as
+        data) and, unless --no-flags, carries the node's coinbaseaux.flags between the two;
+        without --text the node's own script (height || OP_0 || flags, miner.cpp) is untouched."""
+        if height <= 16:
+            push = bytes([0x50 + height])
+        else:
+            raw = height.to_bytes((height.bit_length() + 8) // 8, 'little')
+            push = bytes([len(raw)]) + raw
+        assert sig.startswith(push), (sig.hex(), push.hex())
+        flags = bytes.fromhex(self.nodes[0].getblocktemplate()['coinbaseaux']['flags'])
+        if text is None:
+            # the template's scriptSig (miner.cpp: height || OP_0 || flags) used untouched; the tag
+            # bytes carry no time, so the flags of the next template are those of the mined block
+            assert_equal(sig.hex(), (push + b'\x00' + flags).hex())
+            return
+        encoded = text.encode()
+        assert sig.endswith(bytes([len(encoded)]) + encoded), 'no text push at the end: %s' % sig.hex()
+        assert len(sig) <= 100, len(sig)
+        middle = sig[len(push):-(len(encoded) + 1)]
+        if no_flags:
+            assert_equal(middle, b'')
+        else:
+            assert middle, 'coinbaseaux.flags missing between height and text: %s' % sig.hex()
 
     def run_test(self):
         self.yolo = find_yolo()
@@ -214,18 +251,21 @@ class YellowbackStratumTest(BitcoinTestFramework):
         tpl = self.nodes[0].getblocktemplate()
         print('template flags (coinbaseaux): %s' % tpl.get('coinbaseaux', {}).get('flags'))
         assert tpl.get('coinbaseaux', {}).get('flags'), 'the pool node builds no tag'
-        miner_user = self.nodes[1].getnewaddress()          # a foreign wallet: the rewrite is visible on chain
+        miner_user = self.nodes[1].getnewaddress()          # a foreign wallet: the username payout is visible on chain
+        fixed_payout = self.nodes[1].getnewaddress()        # another: --payout wins over the username
+        text = 'yellowback_stratum.py'
         try:
-            self.run_mode('solo', 0, miner_user)
-            self.run_mode('pool', 1, miner_user)
-            self.run_mode('cenote', 2, miner_user, extra=('--text', 'yellowback_stratum.py'))
-            # Y-F1 pinned: a cenote that does not append coinbaseaux.flags loses the tag on a block
-            # the node accepts. --no-flags is yolo's hidden test-only switch for exactly this.
-            self.run_mode('cenote', 3, miner_user, extra=('--text', 'no-flags', '--no-flags'), expect_tag=False)
+            self.run_cell(0, miner_user)                                        # username paid, scriptSig as is
+            self.run_cell(1, miner_user, payout=fixed_payout)                   # --payout paid, scriptSig as is
+            self.run_cell(2, miner_user, text=text)                             # username paid, scriptSig rebuilt
+            self.run_cell(3, 'worker.1', payout=fixed_payout, text=text)        # --payout paid, username a free name
+            # Y-F1 pinned: a rebuilt scriptSig that does not carry coinbaseaux.flags loses the tag
+            # on a block the node accepts. --no-flags is yolo's hidden test-only switch for this.
+            self.run_cell(4, miner_user, text='no-flags', no_flags=True, expect_tag=False)
         finally:
             for proc in self.procs:
                 self.stop_proc(proc)
-        print('yellowback_stratum: every mode carried the tag; cenote --no-flags dropped it')
+        print('yellowback_stratum: all four payout x text cells carried the tag; --text --no-flags dropped it')
 
 
 if __name__ == '__main__':

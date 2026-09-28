@@ -64,17 +64,22 @@ The one-line patches described are not shipped in this repository until a pool h
 `cenote`) is the first stack verified end to end, on regtest with a real stratum client
 (`contrib/yellowback/devnet/stratum-miner`) and `submitblock`:
 
-| Mode | Coinbase | Tag | Carrier |
-|---|---|---|---|
-| `solo` | `coinbasetxn.data` untouched | carried | 2 (`coinbasetxn`) |
-| `pool` | output rewritten to the miner's address, scriptSig untouched | carried | 2 (`coinbasetxn`, output rewritten) |
-| `cenote` | scriptSig rebuilt as height ‖ `coinbaseaux.flags` ‖ text | carried | 3 (`coinbaseaux.flags`) |
+yolo has no modes, two independent flags (owner decision P-6, 2026-09-28): `--payout <addr>`
+(unset: the stratum username is the payout address and must validate; set: every block pays
+that address and the username is a worker name) and `--text "…"` (unset: the node's scriptSig
+as is; set: rebuilt as height push ‖ `coinbaseaux.flags` ‖ text, ≤ 100 bytes). The tag is
+carried in all four cells:
+
+| | `--text` unset | `--text` set |
+|---|---|---|
+| `--payout` unset | vout 0 → username; scriptSig untouched; carrier 2 (`coinbasetxn`) | vout 0 → username; scriptSig rebuilt; carrier 3 (`coinbaseaux.flags`) |
+| `--payout` set | vout 0 → `--payout`; scriptSig untouched; carrier 2 (`coinbasetxn`, output rewritten) | vout 0 → `--payout`; scriptSig rebuilt; carrier 3 (`coinbaseaux.flags`) |
 
 The **Perl `cenote` drops the tag** (it rebuilds the scriptSig from the height push and its
 text alone, and on a tagging node cannot even produce a decodable block: it assumes a 5-byte
 scriptSig). The Perl `stratumsolo`/`stratumpool` carry it. A pool on the Perl should move to
 the Rust binary or stay on `stratumsolo`/`stratumpool`. Evidence: `qa/rpc-tests/yellowback_stratum.py`
-(every mode, plus the negative case), `yolo`'s `tests/regtest.rs`, and the devnet's stratum
+(all four cells, plus the negative case `--text … --no-flags`), `yolo`'s `tests/regtest.rs`, and the devnet's stratum
 seat (`yellowback-devnet up --role pool --stratum`). Findings Y-F1..Y-F13 are in
 `docs/plans/role-pool-regtest-plan.md` §7 of the workspace.
 

@@ -7,7 +7,7 @@ Two scripts and four checklists:
 | `yellowback-devnet` | the network: `up` builds a regtest chain that is activated and **ARMED** when it returns; every other command drives it |
 | `yellowback-sim` | six personas that inhabit it (started by `up --role`; `sim start|stop|stats`) |
 | `stratum-miner` | a headless stratum client at regtest's Equihash 48,5 (the framework's Python solver): the GPU rig's stand-in for the pool seat (`docs/plans/role-pool-regtest-plan.md` §3.3); `--record` writes the wire exchange as JSONL |
-| `yellowback_stratum.py` (in `qa/rpc-tests/`) | the functional test of the stratum path: yolo in each mode, the miner, the tag on every accepted block, `cenote --no-flags` dropping it; SKIPs without `YOLO_BIN` |
+| `yellowback_stratum.py` (in `qa/rpc-tests/`) | the functional test of the stratum path: yolo on every payout × text cell, the miner, the tag on every accepted block, `--text --no-flags` dropping it; SKIPs without `YOLO_BIN` |
 | `stratum-perl-check` | proves `stratum-miner` against the Perl reference pools in `ref/yolo` on a two-node regtest and records `fixtures/stratum-perl-*.jsonl`; `YCASHD`/`YCASH_CLI` name the binaries |
 | `scenarios/*.md` | the four walk-throughs of `docs/plans/role-based-regtest-plan.md` §4 as runnable checklists; `up --role` copies the role's into the session's `NOTES.md` |
 
@@ -118,30 +118,31 @@ yellowback-devnet mine 3 4               # your blocks are yours to mine
 #### The stratum seat (`--stratum`)
 
 ```bash
-yellowback-devnet up --role pool --stratum [--stratum-mode solo|pool|cenote]   # yolo beside node 4; `mine N 4` goes through it
-yellowback-devnet pool 4 stratum start [--mode M] | stop | status              # the same on a running devnet
-yellowback-devnet status                 # one line from yolo's GET /status: mode, miners, template age, tag kind, last verdict
+yellowback-devnet up --role pool --stratum [--stratum-text TEXT]   # yolo beside node 4; `mine N 4` goes through it
+yellowback-devnet pool 4 stratum start [--stratum-text TEXT] | stop | status   # the same on a running devnet
+yellowback-devnet status                 # one line from yolo's GET /status: payout, text, miners, template age, tag kind, last verdict
 ```
 
 No Ycash pool mines with `generate`, so the pool seat can run real pool software:
 **yolo** (`<workspace>/yolo`, the Rust rewrite of `yecdev/yolo`; `YOLO_BIN`, then
 `yolo/target/release/yolo`, then `PATH`) is started beside node 4 with node 4's RPC
 credentials from `devnet.json`, on a stratum port and a `/status` port derived from the
-portseed (30000 + the seat's rpc-port offset, and +5000), recorded in `devnet.json` with its pid
-and mode. `mine N 4` then runs `stratum-miner --blocks N --user <node 4's payout address>`
+portseed (30000 + the seat's rpc-port offset, and +5000), recorded in `devnet.json` with its pid,
+payout address and text. `mine N 4` then runs `stratum-miner --blocks N --user devnet-worker`
 against it — node → `getblocktemplate` → `mining.notify` → the Python 48/5 solver →
 `mining.submit` → `submitblock`, about one block per second — instead of `generate`; the
-heartbeat never mines the seat's blocks either way. The mode is yolo's coinbase policy:
-`solo` (`coinbasetxn` as is), `pool` (the payout output rewritten to the miner's address; the
-default, and node 4's own address keeps the reward in its wallet) or `cenote` (the scriptSig
-rebuilt as height ‖ `coinbaseaux.flags` ‖ text, the carrier a self-assembling stack must use).
-The tag's payout key comes from `-yellowbackpayoutaddress` (MINER-2), not from the coinbase
+heartbeat never mines the seat's blocks either way. yolo has no modes (P-6), two flags: the
+seat always runs `--payout <node 4's payout address>`, so every block pays node 4's wallet and
+the miner's username is a free worker name (without `--payout` the username must be a t-address
+and is paid); `--stratum-text TEXT` passes `--text`, and the scriptSig is rebuilt as height ‖
+`coinbaseaux.flags` ‖ text (the carrier a self-assembling stack must use) instead of being used
+as the node built it. The tag's payout key comes from `-yellowbackpayoutaddress` (MINER-2), not from the coinbase
 output, so `yed_listminers` sees node 4 whichever address the coinbase pays. No `setmocktime`
 is needed for the burst-generated chain: yolo stamps `max(template.curtime, now)` and the
 node's `curtime` is already `max(MTP + 1, now)`. `down` stops yolo and any miner still solving;
 `report` bundles `stratum-4.log` (yolo) and `stratum-miner-4.log`; `check` fails when yolo has
 died or stopped answering `/status`. `qa/rpc-tests/yellowback_stratum.py` runs the same path
-unattended for every mode. Scenario 3 step 0 says what to look at.
+unattended for every payout × text cell. Scenario 3 step 0 says what to look at.
 
 ### The attestor seat
 
