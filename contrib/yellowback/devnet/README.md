@@ -127,7 +127,7 @@ No Ycash pool mines with `generate`, so the pool seat can run real pool software
 **yolo** (`<workspace>/yolo`, the Rust rewrite of `yecdev/yolo`; `YOLO_BIN`, then
 `yolo/target/release/yolo`, then `PATH`) is started beside node 4 with node 4's RPC
 credentials from `devnet.json`, on a stratum port and a `/status` port derived from the
-portseed (30000 + the seat's rpc-port offset, and +5000), recorded in `devnet.json` with its pid,
+portseed (21000 + the seat's rpc-port offset, and +5000; below 32768 so Linux's ephemeral range cannot take them), recorded in `devnet.json` with its pid,
 payout address and text. `mine N 4` then runs `stratum-miner --blocks N --user devnet-worker`
 against it — node → `getblocktemplate` → `mining.notify` → the Python 48/5 solver →
 `mining.submit` → `submitblock`, about one block per second — instead of `generate`; the
