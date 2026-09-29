@@ -58,7 +58,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: 1343013242caa118a57d6590660d3ab317ae7908
+  YOLO_COMMIT: dc0cb249605bb9a9f57ce823d6e775b1478447d5
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
@@ -153,15 +153,25 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            .yolo-ci/target
           key: yolo-cargo-${{ runner.os }}-${{ env.YOLO_COMMIT }}
       - name: Build yolo and export YOLO_BIN
         if: ${{ !cancelled() }}
-        working-directory: .yolo-ci
+        # Built from a copy OUTSIDE this repository's tree. Both rustup and cargo resolve their
+        # configuration by walking up from the working directory, so a checkout under the
+        # workspace inherits two things meant for librustzcash: rust-toolchain (1.51, which
+        # cannot read yolo's v4 Cargo.lock -- run 36444762343) and the .cargo/config that the
+        # depends build writes to replace crates-io with the vendored sources (where yolo's
+        # crates do not exist). yolo's own rust-toolchain.toml (stable) covers the first;
+        # building under $RUNNER_TEMP covers both. RUSTUP_TOOLCHAIN pins stable regardless.
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: |
+          rm -rf "$RUNNER_TEMP/yolo-ci"; cp -R .yolo-ci "$RUNNER_TEMP/yolo-ci"
+          cd "$RUNNER_TEMP/yolo-ci"
+          rustup show active-toolchain
           cargo build --release --locked
           ./target/release/yolo --version
-          echo "YOLO_BIN=$GITHUB_WORKSPACE/.yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
+          echo "YOLO_BIN=$RUNNER_TEMP/yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
 
       - name: Functional tests (Yellowback scripts of this phase)
         # Runs even when an earlier step failed (the job still fails overall). A step that aborts
