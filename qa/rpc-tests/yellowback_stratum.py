@@ -67,7 +67,13 @@ STRATUM_MINER = os.path.join(REPO, 'contrib', 'yellowback', 'devnet', 'stratum-m
 CHECK_COINBASE = os.path.join(REPO, 'contrib', 'yellowback', 'pool', 'check-coinbase')
 QUOTE_USD = '0.05'
 BLOCKS_PER_CELL = 2
-STRATUM_PORT_BASE = 30000       # + (rpc_port(0) - PORT_MIN - PORT_RANGE): follows --portseed, clear of the framework's 11000-21000
+# Stratum port = 21000 + (rpc_port(0) - PORT_MIN - PORT_RANGE), status port = that + 5000: follows
+# --portseed (offset 0..4991), sits above the framework's 11000-21000 p2p/rpc range, and stays
+# BELOW 32768, where Linux's ephemeral range starts (macOS starts at 49152). An earlier 30000-based
+# scheme put the third cell's ports at 33794/38794, which an outgoing client socket of an earlier
+# cell had already taken on the CI runner: yolo "exited 1 at start" (run for 121621d98).
+STRATUM_PORT_BASE = 21000
+STRATUM_STATUS_OFFSET = 5000
 
 
 def find_yolo():
@@ -102,7 +108,7 @@ class YellowbackStratumTest(BitcoinTestFramework):
 
     def ports(self, index):
         base = STRATUM_PORT_BASE + (rpc_port(0) - PORT_MIN - PORT_RANGE) + index
-        return base, base + 5000
+        return base, base + STRATUM_STATUS_OFFSET
 
     def start_yolo(self, name, index, extra=()):
         user, password = rpc_auth_pair(0)
@@ -117,7 +123,9 @@ class YellowbackStratumTest(BitcoinTestFramework):
         deadline = time.time() + 30
         while time.time() < deadline:
             if proc.poll() is not None:
-                raise AssertionError('yolo (%s) exited %s at start; see %s' % (name, proc.returncode, log.name))
+                log.close()
+                with open(log.name, 'rb') as f: tail = f.read().decode('utf-8', 'replace').strip().splitlines()[-8:]
+                raise AssertionError('yolo (%s) exited %s at start (%s):\n  %s' % (name, proc.returncode, log.name, '\n  '.join(tail)))
             doc = self.status(status_port)
             if doc and doc.get('height') is not None:
                 return proc, port, status_port

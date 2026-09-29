@@ -119,7 +119,7 @@ def _attest_agent():
 ATTEST_AGENT = _attest_agent()
 STRATUM_MINER = os.path.join(HERE, "stratum-miner")
 STRATUM_WORKER = "devnet-worker"  # the miner's stratum username: with --payout set it is a free worker name, not an address
-STRATUM_PORT_BASE = 30000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, clear of 11000-21000 (p2p/rpc) and of 24xxx-27xxx (stratum-perl-check, other suites)
+STRATUM_PORT_BASE = 21000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, above 11000-21000 (p2p/rpc) and below 32768, where Linux's ephemeral range starts (a 30000 base collided with client sockets on CI)
 STRATUM_STATUS_OFFSET = 5000  # yolo's GET /status port = stratum port + this
 
 def _yolo_binary():
