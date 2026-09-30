@@ -53,12 +53,16 @@ env:
   # exec's them directly, so an un-chmodded script dies with PermissionError before the framework
   # starts) -- the identical omission recorded above for mining/enforcement/stock_node/hardening
   # on 2026-09-11, repeated for v3. The audit job now greps for both halves so it cannot recur.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
   YOLO_COMMIT: dc0cb249605bb9a9f57ce823d6e775b1478447d5
+  # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), `main` checked
+  # out and built the same way, exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
+  CHAINVIZ_REPO: boyfromcave/chain-viz
+  CHAINVIZ_REF: main
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
@@ -172,6 +176,27 @@ jobs:
           cargo build --release --locked
           ./target/release/yolo --version
           echo "YOLO_BIN=$RUNNER_TEMP/yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
+      - name: Check out chain-viz (the chain observer yellowback_chainviz drives)
+        if: ${{ !cancelled() }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CHAINVIZ_REPO }}
+          ref: ${{ env.CHAINVIZ_REF }}
+          path: .chain-viz-ci
+      - name: Build chain-viz and export CHAINVIZ_BIN
+        if: ${{ !cancelled() }}
+        # Same recipe as yolo: built from a copy outside this tree (rust-toolchain and the
+        # depends' .cargo/config would otherwise apply), on the stable toolchain the yolo step
+        # installed, with the same registry cache. Not --locked: `main` is a moving ref.
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          rm -rf "$RUNNER_TEMP/chain-viz-ci"; cp -R .chain-viz-ci "$RUNNER_TEMP/chain-viz-ci"
+          cd "$RUNNER_TEMP/chain-viz-ci"
+          rustup show active-toolchain
+          cargo build --release
+          ./target/release/chain-viz --version
+          echo "CHAINVIZ_BIN=$RUNNER_TEMP/chain-viz-ci/target/release/chain-viz" >> "$GITHUB_ENV"
 
       - name: Functional tests (Yellowback scripts of this phase)
         # Runs even when an earlier step failed (the job still fails overall). A step that aborts

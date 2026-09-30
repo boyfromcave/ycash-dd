@@ -55,6 +55,9 @@ BASE_SCRIPTS= [
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
+    # chain-viz (the read-only chain observer, Rust) over its HTTP API against the nodes' RPCs;
+    # SKIPs without CHAINVIZ_BIN, which the fork's CI builds (chain-viz-plan.md C5).
+    'yellowback_chainviz.py',
     # Scripts that are run by the travis build process
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
