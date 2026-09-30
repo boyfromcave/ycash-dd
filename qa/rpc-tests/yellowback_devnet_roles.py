@@ -158,9 +158,12 @@ class Preset:
 
     def up(self):
         self.say('up --role %s (portseed %d)' % (self.role, self.portseed))
+        # With CHAINVIZ_BIN in the environment `up` starts chain-viz on the devnet with --record
+        # (chain-viz-plan.md C5); without it, --no-viz keeps a stray workspace build out of the run.
+        viz = [] if os.environ.get('CHAINVIZ_BIN') else ['--no-viz']
         rc = self.devnet('up', '--force', '--role', self.role, '--portseed', str(self.portseed), '--seed', str(self.options.seed),
                          '--heartbeat-rate', str(HEARTBEAT_RATE), '--walk-tick', str(WALK_TICK), '--sim-profile', 'fast',
-                         '--bitcoind', self.bitcoind, timeout=1200)
+                         '--bitcoind', self.bitcoind, *viz, timeout=1200)
         check(rc == 0, 'up --role %s exited %d (log: %s)' % (self.role, rc, self.log.name))
         self.state = json.load(open(os.path.join(self.directory, 'devnet.json')))
         self.say('up: height %d, session %s' % (self.tip(), os.path.basename(self.state['session'] or '')))
@@ -359,6 +362,10 @@ class Preset:
 
     def down(self, keep):
         try:
+            session = os.path.join(self.directory, 'chain-viz', 'session.jsonl')
+            if os.path.exists(session):
+                shutil.copy(session, os.path.join(self.options.tmpdir, 'chain-viz-session-%s.jsonl' % self.role))
+                self.say('chain-viz session recorded: %s' % os.path.join(self.options.tmpdir, 'chain-viz-session-%s.jsonl' % self.role))
             self.devnet('down', *([] if keep else ['--wipe']), timeout=300)
         finally:
             self.log.close()
