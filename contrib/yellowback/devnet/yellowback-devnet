@@ -22,7 +22,7 @@ YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devne
 side; YELLOWBACK_WALLET_BIN, YELLOWBACK_ATTEST_BIN and CHAINVIZ_BIN name the binaries.
 
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
-[--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node], heartbeat {start|stop|rate N|status},
+[--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node] [--untagged], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
@@ -1317,16 +1317,43 @@ def command_check(args):
     print("devnet check passed")
 
 def mine(args):
+    """`mine N` mines round-robin on the automated pools, as the heartbeat does, so every block
+    carries a quote tag. `mine N <node>` mines on one node, and refuses a node whose blocks would
+    carry no tag (the user seat, the stock node, a pool with no payout key) unless `--untagged` says
+    that is the point: 50 tagless blocks in a 64-block window empty the price windows (NO_PRICE),
+    halt minting (PARTICIPATION) and suspend block rejection (ENFORCEMENT, ACT-6) — a majority
+    walking away, impersonated by one careless command (chain-viz plan C-F34)."""
     state = load(os.path.abspath(args.dir))
+    nodes = [rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)]
+    start = rpc(state, USER).getblockcount()
+    if args.node is None:
+        pools = auto_pools(state)
+        if not pools: sys.exit("no automated pool to mine on; name a node: `mine N <node>`")
+        for i in range(args.blocks):                        # one block, then every node on it, before the next pool mines: no stale tips
+            rpc(state, pools[i % len(pools)], timeout=60).generate(1)
+            sync_blocks(nodes)
+        print("mined %d blocks round-robin on node %s: height %d -> %d" % (args.blocks, ", ".join(str(p) for p in pools), start, rpc(state, USER).getblockcount()))
+        return
     if not 0 <= args.node < state["num_nodes"]: sys.exit("node must be between 0 and %d" % (state["num_nodes"] - 1))
-    node = rpc(state, args.node); start = node.getblockcount()
+    node = rpc(state, args.node)
     record = stratum_of(state, args.node)
-    if record and not record.get("stopped"):
+    stratum = bool(record and not record.get("stopped"))
+    if not stratum and not args.untagged:
+        try: kind = node.yed_getinfo().get("miner", {}).get("quoteKind", "none")
+        except Exception: kind = "none"                     # a stock node: no yed_getinfo
+        if kind == "none":
+            sys.exit("node%d's blocks would carry no Yellowback tag (no payout key or no -yellowback): %d of them drain the price windows,\n"
+                     "halt minting and suspend enforcement. `mine %d` mines on the pools; `mine %d %d --untagged` does this on purpose."
+                     % (args.node, args.blocks, args.blocks, args.blocks, args.node))
+        if kind == "signal":
+            print("note: node%d's quote is stale (quoteKind \"signal\"): its blocks signal but carry no price" % args.node)
+    if stratum:
         stratum_mine(state, args.node, args.blocks)        # a stratum seat: node -> yolo -> stratum-miner -> submitblock
     else:
         node.generate(args.blocks)
-    sync_blocks([rpc(state, index) for index in range(state["num_nodes"]) if alive(state, index)])
-    print("mined %d blocks on node%d%s: height %d -> %d" % (args.blocks, args.node, " through yolo and stratum-miner" if record and not record.get("stopped") else "", start, node.getblockcount()))
+    sync_blocks(nodes)
+    print("mined %d%s blocks on node%d%s: height %d -> %d" % (args.blocks, " untagged" if args.untagged else "", args.node,
+          " through yolo and stratum-miner" if stratum else "", start, node.getblockcount()))
 
 def attestor(args):
     """`attestor N stop|start|price USD`: the outage and divergence demos of v3 section 5.
@@ -1781,7 +1808,7 @@ def main():
     command.add_argument("--stratum-text", metavar="TEXT", help="with --stratum: yolo rebuilds the coinbase scriptSig as height push + coinbaseaux.flags + TEXT (unset: the node's scriptSig as is)")
     command.add_argument("--no-viz", action="store_true", help="do not start chain-viz (by default `up` starts it on devnet.json when CHAINVIZ_BIN, PATH or <workspace>/chain-viz/target holds a binary)")
     add("check", command_check); add("status", status)
-    command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
+    command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=None, help="one node; default: round-robin on the automated pools"); command.add_argument("--untagged", action="store_true", help="allow a node whose blocks carry no tag (drains the price windows)")
     command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
     command = add("price", price); command.add_argument("usd", nargs="?")
     command.add_argument("--walk", nargs="?", const="start", choices=("start", "stop"), help="start (default) or stop the random walk")

@@ -39,7 +39,7 @@ yellowback-devnet up                # ~2 min: 8 nodes, node 0 funded, 3 pools qu
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
 yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
 yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
-yellowback-devnet status | check | mine N [node] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
+yellowback-devnet status | check | mine N [node] [--untagged] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
 yellowback-devnet lightwalletd [start|stop|status] [--baseline] [--port 9067] [--extra=-yellowback]   # lightwalletd-dd against node0 (docs/plans/yellowback-lightwalletd-plan.md)
 yellowback-devnet vectors [--out DIR] [--seed N] [--count N]   # JSON signing/address/template vectors for the YEW core (docs/plans/yellowback-wallet-plan.md, W0c)
@@ -114,6 +114,17 @@ yellowback-devnet pool 4 configure       # restart node 4 with its payout addres
 yellowback-devnet pool 4 quote start     # the real yellowback-quote agent beside it; `stop` lets the quote go stale past 120 s
 yellowback-devnet pool 3 signal off      # a pool keeps mining and quoting but its tags carry no signal bit; two silent pools of three cross the 60 % pause
 yellowback-devnet mine 3 4               # your blocks are yours to mine
+```
+
+`mine N` with no node mines round-robin on the automated pools, exactly as the heartbeat does, so
+every block carries a quote tag. `mine N <node>` refuses a node whose blocks would carry no tag —
+the user seat (node 0), the stock node (node 1), a pool without a payout key — because 50 tagless
+blocks in the 64-block window empty the price windows (`NO_PRICE`), halt minting
+(`PARTICIPATION`) and suspend block rejection (`ENFORCEMENT`, ACT-6): one command impersonating a
+hashpower majority walking away (chain-viz plan C-F34). `--untagged` does it on purpose, which is
+how to rehearse that outage.
+
+```bash
 ```
 
 #### The stratum seat (`--stratum`)
