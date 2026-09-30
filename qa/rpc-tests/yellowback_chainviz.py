@@ -20,7 +20,7 @@ published by each on one endpoint (C-F-1), then the ``chain-viz`` binary on ``--
      and sees a ``reorg`` event and the orphaned block in ``chain.side``;
   e. rolls the revenue ledger up (``/api/revenue?from=0&to=<tip>&by=payoutKey``, C4) and compares
      ``totals.enforcefee`` with the sum of ``yed_gettxinfo(txid).feeZat`` over the transactions the
-     test made -- skipped while the binary under test has no ``/api/revenue`` yet (404);
+     test made, and the ``enforcefee`` rows are those transactions at their payees;
   f. holds chain-viz to the plan's RPC budget (section 7) from ``/api/health.rpcCalls``: per node
      ``getrawmempool`` at most one per poll (+ the ZMQ wakes), ``getblock`` at most once per block
      it learned (the 20-block backfill included), ``yed_gettxinfo`` at most once per Yellowback tx;
@@ -188,7 +188,7 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         self.proc = None
 
     def api(self, path):
-        """GET <url><path> as JSON; None on a 404 (a route the binary under test does not have)."""
+        """GET <url><path> as JSON; None on a 404."""
         try:
             with urllib.request.urlopen(self.url + path, timeout=10) as reply:
                 return json.load(reply)
@@ -276,23 +276,34 @@ class YellowbackChainVizTest(BitcoinTestFramework):
         self.check_health()
 
     def check_revenue(self):
+        """C4: the ledger rolled up over the whole chain; the enforcement fees it attributes are
+        exactly the fees the Yellowback transactions this test made paid (`yed_gettxinfo.feeZat`),
+        and every one of them is an `enforcefee` row at the mint's payee."""
         tip = self.nodes[0].getblockcount()
-        doc = self.api('/api/revenue?from=0&to=%d&by=payoutKey' % tip)
-        if doc is None:
-            print('(e) /api/revenue: not in this chain-viz build (404); skipped')
-            return
-        expected = sum(self.nodes[0].yed_gettxinfo(t)['feeZat'] for t in self.yb_txids)
+        doc = wait_for(lambda: (lambda d: d if d and d['tip'] and d['tip']['height'] == tip else None)(self.api('/api/revenue?from=0&to=%d&by=payoutKey' % tip)),
+                       MODEL_TIMEOUT, '/api/revenue at tip %d' % tip)
+        assert_equal((doc['from'], doc['to'], doc['by']), (0, tip, 'payoutKey'))
+        infos = {t: self.nodes[0].yed_gettxinfo(t) for t in self.yb_txids}
+        expected = sum(i['feeZat'] for i in infos.values())
         totals = doc['totals']
-        assert_equal(totals['enforcefee'], expected)
-        assert doc['rows'], 'no revenue rows'
-        print('(e) revenue 0..%d by payoutKey: enforcefee %d == sum of %d yed_gettxinfo.feeZat; %d rows' % (tip, totals['enforcefee'], len(self.yb_txids), len(doc['rows'])))
+        assert_equal(totals['enforcefee']['zat'], expected)
+        assert_equal(totals['ybTxs'], len(self.yb_txids))
+        # the ledger holds what the model holds: the BACKFILL below the head at start, that head, and every main-chain block since
+        assert_equal(totals['blocks'], tip - self.start_height + BACKFILL + 1)
+        fee_rows = [r for r in doc['rows'] if r['kind'] == 'enforcefee']
+        assert_equal(sorted((r['txid'], r['zat'], r['payee']) for r in fee_rows),
+                     sorted((t, i['feeZat'], i['payee']) for t, i in infos.items()))
+        assert_equal(doc['rowsTruncated'], False)
+        print('(e) revenue 0..%d by payoutKey: enforcefee %d zat == sum of %d yed_gettxinfo.feeZat; %d groups, %d rows, subsidy %d zat'
+              % (tip, totals['enforcefee']['zat'], len(self.yb_txids), len(doc['groups']), len(doc['rows']), totals['subsidy']['zat']))
 
     def check_budget(self):
         """Plan section 7: per node one ``getrawmempool`` per wake (a poll tick, a ZMQ ``hashblock``, a
         ZMQ ``hashtx`` -- the node publishes one per transaction entering its mempool and one per
         transaction of every connected block, coinbases included), ``getblock`` once per block it
         learned (the backfill of BACKFILL below the head at start, the head itself, every block
-        since, the orphaned one), ``yed_gettxinfo`` once per Yellowback transaction."""
+        since, the orphaned one) and ``getblocksubsidy`` the same (C4's ledger, once per block),
+        ``yed_gettxinfo`` once per Yellowback transaction."""
         health = self.api('/api/health')
         elapsed = time.time() - self.started_at
         node = self.nodes[0]
@@ -308,6 +319,7 @@ class YellowbackChainVizTest(BitcoinTestFramework):
             c = calls[node]
             assert c.get('getrawmempool', 0) <= wakes + 2, 'node %s: %d getrawmempool > %d wakes + 2' % (node, c.get('getrawmempool', 0), wakes)
             assert c.get('getblock', 0) <= blocks_since + BACKFILL + 2, 'node %s: %d getblock > %d blocks since start + backfill %d + 2' % (node, c.get('getblock', 0), blocks_since, BACKFILL)
+            assert c.get('getblocksubsidy', 0) <= blocks_since + BACKFILL + 2, 'node %s: %d getblocksubsidy > %d blocks since start + backfill %d + 2' % (node, c.get('getblocksubsidy', 0), blocks_since, BACKFILL)
             assert c.get('yed_gettxinfo', 0) <= len(self.yb_txids), 'node %s: %d yed_gettxinfo > %d Yellowback txs' % (node, c.get('yed_gettxinfo', 0), len(self.yb_txids))
         total_txinfo = sum(c.get('yed_gettxinfo', 0) for c in calls.values())
         assert total_txinfo <= len(self.yb_txids), 'yed_gettxinfo asked %d times for %d Yellowback txs (over all nodes)' % (total_txinfo, len(self.yb_txids))
