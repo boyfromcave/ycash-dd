@@ -38,6 +38,7 @@ You also need `src/ycashd` built and `contrib/yellowback/attest` built (`cargo b
 yellowback-devnet up                # ~2 min: 8 nodes, node 0 funded, 3 pools quoting, 3 attestors registered, ARMED
 yellowback-devnet up --agents       # the pools quote through real yellowback-quote --mock-price agents
 yellowback-devnet up --no-attest    # the five-node v2 devnet: never ARMED
+yellowback-devnet up --no-viz       # do not start chain-viz (section 5)
 yellowback-devnet status | check | mine N [node] | price USD | attestor N {stop|start|price USD} | notice VAULTTXID
 yellowback-devnet wallet | cli [--node N] -- yed_getinfo | down [--wipe]
 yellowback-devnet lightwalletd [start|stop|status] [--baseline] [--port 9067] [--extra=-yellowback]   # lightwalletd-dd against node0 (docs/plans/yellowback-lightwalletd-plan.md)
@@ -159,3 +160,29 @@ Node 8 is funded (13 YEC) and unregistered; `<dir>/attest-8.toml` is your agent'
 ## 4. Two devnets at once
 
 `YELLOWBACK_DEVNET_DIR` / `--dir` and `YELLOWBACK_DEVNET_PORTSEED` / `--portseed` (a `PORTBASE` is folded into a seed). The inherited port helper caps a run at 8 nodes; this script raises the cap once and **publishes every node's RPC URL in `devnet.json`**, which is what `yellowback-sim` and the regression suite read — never recompute a port.
+
+### The port table
+
+Every port follows the portseed `s` (node `n`, `MAX_NODES` = 12 after the raise). `offset(s)` is the inherited framework's spread, `(12 * s) % 4991`, so the p2p, rpc, stratum and status bands each take 5000 ports; the two bands added for chain-viz fold the seed modulo a small period instead, because no 5000-wide band is left below 32768, where Linux's ephemeral range begins (a 30000 base once collided with client sockets on CI). Two devnets whose seeds agree modulo 140 share zmq ports, and modulo 88 the chain-viz port — pick seeds a few apart.
+
+| Port | Formula | Range | Recorded in `devnet.json` |
+|---|---|---|---|
+| p2p, node `n` | `11000 + offset(s) + n` | 11000–16000 | (the framework's) |
+| rpc, node `n` | `16000 + offset(s) + n` | 16000–21000 | `rpc[n].port` |
+| stratum, pool seat `n` | `21000 + offset(s) + n` | 21000–26000 | `stratum[n].port` |
+| yolo `/status`, seat `n` | stratum + 5000 | 26000–31000 | `stratum[n].status_port` |
+| zmq, node `n` (`hashblock` and `hashtx` on one socket) | `31000 + 12 * (s % 140) + n` | 31000–32679 | `nodes[n].zmq.hashblock`, `.hashtx` |
+| chain-viz HTTP | `32680 + s % 88` | 32680–32767 | `chainviz.port`, `.url` |
+| lightwalletd gRPC | fixed | 9067 | — |
+
+## 5. chain-viz: the chain and Yellowback visualizer (`docs/plans/chain-viz-plan.md`, C-11)
+
+Every node started by `up` publishes ZMQ notifications: `-zmqpubhashblock` and `-zmqpubhashtx` on one `tcp://127.0.0.1:<port>` endpoint per node (ycashd binds a single PUB socket per address and publishes both topics on it), the port from the table above, the URLs under `nodes[n].zmq` in `devnet.json` (the `rpc` map is unchanged). The node logs its zmq activity only under `-debug=zmq`; a subscriber, or `lsof -iTCP:<port>`, is the check.
+
+`up` then starts **chain-viz** on the finished `devnet.json` — the binary is `CHAINVIZ_BIN`, else `chain-viz` on `PATH`, else `<workspace>/chain-viz/target/release/chain-viz`, then `target/debug/chain-viz` — as
+
+```
+chain-viz --devnet <dir> --listen 127.0.0.1:<port> --record <dir>/chain-viz --pid-file <dir>/chain-viz.pid
+```
+
+with its output in `<dir>/chain-viz.log`, waits up to 15 s for its `listening on http://…` line and prints that URL as the last-but-one line of `up`'s summary; `devnet.json` records `chainviz = {pid, url, port, log, binary, pid_file, record}`. No binary found is one dim line and the devnet continues without it; `--no-viz` skips it. `status` prints the URL and whether the process is alive, `down` stops it (SIGTERM, SIGKILL after 5 s; by the record or the pid file), and `report` bundles `<dir>/chain-viz/session.jsonl` when the recording exists. chain-viz is strictly read-only against the nodes (plan §4.2); it is never part of `check`, so a dead visualizer does not fail the devnet.

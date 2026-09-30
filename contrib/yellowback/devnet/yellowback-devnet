@@ -19,10 +19,10 @@ trading and liquidating on nodes 9 and 10.
           4  pool, automated, or YOU (`pool`)               10   the simulated liquidator
 
 YELLOWBACK_DEVNET_DIR and YELLOWBACK_DEVNET_PORTSEED (or PORTBASE) let two devnets run side by
-side; YELLOWBACK_WALLET_BIN and YELLOWBACK_ATTEST_BIN name the two binaries.
+side; YELLOWBACK_WALLET_BIN, YELLOWBACK_ATTEST_BIN and CHAINVIZ_BIN name the binaries.
 
 Commands: up [--role R] [--agents] [--no-attest] [--lean] [--no-heartbeat] [--no-walk] [--no-sim]
-[--seed N] [--stratum [--stratum-text TEXT]], check, status, mine N [node], heartbeat {start|stop|rate N|status},
+[--seed N] [--stratum [--stratum-text TEXT]] [--no-viz], check, status, mine N [node], heartbeat {start|stop|rate N|status},
 price USD | price --walk [start|stop] [--drift PCT] [--vol PCT] [--tick SEC] | price --shock=PCT,
 attestor N {stop|start|price USD}, pool N {configure|signal on|off|quote start|stop|stratum start [--stratum-text TEXT]|stop|status},
 sim {start|stop|stats}, notice VAULTTXID, scenario [NAME], report, wallet [--node N],
@@ -35,6 +35,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -121,6 +122,16 @@ STRATUM_MINER = os.path.join(HERE, "stratum-miner")
 STRATUM_WORKER = "devnet-worker"  # the miner's stratum username: with --payout set it is a free worker name, not an address
 STRATUM_PORT_BASE = 21000     # + (rpc_port(seat) - PORT_MIN - PORT_RANGE): follows the portseed, above 11000-21000 (p2p/rpc) and below 32768, where Linux's ephemeral range starts (a 30000 base collided with client sockets on CI)
 STRATUM_STATUS_OFFSET = 5000  # yolo's GET /status port = stratum port + this
+# ZMQ and chain-viz (chain-viz-plan.md C-11, N-4). The rpc formula spreads a seed over 5000
+# ports, and the only 5000-wide band left under 32768 is taken (stratum + status), so these two
+# follow the seed modulo a small period instead: every port stays below Linux's ephemeral floor.
+# One endpoint per node: ycashd binds a single PUB socket per address and publishes hashblock
+# and hashtx on it (src/zmq/zmqpublishnotifier.cpp, "Reusing socket for address").
+ZMQ_PORT_BASE = 31000        # zmq_port(n) = 31000 + 12 * (portseed % 140) + n : 31000-32679
+ZMQ_SEED_PERIOD = 140
+CHAINVIZ_PORT_BASE = 32680   # chainviz_port() = 32680 + portseed % 88 : 32680-32767
+CHAINVIZ_SEED_PERIOD = 88
+CHAINVIZ_START_TIMEOUT = 15  # seconds to wait for "listening on http://..." on its stdout
 
 def _yolo_binary():
     """The yolo (Rust) pool: YOLO_BIN, then the workspace build, then PATH (role-pool-regtest-plan.md 3.4)."""
@@ -711,6 +722,7 @@ def up(args):
         else: node_args[pool] = yellowback_node_args(pool_extra)      # your pool: a plain miner, no payout, no signal
     for node in range(NODES, count):
         node_args[node] = yellowback_node_args()      # attestor, population and liquidator nodes: enforcing, no payout, no signal
+    for node in node_args: node_args[node] = node_args[node] + zmq_args(node)    # every node publishes hashblock/hashtx (N-4)
     if agents_wanted and not os.access(AGENT, os.X_OK): sys.exit("quote agent not found at %s" % AGENT)
     if attest and not os.access(ATTEST_AGENT, os.X_OK):
         sys.exit("yellowback-attest not found at %s\n  build it with: cd %s && cargo build --release\n"
@@ -727,6 +739,7 @@ def up(args):
              "role": role, "seat": preset["seat"], "population": population, "liquidator": liquidator,
              "seed": seed, "node_args": {str(k): v for k, v in node_args.items()},
              "rpc": {str(n): {"url": rpc_url(n), "port": rpc_port(n), "user": rpc_auth_pair(n)[0], "password": rpc_auth_pair(n)[1]} for n in range(count)},
+             "nodes": {str(n): {"zmq": zmq_record(n)} for n in range(count)},
              "heartbeat": {}, "walk": {}, "sim": {}, "session": None,
              "pool_signal": {str(pool): pool in preset["auto_pools"] or role == "none" for pool in POOLS}}
     try:
@@ -793,6 +806,8 @@ def up(args):
         save(directory, state)
         print(banner(state))
         print("session: %s (NOTES.md seeded with the walk-through; `report` bundles it)" % state["session"])
+    if not args.no_viz:
+        chainviz_start(state); save(directory, state)      # last: it reads the finished devnet.json
     print("wallet: " + " ".join(wallet_command(directory, seat_of(state))))
 
 # ---------------------------------------------------------------------------------- heartbeat (R1)
@@ -1045,6 +1060,13 @@ def stratum_ports(node):
     port = STRATUM_PORT_BASE + (rpc_port(node) - _util.PORT_MIN - _util.PORT_RANGE)
     return port, port + STRATUM_STATUS_OFFSET
 
+def zmq_port(node): return ZMQ_PORT_BASE + _util.MAX_NODES * (PortSeed.n % ZMQ_SEED_PERIOD) + node
+def zmq_url(node): return "tcp://127.0.0.1:%d" % zmq_port(node)
+def zmq_args(node):
+    """The node's -zmqpub* options: one endpoint, both topics (chain-viz-plan.md N-4)."""
+    return ["-zmqpubhashblock=%s" % zmq_url(node), "-zmqpubhashtx=%s" % zmq_url(node)]
+def zmq_record(node): return {"hashblock": zmq_url(node), "hashtx": zmq_url(node)}
+
 def stratum_status(record, timeout=3):
     """yolo's GET /status document, or None."""
     import urllib.request
@@ -1132,6 +1154,76 @@ def stratum_mine(state, node, blocks):
 
 # ---------------------------------------------------------------------------------- status
 
+# ---------------------------------------------------------------------------------- chain-viz (chain-viz-plan.md C-11)
+
+def chainviz_port(): return CHAINVIZ_PORT_BASE + PortSeed.n % CHAINVIZ_SEED_PERIOD
+def chainviz_binary():
+    """CHAINVIZ_BIN, then chain-viz on PATH, then the workspace's release and debug builds."""
+    override = os.environ.get("CHAINVIZ_BIN")
+    if override: return override
+    found = shutil.which("chain-viz")
+    if found: return found
+    for build in ("release", "debug"):
+        candidate = os.path.join(WORKSPACE, "chain-viz", "target", build, "chain-viz")
+        if os.access(candidate, os.X_OK): return candidate
+    return None
+def chainviz_of(state): return state.get("chainviz") or {}
+def chainviz_pid_file(directory): return os.path.join(directory, "chain-viz.pid")
+def chainviz_pid(state):
+    """The recorded pid, or the pid file's (chain-viz writes it; a record survives a crash)."""
+    pid = chainviz_of(state).get("pid")
+    if pid: return pid
+    try:
+        with open(chainviz_pid_file(state["dir"])) as file: return int(file.read().strip() or 0) or None
+    except (OSError, ValueError): return None
+def _dim(text): return "\033[2m%s\033[0m" % text if sys.stdout.isatty() else text
+
+def chainviz_start(state):
+    """Spawn chain-viz on devnet.json and wait for its `listening on http://…` line; a missing
+    binary is one dim line, never an error (C-11: the devnet does not depend on the visualizer)."""
+    binary = chainviz_binary()
+    if not binary:
+        print(_dim("chain-viz: no binary (CHAINVIZ_BIN, PATH, %s/chain-viz/target/{release,debug}); not started" % WORKSPACE)); return
+    if not os.access(binary, os.X_OK):
+        print(_dim("chain-viz: %s is not executable; not started" % binary)); return
+    directory, port = state["dir"], chainviz_port()
+    log, pid_file = os.path.join(directory, "chain-viz.log"), chainviz_pid_file(directory)
+    argv = [binary, "--devnet", directory, "--listen", "127.0.0.1:%d" % port,
+            "--record", os.path.join(directory, "chain-viz"), "--pid-file", pid_file]
+    pid = _spawn(directory, "chain-viz", argv)
+    url, deadline = None, time.time() + CHAINVIZ_START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            with open(log) as file: match = re.search(r"listening on (http://\S+)", file.read())
+        except OSError: match = None
+        if match: url = match.group(1); break
+        if not agent_alive(pid): break
+        time.sleep(0.25)
+    state["chainviz"] = {"pid": pid, "url": url or "http://127.0.0.1:%d" % port, "port": port, "log": log,
+                         "binary": binary, "pid_file": pid_file, "record": os.path.join(directory, "chain-viz")}
+    if url: print("chain-viz: %s (pid %d, log %s)" % (url, pid, log))
+    elif not agent_alive(pid): print("chain-viz exited at start; see %s" % log, file=sys.stderr)
+    else: print("chain-viz started (pid %d) but printed no `listening on` line in %d s; expected http://127.0.0.1:%d, see %s" % (pid, CHAINVIZ_START_TIMEOUT, port, log), file=sys.stderr)
+
+def chainviz_stop(state, grace=5):
+    """SIGTERM, then SIGKILL after `grace` seconds; by the record or the pid file."""
+    pid = chainviz_pid(state)
+    if not pid or not agent_alive(pid): return
+    _kill(pid, "chain-viz")
+    deadline = time.time() + grace
+    while agent_alive(pid) and time.time() < deadline: time.sleep(0.2)
+    if agent_alive(pid):
+        try: os.kill(pid, 9); print("chain-viz (pid %d) did not stop in %d s; killed" % (pid, grace))
+        except OSError: pass
+    try: os.remove(chainviz_pid_file(state["dir"]))
+    except OSError: pass
+
+def chainviz_line(state):
+    record = chainviz_of(state)
+    if not record: return "chain-viz: not started (`up` starts it when a binary is found; CHAINVIZ_BIN)"
+    pid = chainviz_pid(state)
+    return "chain-viz: %s (pid %s) %s; log %s" % (record.get("url"), pid, "up" if pid and agent_alive(pid) else "DEAD", record.get("log"))
+
 def banner(state):
     role = role_of(state)
     if role == "none": return "seat: none (the fully automated demo); every node is the devnet's"
@@ -1210,6 +1302,7 @@ def status(args):
         print("simulator: %s (`sim stats` for the per-persona tally)" % ("running (pid %d), profile %s, seed %s" % (simrec["pid"], simrec.get("profile"), state.get("seed"))
                                                                           if agent_alive(simrec.get("pid")) else "not running (`sim start`)"))
     if state.get("session"): print("session: %s" % state["session"])
+    print(chainviz_line(state))
     print("wallet: " + " ".join(wallet_command(directory, seat_of(state))))
 
 # ---------------------------------------------------------------------------------- the small commands
@@ -1323,6 +1416,7 @@ def cli(args):
 
 def down(args):
     directory, state = os.path.abspath(args.dir), load(os.path.abspath(args.dir))
+    chainviz_stop(state)
     for name in ("sim", "walk", "heartbeat", "lightwalletd"):
         _kill((state.get(name) or {}).get("pid"), name)
     for node, record in sorted((state.get("stratum") or {}).items()):
@@ -1418,6 +1512,8 @@ def report(args):
         for name in ["devnet.json", "sim-stats.json", "heartbeat.json", "mock-price"] + [os.path.basename(f) for f in glob.glob(os.path.join(directory, "*.log"))] + [os.path.basename(f) for f in glob.glob(os.path.join(directory, "*.toml"))]:
             full = os.path.join(directory, name)
             if os.path.exists(full): tar.add(full, arcname=os.path.join("devnet", name))
+        session_events = os.path.join(directory, "chain-viz", "session.jsonl")
+        if os.path.exists(session_events): tar.add(session_events, arcname=os.path.join("devnet", "chain-viz", "session.jsonl"))
         for index in range(state["num_nodes"]):
             debug = os.path.join(node_dir(directory, index), "regtest", "debug.log")
             if os.path.exists(debug): tar.add(debug, arcname=os.path.join("devnet", "node%d-debug.log" % index))
@@ -1683,6 +1779,7 @@ def main():
     command.add_argument("--sim-profile", choices=("demo", "fast"), default="demo", help="persona cadences: demo (a half-hour walk-through) or fast (the regression suite)")
     command.add_argument("--stratum", action="store_true", help="pool seat only: run yolo (the real stratum pool) beside node 4 and mine its blocks through stratum-miner (YOLO_BIN names the binary)")
     command.add_argument("--stratum-text", metavar="TEXT", help="with --stratum: yolo rebuilds the coinbase scriptSig as height push + coinbaseaux.flags + TEXT (unset: the node's scriptSig as is)")
+    command.add_argument("--no-viz", action="store_true", help="do not start chain-viz (by default `up` starts it on devnet.json when CHAINVIZ_BIN, PATH or <workspace>/chain-viz/target holds a binary)")
     add("check", command_check); add("status", status)
     command = add("mine", mine); command.add_argument("blocks", type=int); command.add_argument("node", type=int, nargs="?", default=USER)
     command = add("heartbeat", heartbeat); command.add_argument("action", choices=("start", "stop", "rate", "status"), nargs="?", default="status"); command.add_argument("rate", type=int, nargs="?")
