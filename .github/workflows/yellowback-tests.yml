@@ -290,13 +290,13 @@ jobs:
             for x in src/yellowback/$f.cpp src/yellowback/$f.h; do test -f "$x" && pure="$pure $x"; done
           done
           echo "pure modules:$pure"
-          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # libsecp256k1 is reached through one wrapper only, VerifyCompactSig in attest.cpp (v3 §3.10,
           # §8.4 item 2), so the fuzz harness can stub it and low-S is enforced in one place. Comment
           # lines are skipped; nothing else under src/yellowback or src/rpc/yellowback* may name it.
-          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
-          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)'
+          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # The clock has three homes: the quote RPC (stamps receivedAt), policy.cpp (BuildTagScript,
           # M11), and the wallet RPC's carrier wait (A3's two-step mint -- a user-facing deadline in
           # wallet-tier code, never a consensus input).  The patterns are anchored: an unescaped
@@ -305,7 +305,7 @@ jobs:
           homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy\.cpp$\|rpc/yellowback\.cpp$\|rpc/yellowbackwallet\.cpp$' || true)
           test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
           # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
-          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis"
+          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis" || exit 1
           # Every yellowback script the runner knows must be executable (rpc-tests.py exec's it
           # directly) and must be run by some job: registered-but-never-run is how the v2
           # enforcement suite and then the whole v3 attestation suite sat silent in CI.
@@ -319,21 +319,26 @@ jobs:
           done
           # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
           # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
-          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n'
-          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever.
-          ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp src/main.cpp
+          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n' || exit 1
+          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever. main.cpp's own
+          # inserted lines are checked against the baseline diff in "v2 gates" below; the whole of
+          # stock main.cpp is full of DoS(100) and must not be grepped here.
+          # Every `! check` in these steps carries `|| exit 1`: bash -e ignores the status of a
+          # command negated with `!`, so until 2026-10-01 only the last line of a step could fail.
+          # That hid this grep's inclusion of src/main.cpp and the comment hit below.
+          ! grep -n "DoS([1-9]" src/yellowback/*.cpp src/rpc/yellowback*.cpp || exit 1
           # EvaluateBlock is total (K1): no throw, no assert in the state machine or the arithmetic.
-          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h
+          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h || exit 1
           # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
-          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp
+          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
           # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
-          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*'
+          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || exit 1
 
       - name: Documents (fork-local only, P4)
         # Staleness against the plan is a workspace check (make status -> spec-check), not a fork check.
         run: |
           set -e
-          ! grep -q 'no consensus change' doc/yellowback.md
+          ! grep -q 'no consensus change' doc/yellowback.md || exit 1
           grep -q 'federation prototype, being replaced' doc/yellowback.md
           grep -q 'Build and test baseline' doc/yellowback.md
           # The published spec copy was not hand-edited: its header hash equals the hash of its body.
@@ -352,7 +357,7 @@ jobs:
           registered=$(grep -oh '"yed_[a-z]*"' src/rpc/yellowback*.cpp | tr -d '"' | sort -u)
           missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
           test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
-          ! git grep -in roster -- src/yellowback
+          ! git grep -in roster -- src/yellowback || exit 1
           test -f doc/yellowback-rpc.md && grep -q 'rpcversion 3' doc/yellowback-rpc.md
           python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
           # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
@@ -481,8 +486,8 @@ jobs:
       - name: No agent crate in the node's build (v3 plan §8.4 item 14)
         if: steps.crate.outputs.present == 'true' && !cancelled()
         run: |
-          ! grep -q 'iroh' Cargo.lock
-          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest'
+          ! grep -q 'iroh' Cargo.lock || exit 1
+          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest' || exit 1
 
   python:
     if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
