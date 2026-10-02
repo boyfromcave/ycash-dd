@@ -1526,8 +1526,11 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
     a.seq = seq;
     a.priceMicroUsd = (uint32_t)priceMicroUsd;
     a.citedHeight = (uint32_t)citedHeight;
-    // S16: the persisted guard decides before anything is signed.
-    std::optional<SignedAttestation> prior = yw.LookupSigned(seq, (uint32_t)citedHeight);
+    // S16: the persisted guard decides before anything is signed. Keyed on the cited block's hash as well
+    // (audit C-5): after a reorg across citedHeight the earlier line is for another block, so a fresh
+    // signature for this one is not equivocation (EQV-1 binds the hash too).
+    const uint256 citedHash = ctx.BlockHashAt(citedHeight);
+    std::optional<SignedAttestation> prior = yw.LookupSigned(seq, (uint32_t)citedHeight, citedHash);
     if (prior.has_value()) {
         if (prior->priceMicroUsd != (uint32_t)priceMicroUsd) {
             throw std::runtime_error(strprintf("equivocation-guard: seq %u already signed %u for height %d", (unsigned)seq, prior->priceMicroUsd, citedHeight));
@@ -1536,7 +1539,7 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
         reused = true;
         return a;
     }
-    const uint256 msg = AttestMessage(seq, a.priceMicroUsd, a.citedHeight, ctx.BlockHashAt(citedHeight));
+    const uint256 msg = AttestMessage(seq, a.priceMicroUsd, a.citedHeight, citedHash);
     std::vector<unsigned char> der;
     if (!key.Sign(msg, der)) throw std::runtime_error("attestation signature failed");
     a.sig = DerToCompact(der);   // libsecp256k1 signs low-S; the compact form is r || s
@@ -1546,6 +1549,7 @@ Attestation SignAttestationGuarded(YellowbackWallet& yw, uint16_t seq, MicroUsd 
     recSigned.citedHeight = a.citedHeight;
     recSigned.priceMicroUsd = a.priceMicroUsd;
     recSigned.sig = a.sig;
+    recSigned.blockHash = citedHash;
     if (!yw.RecordSigned(recSigned)) {
         // Audit C-9: the datadir path goes to the log, never into the RPC error text.
         LogPrintf("yellowback: guard-write-failed: cannot append to %s\n", YellowbackWallet::SignedFile().string());
