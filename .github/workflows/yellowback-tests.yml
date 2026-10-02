@@ -76,7 +76,7 @@ env:
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
   CARGO_AUDIT_VERSION: 0.22.2
-  CARGO_DENY_VERSION: 0.18.3
+  CARGO_DENY_VERSION: 0.20.2   # 0.18.3 cannot parse the CVSS 4.0 advisories in the RustSec DB (2026-10-02)
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
