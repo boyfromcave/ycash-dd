@@ -1232,11 +1232,15 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         """Audit B-1: a stock peer relaying a rejected branch longer than ``VALVE_NOTE_CAP`` that
         stays *behind* the enforcing chain is never banned.  Node 1 mines the rejected root while
         connected (so every enforcing node judges it), the halves split, node 1 extends its branch
-        by ``VALVE_NOTE_CAP + 3`` while the pools out-work it, and the join replays the whole
-        branch in one ``headers`` message: the root is a ``duplicate`` the loop skips, 64 headers
-        are noted, the 65th is refused past the cap and the rest descend from a refusal -- all DoS
-        0 (``bad-prevblk-yellowback``), never the stock ``prev block not found`` DoS 10.  The valve
-        does not trip (the branch is behind), banscores stay 0 and node 1 stays a peer."""
+        by ``VALVE_NOTE_CAP + 3`` while the pools out-work it.  On this line the ``headers`` loop
+        returns at the first refused header (main.cpp, ``invalid header received``) and node 1 is
+        already on the pools' chain when the join's ``getheaders`` reaches it, so the branch is
+        delivered to every enforcing node block by block through ``submitblock`` (ProcessNewBlock
+        -> AcceptBlockHeader, the same hook the P2P path reaches): 64 blocks are noted, the 65th is
+        refused past the cap and the rest descend from a refusal -- every one answered
+        ``bad-prevblk-yellowback`` (DoS 0), never the stock ``bad-prevblk`` (``prev block not
+        found``, DoS 10).  Then the join: the valve does not trip (the branch is behind),
+        banscores stay 0 and node 1 stays a peer."""
 # Rule: ACT-7
 # Rule: BLK-2
         stock = self.nodes[STOCK]
@@ -1265,7 +1269,19 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         for i in ENFORCING:
             assert_equal(self.nodes[i].getbestblockhash(), enforcing_tip)
 
-        print('  join: the whole branch arrives in one headers message; no ban, no trip, no reorg')
+        print('  the branch reaches every enforcing node block by block: noted to the cap, then DoS 0 refusals')
+        root_height = stock.getblock(blockhash)['height']
+        branch = [stock.getblock(stock.getblockhash(h), False) for h in range(root_height + 1, stock_height + 1)]
+        assert_equal(len(branch), VALVE_NOTE_CAP + 3)
+        for i in ENFORCING:
+            for k, raw in enumerate(branch, 1):
+                verdict = self.nodes[i].submitblock(raw)
+                assert_equal(verdict, 'bad-prevblk-yellowback')    # k > VALVE_NOTE_CAP: a refused parent, still ours
+            info = self.nodes[i].yed_getinfo()
+            assert_equal(info['valveTripped'], False)
+            assert_equal(self.nodes[i].getbestblockhash(), enforcing_tip)
+
+        print('  join: no ban, no trip, no reorg')
         self.join_network()                       # syncs blocks: node 1 and 5 reorg onto the pools' chain
         time.sleep(2)
         for i in ENFORCING:
@@ -1277,8 +1293,8 @@ class YellowbackEnforcementTest(YellowbackTestFramework):
         assert_banscore_zero([self.nodes[i] for i in ENFORCING])
         for i in ENFORCING:
             self.assert_peers_with_stock(i)
-        # Every enforcing node is a direct peer of node 1 and read the branch from it: the cap must
-        # have been reached (the refusal past VALVE_NOTE_CAP is what B-1 is about); node 0 is checked.
+        # The cap must have been reached (the refusal past VALVE_NOTE_CAP is what B-1 is about);
+        # node 0 is checked.
         assert debug_log_contains(self.options.tmpdir, USER, 'holds %d notes' % VALVE_NOTE_CAP), \
             'node %d never refused a header past VALVE_NOTE_CAP: the branch was not replayed' % USER
         assert not debug_log_contains(self.options.tmpdir, USER, 'non-continuous headers sequence'), \
