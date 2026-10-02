@@ -53,6 +53,9 @@ BASE_SCRIPTS= [
     'yellowback_hardening.py',
     'yellowback_enforcement.py',
     'yellowback_stock_node.py',
+    # The v2 framework's own smoke test (six stock nodes, no yed_* call); registered 2026-10-01
+    # (audit I-1: it existed and was allow-listed by CI but never registered, so never run).
+    'yellowback_framework_smoke.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
@@ -157,7 +160,9 @@ ZMQ_SCRIPTS = [
     "zmq_test.py"]
 
 EXTENDED_SCRIPTS = [
-    'yellowback_reorg_stress.py',
+    # yellowback_reorg_stress.py was retired on 2026-10-01 (audit I-1; ycash6 plan P-7): it was still
+    # the v1 federation script and could not run. Reorgs are exercised by index, lifecycle,
+    # enforcement, mining, void_mint, activation, stock_node and the three attest scripts.
     # Needs a release build of contrib/yellowback/attest (Rust); it SKIPs without one, so it is
     # nightly rather than a merge gate (v3 plan Phase A4).
     'yellowback_attest_agent.py',

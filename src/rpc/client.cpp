@@ -179,7 +179,13 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_getselection", 0 },
     // v3 wallet commands (doc/yellowback-rpc.md, conversion rows)
     { "yed_mint", 4 },              // wait
+    { "yed_mint", 5 },              // maxCollateralZat
     { "yed_claim", 3 },             // wait
+    { "yed_claim", 4 },             // minOutZat
+    { "yed_listtokens", 2 },        // count
+    { "yed_listtokens", 3 },        // skip
+    { "yed_listclaimable", 0 },     // count
+    { "yed_listclaimable", 1 },     // skip
     { "yed_claimnotice", 2 },       // wait
     { "yed_registerattestor", 0 },
     { "yed_registerattestor", 1 },
