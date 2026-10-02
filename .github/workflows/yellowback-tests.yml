@@ -15,11 +15,10 @@ name: yellowback tests
 # the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
 # doc/yellowback.md "Build and test baseline".
 
-# feature/yellowback-sf was dropped from both trigger lists on 2026-09-20. It is the delivered v2
-# fork and is now a *baseline*, not a workspace: nothing is committed to it, and the v3 plan
-# measures its diff budgets and frozen-file checks against it. Building it on every push to the v3
-# branch's ancestor was spending a 300-minute job on a branch that never moves. workflow_dispatch
-# still runs this workflow against any ref if the baseline ever needs re-checking.
+# feature/yellowback-sf (v2) was dropped from both trigger lists on 2026-09-20 and, since 2026-10-01,
+# is no comparison base for anything (owner): Yellowback is v3, price attestation. The frozen-file
+# check measures against the tag yellowback-v3-baseline (= feature/yellowback-price-attest at
+# 9da72131e); every line budget against ycash-legacy (= upstream v4.5.0).
 on:
   push:
     branches:
@@ -240,17 +239,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch the pristine baseline branch and the v2 baseline
-        # Every diff below is against ycash-legacy (= upstream v4.5.0), and the v3 frozen-file check
-        # against feature/yellowback-sf (= v2 complete). A missing branch is an error, never a
-        # vacuous pass.
+      - name: Fetch the pristine baseline branch and the v3 baseline tag
+        # Every diff below is against ycash-legacy (= upstream v4.5.0), and the frozen-file check
+        # against the tag yellowback-v3-baseline (v3, price attestation). A missing ref is an error,
+        # never a vacuous pass.
         run: |
           git fetch --no-tags origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
           git rev-parse --verify ycash-legacy
-          git fetch --no-tags origin +refs/heads/feature/yellowback-sf:refs/remotes/origin/feature/yellowback-sf
-          git rev-parse --verify origin/feature/yellowback-sf
+          git fetch --no-tags origin +refs/tags/yellowback-v3-baseline:refs/tags/yellowback-v3-baseline
+          git rev-parse --verify 'yellowback-v3-baseline^{commit}'
 
-      - name: Zero delta in the frozen files vs feature/yellowback-sf (v3 plan §4.1, §8.4 item 1)
+      - name: Zero delta in the frozen files vs yellowback-v3-baseline (v3 plan §4.1, §8.4 item 1)
         # v3 adds no line to the soft-fork hooks, the policy layer or the consensus set: the list
         # is the one file qa/yellowback-frozen-files.txt (quoted by the plan and the PR template),
         # one path per line, directories allowed. --quiet exits 1 on any difference; the diff is
@@ -260,8 +259,8 @@ jobs:
           test -s qa/yellowback-frozen-files.txt
           frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$')
           echo "frozen set:"; echo "$frozen"
-          git --no-pager diff --stat origin/feature/yellowback-sf...HEAD -- $frozen
-          git diff --quiet origin/feature/yellowback-sf...HEAD -- $frozen
+          git --no-pager diff --stat yellowback-v3-baseline...HEAD -- $frozen
+          git diff --quiet yellowback-v3-baseline...HEAD -- $frozen
 
       - name: Line budget and the consensus zero set (plan §4.1)
         run: |
@@ -412,7 +411,7 @@ jobs:
       - name: Rule -> test tags, v3 identifiers (blocking since Phase A1, v3 plan §7)
         # The v3 rules of plan §3.8 (ARM-1/2, REG-A1, BUNDLE-1, MINT-9/10, NOT-1, EQV-1, REV-1, PIN-1/2,
         # AFEE-0/1, RED-5) landed with Phase A1 (yellowback_state_tests.cpp); every identifier must be
-        # tagged. Fold the list into the loop above when the v3 series merges into feature/yellowback-sf.
+        # tagged. Fold the list into the loop above.
         if: ${{ !cancelled() }}
         run: |
           set -e
