@@ -378,8 +378,10 @@ incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host abo
 - Yellowback functional scripts (run one process each, `--portseed` 11–15, `BITCOIND` set,
   `DYLD_LIBRARY_PATH` for the Python co-signer): `yellowback_index`, `yellowback_lifecycle`,
   `yellowback_void_mint`, `yellowback_wallet_restore`, `yellowback_sapling` — **all five green**.
-  `yellowback_reorg_stress` is still the v1 federation script (its v2 adaptation is the open
-  Phase 6 checklist item) and is not run by CI (2026-09-23).
+  `yellowback_reorg_stress` was still the v1 federation script and was never run by CI; it was
+  deleted on 2026-10-01 (audit I-1; the ycash6 plan's P-7 retired it there first). Reorgs are
+  exercised by index, lifecycle, enforcement, mining, void_mint, activation, stock_node and the
+  three attest scripts.
 - `DEBUG_LOCKORDER` (`--enable-debug`) aborts Ycash v4.5.0 itself on the first peer connection:
   `getpeerinfo` takes `cs_main` > `cs_vNodes` > `cs_vSend` (`rpc/net.cpp:117,68`, `net.cpp:687`)
   while `SendMessages` takes `TRY cs_vSend` > `cs_main` (`net.cpp:1741`), and `sync.cpp:132`
