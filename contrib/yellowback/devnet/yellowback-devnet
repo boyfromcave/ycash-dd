@@ -670,6 +670,7 @@ def _teardown(state, nodes):
         try: bitcoind_processes[index].wait(timeout=10)
         except Exception: pass
         del bitcoind_processes[index]
+    kill_nodes(state["dir"], grace=10)      # a node started before the one that failed is not in `nodes` yet
 
 def footprint(role, count, args):
     agents = len(ROLES[role]["auto_attestors"]) + (3 if role != "none" else 1)     # attest + subscribe
