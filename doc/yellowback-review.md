@@ -141,11 +141,20 @@ fork `src/main.cpp:2799` (baseline `ref/ycash/src/main.cpp:2796`).
 ### 2.4 `main.cpp` `AcceptToMemoryPool` — MP-1
 
 ```cpp
-         view.SetBackend(dummy);
+             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
+         }
+
 +        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
 +            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
++
+         {
+             // Store transaction in memory
 ```
-fork `src/main.cpp:1645` (baseline `:1643`).
+fork `src/main.cpp:1765` (baseline `:1761-1764`). Until the 2026-10-02 audit merge (A-1) the hook
+sat right after `view.SetBackend(dummy)` (`:1645`), before `AreInputsStandard` and both
+`ContextualCheckInputs`: a vault spend with a garbage scriptSig was refused here with DoS 0 where
+the stock path answers DoS 100. It now runs after the second `ContextualCheckInputs` and before
+`pool.addUnchecked`, so only script-valid spends reach the overlay.
 
 - **X / Y / M:** DigiByte rejects invalid DD transactions from the mempool as part of consensus.
 - **Z:** Ycash's `AcceptToMemoryPool` holds `pool.cs` for its whole body (`:1520`), and policy

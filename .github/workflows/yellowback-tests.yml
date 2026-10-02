@@ -17,8 +17,9 @@ name: yellowback tests
 
 # feature/yellowback-sf (v2) was dropped from both trigger lists on 2026-09-20 and, since 2026-10-01,
 # is no comparison base for anything (owner): Yellowback is v3, price attestation. The frozen-file
-# check measures against the tag yellowback-v3-baseline (= feature/yellowback-price-attest at
-# 9da72131e); every line budget against ycash-legacy (= upstream v4.5.0).
+# check measures against the tag yellowback-v3-baseline (= feature/yellowback-price-attest at the
+# 2026-10-02 audit merge, re-tagged from 9da72131e to carry the reviewed A-1 hook move and A-7 template
+# tag change); every line budget against ycash-legacy (= upstream v4.5.0).
 on:
   push:
     branches:

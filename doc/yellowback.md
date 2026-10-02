@@ -328,7 +328,9 @@ v2's paragraph "price honesty rests on the honest-majority-hashpower assumption"
 
 Everything below runs from `ycash-dd/` on the branch of record, `feature/yellowback-price-attest`
 (plan §6.0 item 0). The frozen-file zero-delta check measures against the tag
-`yellowback-v3-baseline` (= `9da72131e`), line budgets against `ycash-legacy`.
+`yellowback-v3-baseline` (re-tagged 2026-10-02 at the security-audit merge, superseding `9da72131e`,
+to carry the two reviewed frozen-file changes: A-1, the MP-1 hook after script verification; A-7, the
+template tag decoded from the served coinbase), line budgets against `ycash-legacy`.
 `feature/yellowback-sf` is the superseded v2 fork, kept as a record and never a comparison base;
 the recorded numbers further down were measured on it. Python is always the workspace
 venv (`../.venv/bin/python`), never the system interpreter.
