@@ -596,9 +596,13 @@ miner after a tip change made it invalid (N5); it never refuses mints or transfe
 admission-time check: `ConnectTip` additionally drops from the mempool every vault spend whose
 `MempoolCheck` fails at the new tip (§4.3), and `getrawmempool` on a node without that sweep may
 still list a spend TPL-1 will never mine. `MempoolCheck` returns true in `O(inputs)` `Vaults`
-lookups when no input is an ACTIVE vault and never computes a SNAP (the tag at `H` never affects
-rules at `H`, §4.4), so an ordinary transaction costs an enforcing node nothing measurable (N6;
-benchmark in §7). `MempoolCheck`
+lookups when no input is an ACTIVE vault; a candidate that does spend one is dry-run by
+`ProcessTx` at `tip + 1` on a discarded overlay — RED-1..5 only, reading `Snapshots[ref ≤ H − 1]`
+— and never computes a SNAP (the tag at `H` never affects rules at `H`, §4.4), so an ordinary
+transaction costs an enforcing node nothing measurable and a garbage vault spend costs it the
+RED checks, not a snapshot (N6; benchmark in §7; audit A-1). `AcceptToMemoryPool` runs the
+check after script verification (`ContextualCheckInputs`), so a spend whose scriptSig does not
+verify is refused by the stock path (DoS 100) before Yellowback evaluates anything. `MempoolCheck`
 sees only confirmed YED inputs (unconfirmed parents are not in the index), so a chained redemption
 is refused; the wallet uses confirmed inputs only, and `yed_validaterawtransaction` says so (M13).
 
