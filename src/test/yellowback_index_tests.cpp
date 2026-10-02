@@ -1130,6 +1130,20 @@ BOOST_AUTO_TEST_CASE(valve_note_map_bounded)
         BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), (size_t)std::min(k, VALVE_NOTE_CAP));
         prev = h.GetHash();
     }
+    // Audit B-1: the descendants of the refused-but-unnoted header are answered true as well (DoS 0
+    // in AcceptBlockHeader, never the stock "prev block not found" DoS 10), and none is noted.
+    for (int k = VALVE_NOTE_CAP + 2; k <= VALVE_NOTE_CAP + 4; k++) {
+        CBlockHeader h = HeaderOn(prev, k, tip->nBits);
+        LOCK(cs_main);
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(h));      // answered again
+        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), (size_t)VALVE_NOTE_CAP);
+        prev = h.GetHash();
+    }
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(uint256S("cd"), 1, tip->nBits)));   // unknown parent: not ours
+    }
     BOOST_CHECK(!live.index->ValveTripped());
     BOOST_CHECK_EQUAL(live.index->RejectedCount(), 1);
     BOOST_CHECK(live.index->IsEnforcing());
@@ -1161,8 +1175,10 @@ BOOST_AUTO_TEST_CASE(valve_ignores_lowdiff_headers)
         CBlockHeader ok = HeaderOn(bad.hash, 2, withinBound);
         BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(ok));
         BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
-        // A header on the unnoted easy one: its parent is neither a note nor indexed, so it is not answered here.
-        BOOST_CHECK(!live.index->NoteHeaderOnRejectedChain(HeaderOn(HeaderOn(bad.hash, 1, tooEasy).GetHash(), 3, tip->nBits)));
+        // A header on the unnoted easy one: its parent is a remembered refusal (audit B-1), so it is
+        // answered DoS 0 too, and still not noted.
+        BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(HeaderOn(bad.hash, 1, tooEasy).GetHash(), 3, tip->nBits)));
+        BOOST_CHECK_EQUAL(live.index->ValveNoteCount(), 1u);
         // Chained on the noted one, the loosening is still measured against the rejected root's target
         // (audit A-6): 125 % of 125 % compounds past 132 % and is not noted, nor is 140 % of 125 %.
         BOOST_CHECK(live.index->NoteHeaderOnRejectedChain(HeaderOn(ok.GetHash(), 4, arith_uint256(parentTarget / 100 * 125 / 100 * 125).GetCompact())));
