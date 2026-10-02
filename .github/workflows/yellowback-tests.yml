@@ -61,20 +61,21 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: dc0cb249605bb9a9f57ce823d6e775b1478447d5
+  YOLO_COMMIT: aba726b4f7d14e9b6949180011d860263deee1c4
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
   # this commit (its main on 2026-10-01; bump by PR, audit I-5) and built --locked the same way,
   # exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: dd87db83c50df9f775c1ad124c295661c8a9b591
+  CHAINVIZ_COMMIT: c388ed218a06ea59701ecbda9130d9789cb0a969
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
-  LWD_COMMIT: 2d33f42cff7b7aaddbe91dc54fee98e60ac19f20
+  LWD_COMMIT: f84ed92eab522a466bc0b85df7f1abdf493c872c
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The cargo-audit release the agent job installs (audit I-7); bump by PR.
   CARGO_AUDIT_VERSION: 0.22.2
+  CARGO_DENY_VERSION: 0.18.3
   # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
   # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
   # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
@@ -186,7 +187,9 @@ jobs:
           rm -rf "$RUNNER_TEMP/yolo-ci"; cp -R .yolo-ci "$RUNNER_TEMP/yolo-ci"
           cd "$RUNNER_TEMP/yolo-ci"
           rustup show active-toolchain
-          cargo build --release --locked
+          # --features regtest: yellowback_stratum.py's negative cell passes --text --no-flags,
+          # which yolo accepts only in a regtest-feature build (yolo audit H-6).
+          cargo build --release --locked --features regtest
           ./target/release/yolo --version
           echo "YOLO_BIN=$RUNNER_TEMP/yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
       - name: Check out chain-viz (the chain observer yellowback_chainviz drives)
@@ -513,6 +516,15 @@ jobs:
           cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
           cargo audit --version
           cargo audit
+      - name: cargo deny (advisories, licences, bans, sources per deny.toml; audit D-12)
+        # The crate's deny.toml (cargo-deny 0.18 syntax, as chain-viz's) is the policy; the
+        # cargo-deny release is pinned (CARGO_DENY_VERSION) and installed --locked.
+        if: steps.crate.outputs.present == 'true' && !cancelled()
+        working-directory: contrib/yellowback/attest
+        run: |
+          cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+          cargo deny --version
+          cargo deny --locked check
       - name: expected.json is the Python aggregator's answer
         if: steps.crate.outputs.present == 'true' && !cancelled()
         working-directory: contrib/yellowback/attest
