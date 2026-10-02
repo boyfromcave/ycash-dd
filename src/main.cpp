@@ -1642,8 +1642,6 @@ bool AcceptToMemoryPool(
         nValueIn = view.GetValueIn(tx);
 
         view.SetBackend(dummy);
-        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
-            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
 
         // Check for non-standard pay-to-script-hash in inputs
         if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId))
@@ -1763,6 +1761,9 @@ bool AcceptToMemoryPool(
         {
             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
         }
+
+        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
+            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
 
         {
             // Store transaction in memory
