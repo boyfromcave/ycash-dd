@@ -2,9 +2,12 @@
 
 This is the Ycash node, **plus Ycash Yellowback (YED)**: a decentralized digital dollar on Ycash,
 built the way DigiByte's DigiDollar is built but adapted to what Ycash actually has. This branch
-(`feature/yellowback-sf`) is a fork of upstream Ycash `v4.5.0` (the pristine baseline is the
-`ycash-legacy` branch; `git diff ycash-legacy...feature/yellowback-sf` is the entire delta). The
-earlier federation prototype is kept on `feature/digidollar` as a record.
+(`feature/yellowback-price-attest`, Yellowback v3: price attestation) is a fork of upstream Ycash
+`v4.5.0` (the pristine baseline is the `ycash-legacy` branch;
+`git diff ycash-legacy...feature/yellowback-price-attest` is the entire delta, and the frozen-file
+zero-delta check measures against the tag `yellowback-v3-baseline`). The superseded v2 branch
+`feature/yellowback-sf` and the earlier federation prototype on `feature/digidollar` are kept as
+records only, never as comparison bases.
 
 **Yellowback is experimental and off by default.** A node that does not enable it runs upstream
 Ycash v4.5.0's code paths: same consensus, same policy, same P2P, same RPC surface.
