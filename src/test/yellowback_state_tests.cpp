@@ -1284,10 +1284,56 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
     Fixture f(1, 0, 1, 0);                                  // cap = 0.01% of market cap: below $100 on a young regtest chain
     f.Activate();
     BOOST_CHECK(SupplyCapCents(f.Snap(f.tip).issuedZat, 50000, 1).value() < 10000);
-    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1)), "mint-supply-cap");
+    MintOpts c; c.termClass = 2;                            // class C (300 %): below the W20 floor, so the cap is hard for it
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "mint-supply-cap");
     Fixture g(1, 0, 10000, 0);                              // cap = 100% of market cap: ~$818 at 131 blocks and $1/YEC
     g.Activate(1000000);
-    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 145, g.tip - 1, c)), "");
+}
+
+// Rule: MINT-6
+BOOST_AUTO_TEST_CASE(mint6_cap_is_soft_above_the_recap_floor)
+{
+    // W20: a mint that would take supply over the cap is refused only when the ratio it locks is
+    // below RECAP_RATIO_BPS (500 %): class C (300 %) and class B (400 %) at a multiplier of 1x are
+    // mint-supply-cap, class A (500 %) goes through and takes supply above the cap.
+    Fixture f(1, 0, 100000, 0);                             // cap = 10x market cap: ~ $409 on a young regtest chain at $0.05 (a test knob; the rule's arithmetic has no range)
+    f.Activate();                                           // $0.05/YEC, the price MintVerdictOf's blocks quote
+    auto capAt = [](const Fixture& x, int ref) { Snapshot s = x.Snap(ref); return SupplyCapCents(s.issuedZat, s.PMint(), x.P.supplyCapBps).value(); };
+    const Cents cap0 = capAt(f, f.tip - 1);
+    BOOST_REQUIRE(cap0 > 2 * f.P.minMint && cap0 - 5000 <= f.P.maxMint);
+    f.MintActive(cap0 - 5000);                              // supply sits at the cap: less than MIN_MINT of headroom
+    int ref = f.tip - 1;
+    BOOST_REQUIRE(f.GetTotals().supplyCents <= capAt(f, ref));
+    BOOST_REQUIRE(f.GetTotals().supplyCents + f.P.minMint > capAt(f, ref));
+    MintOpts a; a.collateral = 10000000000000LL;
+    MintOpts b = a; b.termClass = 1;                        // class B, lock 100
+    MintOpts c = a; c.termClass = 2;                        // class C, lock 145
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, ref, c)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 100, ref, b)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, ref, a)), "");
+    f.MintActive(10000);                                    // class A, lock 48: accepted above the cap
+    ref = f.tip - 1;
+    BOOST_CHECK(f.GetTotals().supplyCents > capAt(f, ref));
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, ref, c)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, ref, a)), "");
+    // The floor is the ratio actually locked, so class B qualifies from a multiplier of 1.25x (400 % * 1.25 = 500 %).
+    BOOST_CHECK(MinRatioBps(40000, 12500) >= 50000);
+    BOOST_CHECK(MinRatioBps(40000, 12499) < 50000);
+    // Driven: with SIGMA_REF set, eight untagged blocks leave an undefined fast-window sample inside
+    // VOL_WINDOW, which puts the multiplier at its cap (3x, K12) once the windows refill; class B then passes above the cap.
+    Fixture g(1, 10000, 100000, 0);
+    g.Activate();
+    for (int i = 0; i < 8; i++) g.Mine();
+    g.MineQuotesTo(g.tip + 8);
+    BOOST_REQUIRE_EQUAL(g.Snap(g.tip - 1).haltMask, 0u);
+    BOOST_REQUIRE(g.Snap(g.tip - 1).sigmaMultBps >= 12500);
+    const Cents capG = capAt(g, g.tip - 1);
+    g.MintActive(capG - 5000);
+    ref = g.tip - 1;
+    BOOST_REQUIRE(g.GetTotals().supplyCents + g.P.minMint > capAt(g, ref));
+    BOOST_REQUIRE(g.Snap(ref).sigmaMultBps >= 12500);
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 100, ref, b)), "");
 }
 
 // Rule: MINT-7
@@ -1991,8 +2037,10 @@ BOOST_AUTO_TEST_CASE(params_selected_by_height)
     BOOST_CHECK_EQUAL(SelectParams(sets, 0).startHeight, 1);          // none qualifies: the first set
     Fixture f;
     f.Activate();
-    // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap.
-    CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1);
+    // A mint under the first set passes; the same mint evaluated under the second set hits its supply cap
+    // (class C, lock 145: below the W20 recapitalisation floor, so the cap is hard for it).
+    MintOpts c; c.termClass = 2;
+    CMutableTransaction m = f.MintTx(10000, 145, f.tip - 1, c);
     CBlock block;
     block.vtx.push_back(CTransaction(Fixture::Coinbase(f.tip + 1, Fixture::Quote(50000, 0))));
     block.vtx.push_back(CTransaction(m));

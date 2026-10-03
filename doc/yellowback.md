@@ -130,6 +130,15 @@ collateral is short at that snapshot is **VOID**: the YED it would have issued n
 collateral is released by its owner with `yed_redeem` at the lock height (no burn, no fee). The
 wallet refuses to build a mint that would be VOID (`mintpol-*` identifiers in `doc/yellowback-rpc.md`).
 
+**The supply cap is soft (W20).** YED supply is capped at `SUPPLY_CAP_BPS` (15 %) of YEC's issued
+market cap, but reaching the cap is read as a sign that demand for YED is strong relative to YEC,
+not as a stop: above it a mint is accepted iff the ratio it locks — the class minimum times the
+volatility multiplier — is at least `RECAP_RATIO_BPS` (500 %), so class A always qualifies and
+class B from a multiplier of 1.25×. Every YED minted above the cap locks five times its value in
+YEC, the buffer wanted if the market cap corrects. `yed_getinfo.supplyCapReached` says the cap is
+reached, `yed_getstats.mintableClasses` which classes still mint, and the wallet's `mintpol-cap`
+refusal names them.
+
 Never spend a YED output with a plain YEC command: the YED it carries is burned. The wallet locks
 every YED output it owns (`listlockunspent` shows them) so `sendtoaddress` and friends cannot pick
 them by accident; `lockunspent true` on one of them removes that protection.
@@ -524,3 +533,4 @@ view schema 2, fuzz targets), same host and build recipe as above.
   wrapper, or a `regtest`-wide default) before they can join the CI list.
 - The two pre-existing `test_bitcoin` failures (`subsidy_limit_test`, `rpc_z_sendmany_internals`)
   make the whole-suite step of the CI `main` job red until they are fixed or excluded by name.
+

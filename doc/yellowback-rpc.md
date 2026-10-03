@@ -118,7 +118,11 @@ under the kill switch (`-yellowbackenforce=0`), the valve (`valveTripped`, ACT-7
 (`sunset`, ACT-5, L8) or an unhealthy index. `rejectedBlocks` counts blocks this node refused
 (`Rejected`); `suppressedBlocks` counts rule-breaking blocks accepted by BLK-2 clause 3 because the
 network had already built `VALVE_BLOCKS` on them (L11) — an information line, not an alarm.
-`abandoned` is the abandonment predicate below (L10). `templatePolicy` is `"strict"` or
+`abandoned` is the abandonment predicate below (L10). `supplyCapReached` (**v3, W20**) is `true`
+when the next mint of any class would exceed the supply cap at the tip snapshot (`supplyCents +
+MIN_MINT > supplyCapCents`) and `false` when the cap is undefined (no cap, no price, empty index);
+above the cap only a class whose minimum ratio reaches `params.recapRatioBps` mints
+(`yed_getstats.mintableClasses`). `templatePolicy` is `"strict"` or
 `"consensus"`. `miner.quoteKind` is what the next template's tag would be (`"quote"`, `"signal"`,
 `"none"`); `miner.quoteAgeSeconds` is `null` when no quote is held; `miner.payoutAddress` is `null`
 when the node has no payout key (then `quoteKind` is `"none"`). `params` reports every value the
@@ -165,6 +169,7 @@ Result of `yed_getinfo`:
   "suppressedBlocks": 0,
   "templatePolicy": "strict",
   "abandoned": false,
+  "supplyCapReached": false,
   "lockedOutputs": 2,
   "protectedByIndex": true,
   "rebuilt": false,
@@ -291,12 +296,14 @@ Arguments: none. `Totals` plus the tip snapshot. `pClaim` is `null` when undefin
 the minimum fill on the mid or slow window); `globalRatioBps` is `null` when there is no supply or
 no `pMint`; `supplyCapCents` is `null` when there is no cap (`supplyCapBps == 0` or no price).
 `haltMask` is the decoded tip `haltMask` as an array of names (empty when minting is open);
-`mintingAllowed` is `activation == active && haltMask == [] && cap has room` — every class can
-mint. **v3 (W16)** `mintableClasses` is the list of term classes a mint can use *now*: every
-class when `mintingAllowed`; under a `GLOBAL_RATIO` halt alone, the classes whose minimum ratio
-(`baseRatioBps · sigmaMultBps / 10⁴`) reaches `params.recapRatioBps` (class A on every network
-at a sigma multiplier of 1); empty under any other halt or at the cap. The MINTPOL-1 gate
-`yed_mint` applies is "the class of `lockBlocks` is in `mintableClasses`".
+`mintingAllowed` is `activation == active && haltMask == [] && !supplyCapReached` — every class
+can mint (`supplyCapReached` as `yed_getinfo` reports it: `supplyCents + MIN_MINT >
+supplyCapCents`, W20). **v3 (W16, W20)** `mintableClasses` is the list of term classes a mint can
+use *now*: every class when `mintingAllowed`; under a `GLOBAL_RATIO` halt alone, or once the cap
+is reached, the classes whose minimum ratio (`baseRatioBps · sigmaMultBps / 10⁴`) reaches
+`params.recapRatioBps` (class A on every network at a sigma multiplier of 1, class B from 1.25×);
+empty under any other halt. The MINTPOL-1 gate `yed_mint` applies is "the class of `lockBlocks`
+is in `mintableClasses`".
 
 Result of `yed_getstats`:
 
@@ -1910,7 +1917,7 @@ what `yellowback_rpc_contract.py` uses.
 | Identifier | Raised by | When (provocation) |
 |---|---|---|
 | `yellowback-unhealthy` | every gated command | the index is unhealthy (`unhealthyReason` follows); provoke with `-yellowbacktestfault=storage:commit` then any non-allow-listed command. Also the storage boundary of `yed_addattestation` and `yed_buildbundle` (audit A-3): a storage exception under either marks the index unhealthy and the call fails with `yellowback-unhealthy: storage failure in AddAttestation: …` / `… in BuildBundle: …` |
-| `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says "after N cents of mints in the mempool"). **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by `yed_redeem` at `lockHeight`, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached. |
+| `mintpol-not-active`, `mintpol-no-price`, `mintpol-participation`, `mintpol-global-ratio`, `mintpol-divergence`, `mintpol-cap` | `yed_mint` | MINTPOL-1, one per halt bit and the cap: mint before activation; with no quote tags in the windows; after fewer than `PARTICIPATION_FLOOR` signals in a window; with the global ratio below `GLOBAL_RATIO_HALT_BPS` and the class's minimum ratio below `RECAP_RATIO_BPS` (W16: class A mints through a global-ratio halt, the message names the classes that can); with `P_fast`/`P_slow` diverging by more than `DIVERGENCE_BPS`; with `-yellowbacksupplycapbps` low and supply at the cap — counting the MINT payloads already in this node's mempool toward it (audit C-3; the message then says "after N cents of mints in the mempool"). W20: above the cap, classes at or over `RECAP_RATIO_BPS` mint; the message names them. **Residual race:** MINT-6 is judged at inclusion against live totals, so a competing mint this node has not seen (or one paying more) can still land first and make a mint that passed the gate confirm VOID; the collateral is then released by `yed_redeem` at `lockHeight`, no YED is issued and the fee is not refunded. Keep well inside the headroom when the cap is nearly reached. |
 | `mint-unsatisfiable` | `yed_mint`, `yed_estimatecollateral` | `requiredZat > MAX_MONEY` (K14): `MAX_MINT` cents at `priceMicroUsd = PRICE_MIN` |
 | `mint-bad-lock` | `yed_mint`, `yed_estimatecollateral` | `lockBlocks` outside every class, or `lockHeight + GRACE ≥ LOCKTIME_THRESHOLD` |
 | `too-many-addresses` | `yed_listtokens` | an empty array, or more than 100 addresses |

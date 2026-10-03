@@ -824,16 +824,23 @@ MintGateFacts MintGate(const Context& ctx, Cents cents, int lockBlocks, int R)
     if (!g.xMint.has_value()) throw std::runtime_error("mintpol-no-price: pMint is undefined at the reference height");
     const Totals totals = ctx.st.GetTotals();
     std::optional<Cents> cap = SupplyCapCents(S->issuedZat, g.xMint, p.supplyCapBps);
-    if (cap.has_value() && totals.supplyCents + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents", std::max<Cents>(0, cap.value() - totals.supplyCents)));
+    // W20: the cap is soft above the recapitalisation floor -- a mint over it is refused only when the
+    // class's minimum ratio is below RECAP_RATIO_BPS (MINT-6, amended); the message names the classes that mint.
+    const bool belowFloor = MinRatioBps(p.baseRatioBps[g.termClass], S->sigmaMultBps) < p.recapRatioBps;
+    std::string open;
+    for (int c = 0; c < NUM_CLASSES; c++) if (MinRatioBps(p.baseRatioBps[c], S->sigmaMultBps) >= p.recapRatioBps) open += (open.empty() ? "" : ", ") + std::string(1, (char)('A' + c));
+    const std::string above = strprintf("; above the cap only a term class whose minimum ratio is at least %d %% can mint (W20)%s",
+                                        p.recapRatioBps / 100, open.empty() ? "" : " (class " + open + ")");
+    if (cap.has_value() && totals.supplyCents + cents > cap.value() && belowFloor) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents%s", std::max<Cents>(0, cap.value() - totals.supplyCents), above));
     }
     // MINT-6 is judged at inclusion against live totals: mints already in the mempool land first and a
     // mint that passed this gate could confirm VOID, locking its collateral (audit C-3). Count them here;
     // the residual race (a competing mint that arrives later or pays more) is documented under yed_mint.
     const Cents pending = MempoolMintCents();
-    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value()) {
-        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool",
-                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending));
+    if (cap.has_value() && pending > 0 && totals.supplyCents + pending + cents > cap.value() && belowFloor) {
+        throw std::runtime_error(strprintf("mintpol-cap: supply cap headroom is %d cents after %d cents of mints in the mempool%s",
+                                           std::max<Cents>(0, cap.value() - totals.supplyCents - pending), pending, above));
     }
     return g;
 }
