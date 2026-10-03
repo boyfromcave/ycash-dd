@@ -266,4 +266,15 @@ const Params& ParamsForNetwork(const std::string& networkId)
     throw std::runtime_error("yellowback: unknown network " + networkId);
 }
 
+bool ParamSetStartAdmissible(int startHeight, int prevEnforceUntilHeight, int signalWindow, const std::function<bool(int)>& enforcementHaltedAt)
+{
+    // Rule: ACT-5
+    if (prevEnforceUntilHeight > 0 && startHeight >= prevEnforceUntilHeight) return true;     // L8: at or after the sunset
+    if (signalWindow <= 0 || startHeight - signalWindow < 0) return false;
+    for (int h = startHeight - signalWindow; h <= startHeight - 1; h++) {                       // W19: a full window of the ENFORCEMENT halt
+        if (!enforcementHaltedAt(h)) return false;
+    }
+    return true;
+}
+
 } // namespace yellowback

@@ -534,3 +534,62 @@ view schema 2, fuzz targets), same host and build recipe as above.
 - The two pre-existing `test_bitcoin` failures (`subsidy_limit_test`, `rpc_z_sendmany_internals`)
   make the whole-suite step of the CI `main` job red until they are fixed or excluded by name.
 
+## Releases and continuity
+
+Every release carries one parameter set per network (`src/yellowback/params.cpp`), hashed into the
+state hash and in force from its `START_HEIGHT` until its `ENFORCE_UNTIL_HEIGHT` (the sunset, ACT-5,
+L8), about a year of blocks later. Past the sunset the node keeps tagging, filtering and accounting
+but rejects nothing until upgraded, so two releases with different rules are never both enforcing.
+Three rules decide when the next set may start (plan §2 W18–W21, §3.8 "Parameter-set start").
+
+### Renewal releases (W18)
+
+A release that carries **the same values and only a later `ENFORCE_UNTIL_HEIGHT`** is a *renewal*,
+not a parameter change. It cannot make two enforcing releases disagree: a node left on the old
+release stops rejecting at the old sunset and becomes permissive, and a permissive node follows
+whatever the stricter majority builds. A renewal is therefore exempt from L8's start constraint and
+may ship at any time before the sunset; `ParamsHash` sees it as a different set only in
+`enforceUntilHeight`. **Obligation:** the renewal for each year ships **no later than six months
+before the sunset**, so a missed date costs a warning (the GUI warns at `ENFORCE_UNTIL_HEIGHT -
+grace`), not an enforcement gap. A release that changes any other value is a parameter change and
+follows the rule below.
+
+### Freeze, then fix (W19)
+
+A parameter-change set may start at height `X` only when no released node can still be enforcing
+the old set: either `X ≥` the previous set's `ENFORCE_UNTIL_HEIGHT` (L8), **or** the chain itself
+shows the `ENFORCEMENT` halt — `Snapshots[h].haltMask` has `ENFORCEMENT` set for every `h` in `[X −
+SIGNAL_WINDOW, X − 1]`, a full window in which no node validated a vault spend under the old set
+(`ParamSetStartAdmissible` in `src/yellowback/params.h`, a release-time check). That second state
+is reachable on purpose, which is the runbook for a wrong value found before the sunset:
+
+1. **Freeze.** The pools set `-yellowbackenforce=0` (the existing kill switch; nothing new is
+   deployed). Their blocks stop signalling, the signal count falls below `ENFORCEMENT_FLOOR` within
+   one window (2,016 blocks, ≈ 1.75 days on mainnet) and the `ENFORCEMENT` halt bit sets.
+   Minting stops with it (`PARTICIPATION` sets first, at 60 %).
+2. **Wait one signal window** with the bit set. `yed_gethistory` shows the stretch; the earliest
+   admissible `X` is the first height after it.
+3. **Ship the corrected set** with `START_HEIGHT = X` (and a fresh sunset), as a release.
+4. **Upgrade and re-signal.** Pools install the release and set `-yellowbackenforce=1`; the signal
+   count climbs, activation runs again (lock-in at 75 %, active one window later, ACT-1..3) and
+   enforcement resumes under the new set.
+
+What is and is not at risk during the freeze:
+
+- **No YED can be created.** Evaluation never stops; minting is halted by the `PARTICIPATION` bit
+  from the first window on, and every mint in that stretch is VOID on every node.
+- **Vaults stay script-locked.** Ycash consensus still enforces the lock height and the owner key:
+  before `lockHeight + GRACE` only the minter can move collateral, freeze or not.
+- **The claim path is open to stock blocks.** Past a vault's claim height, a claim-path spend with
+  no burn can confirm in a block mined by a pool that does not run the module (`doc/yellowback.md`
+  "Every enforcement gap is such a window"). Pools on the release still filter such spends (TPL-1,
+  MP-1) until `ABANDON_BLOCKS` elapses, so leakage is bounded by stock hashpower and by the vaults
+  past their claim height. Owners with a vault near its claim height should redeem before freezing.
+- **`ABANDON_BLOCKS` = `GRACE` (34,560 blocks, ≈ 30 days) is the floor on the time available**
+  (W21): only after that long with the bit set do the release's pools stand down from filtering and
+  wallets offer `yed_sweep`. Abandonment is a rolling predicate — enforcement resuming on day 40
+  ends it — but a freeze that runs past thirty days has crossed into it, with that cost.
+
+Rejected alternatives, for the record: set-version signalling in the coinbase tag (a live switch
+with no freeze, a real design addition kept for a later revision) and miner-voted parameters (a
+different design).

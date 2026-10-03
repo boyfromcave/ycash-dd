@@ -10,6 +10,7 @@
 #include "script/script.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -254,6 +255,19 @@ const Params& SelectParams(const std::vector<Params>& sets, int height);
 
 /** Parameters for a network id as returned by CChainParams::NetworkIDString(); regtest returns unconfigured defaults. */
 const Params& ParamsForNetwork(const std::string& networkId);
+
+/**
+ * Rule: ACT-5 -- parameter-set start (W19; v2 L8 amended). A set that differs from the
+ * previous one in any value other than enforceUntilHeight may start at `startHeight` iff
+ * startHeight >= the previous set's ENFORCE_UNTIL_HEIGHT (L8), or the ENFORCEMENT halt was
+ * set on every snapshot in [startHeight - signalWindow, startHeight - 1] ("freeze, then
+ * fix": no node validated a vault spend under the old set in that stretch). A renewal (W18:
+ * the same values, a later sunset) is exempt and never asks. prevEnforceUntilHeight 0 (no
+ * sunset) leaves only the freeze clause. A release-time check with no index dependency: the
+ * caller supplies enforcementHaltedAt(height).
+ */
+bool ParamSetStartAdmissible(int startHeight, int prevEnforceUntilHeight, int signalWindow,
+                             const std::function<bool(int)>& enforcementHaltedAt);
 
 } // namespace yellowback
 

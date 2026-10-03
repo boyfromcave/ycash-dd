@@ -297,6 +297,31 @@ BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
 }
 
 // Rule: ACT-5
+// Rule: ACT-5
+BOOST_AUTO_TEST_CASE(act5_param_set_start_admissible)
+{
+    // W19 over a synthetic run of snapshots: ENFORCEMENT is set on [1000, 1200) and nowhere else.
+    const int W = 64, sunset = 5000;
+    auto halted = [](int h) { return h >= 1000 && h < 1200; };
+    BOOST_CHECK(ParamSetStartAdmissible(5000, sunset, W, halted));          // L8: at the sunset
+    BOOST_CHECK(ParamSetStartAdmissible(6000, sunset, W, halted));          // and after it
+    BOOST_CHECK(!ParamSetStartAdmissible(4999, sunset, W, halted));         // before it, with no freeze
+    BOOST_CHECK(ParamSetStartAdmissible(1064, sunset, W, halted));          // [1000, 1063] all halted: the first admissible X
+    BOOST_CHECK(ParamSetStartAdmissible(1200, sunset, W, halted));          // [1136, 1199]: the last
+    BOOST_CHECK(!ParamSetStartAdmissible(1063, sunset, W, halted));         // 999 is not halted
+    BOOST_CHECK(!ParamSetStartAdmissible(1201, sunset, W, halted));         // 1200 is not halted
+    BOOST_CHECK(!ParamSetStartAdmissible(1100, sunset, 2 * W, halted));     // a wider window reaches 972
+    BOOST_CHECK(!ParamSetStartAdmissible(32, sunset, W, halted));           // the window would start below height 0
+    // No sunset (regtest 0): only the freeze clause can admit a start.
+    BOOST_CHECK(!ParamSetStartAdmissible(10, 0, W, halted));
+    BOOST_CHECK(ParamSetStartAdmissible(1100, 0, W, halted));
+    // The mainnet set: a change before its sunset with enforcement never halted is not admissible.
+    const Params& m = MainParams();
+    BOOST_CHECK(!ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
+    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
+    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return true; }));
+}
+
 // The §3.1 table, both columns; the four regtest flags land where the plan says.
 BOOST_AUTO_TEST_CASE(act5_params_tables)
 {
