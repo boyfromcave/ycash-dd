@@ -584,7 +584,7 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest -v
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest test_framework.test_yellowback_model test_framework.test_yellowback_util -v
       - name: pyflakes (contrib; blocking from Phase 7)
         # Independent check: runs even if an earlier step failed, so one red result
         # does not hide the others. The job still fails overall.
