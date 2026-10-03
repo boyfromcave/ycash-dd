@@ -287,7 +287,7 @@ class Params(object):
             supply_cap_bps=1_500, enforce_until=enforce_until,
             p_fast_window=96, p_mid_window=576, p_slow_window=2_016,
             signal_window=2_016, activation_threshold=1_512, participation_floor=1_210, activation_delay=2_016,
-            enforcement_floor=1_008, enforcement_resume=1_210, valve_blocks=6, abandon_blocks=4_032,
+            enforcement_floor=1_008, enforcement_resume=1_210, valve_blocks=6, abandon_blocks=34_560,
             n_reg=576, n_penalty=288, peer_lag=10, peer_min=5, deviation_bps=1000, accuracy_band_bps=300,
             accuracy_window=576, payee_tilt_bps=10_000, payee_window=100,
             fee_min=50_000_000, fee_bps=25, grace=34_560, claim_threshold_bps=11_000,
@@ -2395,9 +2395,11 @@ class YellowbackModel(object):
             v = mint5(x_mint)
             if v is not None:
                 return v
-        # MINT-6 (the cap reads the cross-section xMint: it precedes MINT-9)
+        # MINT-6 (amended, W20: soft above the recapitalisation floor; the cap reads the cross-section
+        # xMint and precedes MINT-9)
         cap = supply_cap_cents(s.issued_zat, x_mint, p.supply_cap_bps)
-        if cap is not None and self.totals.supply_cents + pl.cents > cap:
+        if (cap is not None and self.totals.supply_cents + pl.cents > cap
+                and min_ratio_bps(p.base_ratio_bps[pl.term_class], s.sigma_mult_bps) < p.recap_ratio_bps):
             return 'mint-supply-cap'
         # MINT-7
         if opret == 1:

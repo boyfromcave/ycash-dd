@@ -315,7 +315,8 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.enforcementFloor, 1008);
     BOOST_CHECK_EQUAL(m.enforcementResume, 1210);
     BOOST_CHECK_EQUAL(m.valveBlocks, 6);
-    BOOST_CHECK_EQUAL(m.abandonBlocks, 2 * m.signalWindow);
+    BOOST_CHECK_EQUAL(m.abandonBlocks, m.grace);              // W21: = GRACE, 30 days
+    BOOST_CHECK(m.abandonBlocks >= m.grace);                   // W21 invariant, every network
     BOOST_CHECK_EQUAL(m.nReg, 576);
     BOOST_CHECK_EQUAL(m.nPenalty, 288);
     BOOST_CHECK_EQUAL(m.peerLag, 10);
@@ -346,6 +347,8 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.volWindow / m.volStep, 42);   // 43 samples, 42 returns
     BOOST_CHECK_EQUAL(TestParams().network, "test");
     BOOST_CHECK_EQUAL(TestParams().grace, 34560);
+    BOOST_CHECK_EQUAL(TestParams().abandonBlocks, TestParams().grace);
+    BOOST_CHECK(TestParams().abandonBlocks >= TestParams().grace);
 
     Params r = RegtestParams(150, 12345, 700, 9000);
     BOOST_CHECK_EQUAL(r.network, "regtest");
@@ -365,6 +368,7 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(r.enforcementResume, 39);
     BOOST_CHECK_EQUAL(r.valveBlocks, 6);
     BOOST_CHECK_EQUAL(r.abandonBlocks, 128);
+    BOOST_CHECK(r.abandonBlocks >= r.grace);                   // W21 invariant (regtest GRACE 24)
     BOOST_CHECK_EQUAL(r.nReg, 24);
     BOOST_CHECK_EQUAL(r.nPenalty, 12);
     BOOST_CHECK_EQUAL(r.peerLag, 4);

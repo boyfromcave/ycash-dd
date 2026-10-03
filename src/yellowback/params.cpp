@@ -31,7 +31,7 @@ void SetCommon(Params& p)
     p.enforcementFloor    = 1008;   // 50 % (L3)
     p.enforcementResume   = 1210;   // 60 %
     p.valveBlocks         = 6;      // L7
-    p.abandonBlocks       = 4032;   // 2 * signalWindow (L10, L12)
+    p.abandonBlocks       = 34560;  // = GRACE (W21): the minimum time the module waits for its developers (L10, L12)
 
     p.nReg            = 576;
     p.peerLag         = 10;
