@@ -340,6 +340,11 @@ public:
      *  needs a block hash finds anything to eject. */
     void SetBlockHashes(const BlockHashFn& fn) { blockHashes = fn; }
 
+    /** The module ejection hook (U-25) for one module: what ApplyTx runs, after the
+     *  transaction's own rules and act, for each registered module. Public so a unit test can
+     *  drive the hook with a module that is not in the compile-time table. */
+    void ApplyEjectionsOf(const Module& module, const CTransaction& tx, int64_t height);
+
     void Put(const std::string& key, const std::string& value) { changes[key] = value; }
     void Erase(const std::string& key) { changes[key] = std::nullopt; }
 
