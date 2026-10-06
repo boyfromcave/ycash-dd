@@ -59,6 +59,9 @@ BASE_SCRIPTS= [
     # The vault primitive (docs/plans/yellowback-upgrade-plan.md §15.9): UPGRADE_VAULT activation,
     # branch id in signing, CSV/BIP68 before and after, the 0xc0/0xc1 bytes before.
     'vault_upgrade.py',
+    # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
+    # release, cancel, owner spend, reorg across an act, restart reconciliation.
+    'vault_rpc.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
