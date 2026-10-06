@@ -56,6 +56,9 @@ BASE_SCRIPTS= [
     # The v2 framework's own smoke test (six stock nodes, no yed_* call); registered 2026-10-01
     # (audit I-1: it existed and was allow-listed by CI but never registered, so never run).
     'yellowback_framework_smoke.py',
+    # The vault primitive (docs/plans/yellowback-upgrade-plan.md §15.9): UPGRADE_VAULT activation,
+    # branch id in signing, CSV/BIP68 before and after, the 0xc0/0xc1 bytes before.
+    'vault_upgrade.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',

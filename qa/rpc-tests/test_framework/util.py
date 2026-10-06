@@ -42,6 +42,9 @@ BLOSSOM_BRANCH_ID = 0x2BB40E60
 HEARTWOOD_BRANCH_ID = 0xF5B9230B
 CANOPY_BRANCH_ID = 0xE9FF75A6
 NU5_BRANCH_ID = 0xF919A198
+# The Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md section 15.1): regtest
+# activates it with nuparams(VAULT_BRANCH_ID, height); signers after activation sign with it.
+VAULT_BRANCH_ID = 0x6D5B7A31
 
 # The maximum number of nodes a single test can spawn
 MAX_NODES = 8
@@ -669,3 +672,10 @@ def check_node_log(self, node_number, line_to_check, stop_node = True):
 
 def nuparams(branch_id, height):
     return '-nuparams=%x:%d' % (branch_id, height)
+
+def signing_branch_id(node):
+    """The consensus branch id a transaction signed now must commit to: the epoch of the next
+    block on ``node``'s tip (``getblockchaininfo``'s ``consensus.nextblock``), so a Python
+    signer picks VAULT_BRANCH_ID from the activation height on, and the previous epoch's id
+    before it."""
+    return int(node.getblockchaininfo()['consensus']['nextblock'], 16)
