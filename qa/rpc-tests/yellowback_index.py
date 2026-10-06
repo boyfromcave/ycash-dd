@@ -435,10 +435,12 @@ class YellowbackIndexTest(YellowbackTestFramework):
             assert_equal(len(self.attestors_of(i)), 2)
         assert_same_statehash(yellowback_nodes, 'after the join: the unarmed branch won')
         # The undone registration is dead on the winning chain: its bondLocktime was H + BOND_MIN_LOCK for the
-        # height it was built at, and REG-A1 needs L >= H + BOND_MIN_LOCK at the height it is mined, twenty
-        # blocks later. A fresh one (a new locktime) registers, matures and arms from there.
+        # height it was built at. P4-b: it is still a valid SET_JOIN (the test set's bondlockmin is 0) and the
+        # module would mirror it, but its lock is below BOND_MIN_LOCK from the height it would now be mined at,
+        # so the record would stay PENDING for good (the module's floor). A fresh one (a new locktime) registers,
+        # matures and arms from there.
         check = user.yed_validaterawtransaction(hex3)
-        assert_equal((check['type'], check['verdict']), ('none', 'ok'))               # non-Yellowback now
+        assert_equal((check['type'], check['verdict']), ('register', 'ok'))
         hex3b, _lt = build_register_tx(user, hot[2][1], bond[2][1])
         nodes[POOLS[0]].sendrawtransaction(hex3b)                     # mempools rarely agree across a reorg join: hand it to the miner
         nodes[POOLS[0]].generate(1)
