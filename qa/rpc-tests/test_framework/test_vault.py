@@ -135,9 +135,10 @@ class TemplateTests(unittest.TestCase):
         self.assertIsNone(v.parse_vault(spk[:5] + bytes([v.OP_PUSHDATA1]) + spk[5:]))
         # bad keys
         off_curve = b'\x02' + bytes(31) + b'\x07'
-        while v.is_compressed_pubkey(off_curve):
+        while v.is_valid_point(off_curve):
             off_curve = off_curve[:-1] + bytes([off_curve[-1] + 1])
-        self.assertIsNone(v.parse_vault(v.vault_script_unchecked(vparams(owner_key=off_curve))))
+        # A-2: "compressed" is the prefix only; an off-curve key parses (it can never sign)
+        self.assertEqual(v.parse_vault(v.vault_script(vparams(owner_key=off_curve))), vparams(owner_key=off_curve))
         self.assertIsNone(v.parse_vault(v.vault_script_unchecked(vparams(owner_key=b'\x04' + v.pubkey_of(OWNER)[1:]))))
         # the two setId / ownerKey copies must agree
         k = spk.rfind(SET_A)

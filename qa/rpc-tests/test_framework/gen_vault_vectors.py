@@ -33,7 +33,10 @@ hashes are the **internal** byte order = uint256::begin()..end() unless the key 
     acts[]                   {name, type, fields (decoded, as decode_act), payload, prevout, actMsg,
                               signers [key labels], sigs [65], recovered [33], script (the OP_RETURN),
                               convicts? (SET_EQUIVOCATION: the key both signatures recover to)}
-    actsInvalid[]            {name, payload, reason, stage "decode"}   DecodeAct(payload) fails
+    actsInvalid[]            {name, payload, reason, stage}   stage "decode": magic / version / type /
+                              size, DecodePayload fails; stage "field": a context-free field rule of
+                              15.5 (CREATE ranges and flags, bondLocktime, burn, roles, signature
+                              header) -- Python rejects it at decode, C++ may at rule time
     actScriptsInvalid[]      {name, script, reason}           the act output is malformed
     setSigMsgs[]             {setId, role, prevout, sighash, msg}
     signatures[]             {label, secret, pubkey, msg, sig, lowSFlipped}
@@ -99,6 +102,9 @@ def build():
         d.update(kw)
         return v.VaultParams(**d)
 
+    off_curve = b'\x02' + bytes(31) + b'\x07'
+    while v.is_valid_point(off_curve):
+        off_curve = off_curve[:-1] + bytes([off_curve[-1] + 1])
     vault_cases = [
         ('bridge-default', vp()),
         ('delay-1-opcode', vp(delay=1)),
@@ -111,14 +117,12 @@ def build():
         ('app-enabled', vp(tag=b'YED\x00', set_id=set_a, cancel_set_id=set_a, app_height=1288)),
         ('app-height-max', vp(app_height=499999999)),
         ('tag-zero', vp(tag=bytes(4))),
+        ('owner-key-off-curve-accepted', vp(owner_key=off_curve)),     # A-2: prefix check only
     ]
     doc['vaults'] = [{'name': n, 'params': p.to_json(), 'script': _h(v.vault_script(p))} for n, p in vault_cases]
 
     base = v.vault_script(vp(delay=5))
     i_delay = 4 + 1 + 32 + 1
-    off_curve = b'\x02' + bytes(31) + b'\x07'
-    while v.is_compressed_pubkey(off_curve):
-        off_curve = off_curve[:-1] + bytes([off_curve[-1] + 1])
     good = v.vault_script(vp())
     k_set = good.rfind(set_a)
     j_oh = base.find(bytes([0x02, 0xe8, 0x03]))
@@ -132,7 +136,6 @@ def build():
         ('owner-height-500000000', v.vault_script_unchecked(vp(owner_height=500000000)), 'ownerHeight out of range'),
         ('app-height-500000000', v.vault_script_unchecked(vp(app_height=500000000)), 'appHeight out of range'),
         ('owner-key-uncompressed-prefix', v.vault_script_unchecked(vp(owner_key=b'\x04' + P['owner'][1:])), 'ownerKey'),
-        ('owner-key-off-curve', v.vault_script_unchecked(vp(owner_key=off_curve)), 'ownerKey not on the curve'),
         ('setid-copies-differ', good[:k_set] + set_b + good[k_set + 32:], 'shape'),
         ('pushdata1-for-32-bytes', good[:5] + bytes([v.OP_PUSHDATA1]) + good[5:], 'non-minimal push'),
         ('trailing-op', good + bytes([v.OP_1]), 'shape'),
@@ -222,6 +225,8 @@ def build():
         ('set-remove-burn', v.act_set_remove(set_a, P['member-4'], 1), ['member-0', 'member-1']),
         ('set-equivocation', eqv, []),
         ('set-winddown', v.act_set_winddown(set_a), ['member-0', 'member-1', 'member-2']),
+        ('set-create-admit-key-off-curve-accepted', v.act_set_create(1, 1, 1, 1, off_curve), []),   # A-2
+        ('set-join-member-key-off-curve-accepted', v.act_set_join(set_a, off_curve, 2000, 0), []),   # A-2
     ]
     acts = []
     for n, a, signers in act_cases:
@@ -274,9 +279,7 @@ def build():
         ('bond-min-0', bad_create(bondMin=0), 'bondMin'),
         ('bond-min-negative', bad_create(bondMin=-1), 'bondMin'),
         ('admit-key-04', bad_create(admitKey='04' + create['admitKey'][2:]), 'key'),
-        ('admit-key-off-curve', bad_create(admitKey=_h(off_curve)), 'key'),
         ('join-locktime-500000000', v.encode_act(dict(join, bondLocktime=500000000), check=False), 'locktime'),
-        ('join-member-key-off-curve', v.encode_act(dict(join, memberKey=_h(off_curve)), check=False), 'key'),
         ('remove-burn-2', v.encode_act(dict(rem, burn=2), check=False), 'burn'),
         ('equivocation-role-0', v.encode_act(dict(eqv, roleA=0), check=False), 'role'),
         ('equivocation-role-3', v.encode_act(dict(eqv, roleB=3), check=False), 'role'),
@@ -288,7 +291,9 @@ def build():
             raise AssertionError('decoded ' + n)
         except v.VaultError:
             pass
-    doc['actsInvalid'] = [{'name': n, 'payload': _h(p), 'reason': r, 'stage': 'decode'} for n, p, r in act_bad]
+    structural = ('size', 'magic', 'version', 'type')
+    doc['actsInvalid'] = [{'name': n, 'payload': _h(p), 'reason': r, 'stage': 'decode' if r in structural else 'field'}
+                          for n, p, r in act_bad]
 
     wd = v.encode_act(v.act_set_winddown(set_a))
     wsig = v.sign_recoverable(K['member-0'], v.act_msg(wd, prevout_txid, prevout_n))

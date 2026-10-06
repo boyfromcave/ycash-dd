@@ -275,9 +275,17 @@ def pubkey_of(secret32):
 
 
 def is_compressed_pubkey(b):
-    """33 bytes, prefix 02/03, x on the curve (``CPubKey::IsCompressed() && IsFullyValid()``)."""
+    """33 bytes with prefix 02/03 (``CPubKey`` of a compressed size; no curve check).  This is
+    15.3's "compressed" for template and act keys (ambiguity A-2 in VAULT_VECTORS.md: an
+    off-curve key is accepted by the parsers; it simply never verifies or recovers)."""
     b = bytes(b)
-    return len(b) == 33 and b[0] in (2, 3) and _lift_x(int.from_bytes(b[1:], 'big'), b[0] & 1) is not None
+    return len(b) == 33 and b[0] in (2, 3)
+
+
+def is_valid_point(b):
+    """``is_compressed_pubkey`` and x on the curve (``CPubKey::IsFullyValid``)."""
+    b = bytes(b)
+    return is_compressed_pubkey(b) and _lift_x(int.from_bytes(b[1:], 'big'), b[0] & 1) is not None
 
 
 def _decompress(pubkey33):
