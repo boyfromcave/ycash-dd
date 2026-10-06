@@ -68,8 +68,9 @@ bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
 
 /** After a tip change (ConnectTip, DisconnectTip): re-run CheckTx for `nextHeight` on every
  *  mempool transaction that touches the primitive and evict failures (set state, I-2 age and
- *  dormancy change with height). Before activation at `nextHeight`, evicts every transaction
- *  that spends or creates a template output. */
+ *  dormancy change with height). When a reorg has just dropped `nextHeight` below activation,
+ *  evicts every transaction that spends or creates a template output; otherwise a no-op
+ *  before activation. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
 
 /** Start-up reconciliation (U-18): disconnect the database back to chainActive using its own

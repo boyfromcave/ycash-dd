@@ -139,6 +139,10 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
     LOCK(pool.cs);
     const bool active = params.NetworkUpgradeActive(nextHeight, Consensus::UPGRADE_VAULT);
     if (active && !g_vaultdb) return;
+    // Below activation there is only something to do right after a reorg dropped the next
+    // block below it (the mempool may still hold template spends accepted before).
+    const int activation = params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    if (!active && (activation == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || nextHeight != activation - 1)) return;
     CCoinsViewMemPool viewMemPool(pcoinsTip, pool);
     CCoinsViewCache view(&viewMemPool);
     std::shared_ptr<const SetSnapshot> snapshot = active ? TipSnapshot() : nullptr;
