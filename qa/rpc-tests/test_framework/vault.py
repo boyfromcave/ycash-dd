@@ -348,8 +348,8 @@ def sign_recoverable(secret32, msg32):
 def recover_compact(sig65, msg32, strict=True):
     """The 33-byte compressed key a 65-byte recoverable signature recovers to, or None.
     ``strict`` (the set-signature rule, 15.2 step 3): header 31..34 and S <= n/2.  Non-strict
-    mirrors ``CPubKey::RecoverCompact`` (any header, recid = (h - 27) & 3; the key is returned
-    compressed regardless)."""
+    mirrors ``CPubKey::RecoverCompact``: any header, recid = (h - 27) & 3, and the key comes
+    back uncompressed (65 bytes) unless (h - 27) & 4."""
     sig65 = bytes(sig65)
     if len(sig65) != SET_SIG_SIZE:
         return None
@@ -374,6 +374,8 @@ def recover_compact(sig65, msg32, strict=True):
     Q = _add(_mul(s * rinv % _N, R), _mul((-z * rinv) % _N, _G))
     if Q is None:
         return None
+    if not strict and not (header - 27) & 4:
+        return b'\x04' + Q[0].to_bytes(32, 'big') + Q[1].to_bytes(32, 'big')
     return _ser_point(Q)
 
 
@@ -1485,7 +1487,7 @@ class VaultModel(object):
         self.branch_id = branch_id
         self.check_scripts = check_scripts
         self.sets = {}               # setId32 -> SetState
-        self.bonds = {}              # (txid, n) -> (setId32, key33)
+        self.bonds = {}              # (txid, n) -> [setId32, key33, frozen]: the frozen-bond index
         self.coins = {}              # (txid, n) -> Coin
         self.tip = activation_height - 1
         self._undo = []
@@ -1563,12 +1565,11 @@ class VaultModel(object):
                 b = self.bonds.get(key)
                 if b is None:
                     continue
+                if b[2]:
+                    raise VaultError('bad-vault-bond-frozen')
                 m = self.sets[b[0]].members.get(b[1])
-                if m is not None and m.bond_outpoint == key:
-                    if m.bond_frozen:
-                        raise VaultError('bad-vault-bond-frozen')
-                    if m.status == MEMBER_ACTIVE:
-                        m.status = MEMBER_WITHDRAWN
+                if m is not None and m.bond_outpoint == key and m.status == MEMBER_ACTIVE:
+                    m.status = MEMBER_WITHDRAWN
                 del self.bonds[key]
             self._template_rules(tx, txid, spent, h, snapshot)
             acts = act_outputs(tx)
@@ -1748,10 +1749,11 @@ class VaultModel(object):
             k = equivocation_key(a)
             s = self.sets.get(bytes.fromhex(a['setId']))
             m = None if s is None else s.members.get(k)
-            if m is None or m.bond_frozen or m.bond_outpoint not in self.bonds:
+            b = None if m is None else self.bonds.get(m.bond_outpoint)
+            if b is None or b[2]:
                 raise VaultError('bad-vault-act-equivocation', 'not a member with a live bond')
             m.status = MEMBER_EJECTED
-            m.bond_frozen = True
+            m.bond_frozen = b[2] = True
             return
         sid = bytes.fromhex(a['setId'])
         s = self.sets.get(sid)
@@ -1792,7 +1794,7 @@ class VaultModel(object):
             m = Member(mk, (txid, bv), bo.nValue, a['bondLocktime'], h, s.p['maturity'])
             s.members.pop(mk, None)
             s.members[mk] = m
-            self.bonds[(txid, bv)] = (sid, mk)
+            self.bonds[(txid, bv)] = [sid, mk, False]
         elif t == ACT_SET_HEARTBEAT:
             mk = bytes.fromhex(a['memberKey'])
             if keys != [mk] or not s.is_current(mk, h):
@@ -1807,7 +1809,7 @@ class VaultModel(object):
                 raise VaultError('bad-vault-act-sig', 'removal signers')
             m.status = MEMBER_REMOVED
             if a['burn']:
-                m.bond_frozen = True
+                m.bond_frozen = self.bonds[m.bond_outpoint][2] = True
         elif t == ACT_SET_WINDDOWN:
             if s.wind_down_height:
                 raise VaultError('bad-vault-act-winddown', 'already wound down')

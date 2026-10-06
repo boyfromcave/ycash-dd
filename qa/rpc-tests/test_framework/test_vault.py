@@ -68,7 +68,9 @@ class SignatureTests(unittest.TestCase):
         self.assertEqual(v.recover_compact(high, msg, strict=False), MKEYS[0])
         uncompressed = bytes([sig[0] - 4]) + sig[1:]                       # header 27..30
         self.assertIsNone(v.recover_compact(uncompressed, msg))
-        self.assertEqual(v.recover_compact(uncompressed, msg, strict=False), MKEYS[0])
+        loose = v.recover_compact(uncompressed, msg, strict=False)       # CPubKey::RecoverCompact: uncompressed
+        self.assertEqual((len(loose), loose[0]), (65, 4))
+        self.assertEqual(bytes([2 + (loose[64] & 1)]) + loose[1:33], MKEYS[0])
         self.assertIsNone(v.recover_compact(bytes([35]) + sig[1:], msg))
         self.assertIsNone(v.recover_compact(sig[:64], msg))
         self.assertIsNone(v.recover_compact(sig[:1] + bytes(32) + sig[33:], msg))   # r = 0
@@ -542,6 +544,11 @@ class ModelTests(unittest.TestCase):
                                                         m3.bond_locktime, c.dest)), 'bad-vault-bond-frozen')
         c.block(v.build_bond_spend_tx(m1.bond_outpoint, MEMBERS[1], m1.bond_value, m1.bond_locktime, c.dest))
         self.assertEqual(c.m.get_set(sid).members[MKEYS[1]].status, v.MEMBER_WITHDRAWN)
+        # a burned member rejoins with a fresh bond: the old bond stays frozen
+        c.block(c.join_tx(sid, 3))            # one current member left (< slashThreshold): admitKey admits
+        self.assertEqual(c.m.get_set(sid).members[MKEYS[3]].status, v.MEMBER_ACTIVE)
+        self.assertEqual(c.reject(v.build_bond_spend_tx(m3.bond_outpoint, MEMBERS[3], m3.bond_value,
+                                                        m3.bond_locktime, c.dest)), 'bad-vault-bond-frozen')
 
     def test_join_admission_and_seats(self):
         c = Chain()

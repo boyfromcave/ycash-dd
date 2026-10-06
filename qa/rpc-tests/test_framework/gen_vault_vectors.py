@@ -215,7 +215,7 @@ def build():
          []),
         ('set-create-open-max', v.act_set_create(15, 15, 15, 15, P['admit'], flags=v.SET_FLAG_OPEN,
                                                  rate_limit_bps=10000, rate_window=1048576, liveness_window=1,
-                                                 bond_min=0x7FFFFFFFFFFFFFFF, bond_lock_min=0xFFFFFFFF,
+                                                 bond_min=21000000 * v.COIN, bond_lock_min=0xFFFFFFFF,
                                                  maturity=0xFFFFFFFF), []),
         ('set-join-admit', v.act_set_join(set_a, P['member-0'], 2000, 0), ['member-0', 'admit']),
         ('set-join-members', v.act_set_join(set_a, P['member-3'], 499999999, 2),
@@ -225,6 +225,8 @@ def build():
         ('set-remove-burn', v.act_set_remove(set_a, P['member-4'], 1), ['member-0', 'member-1']),
         ('set-equivocation', eqv, []),
         ('set-winddown', v.act_set_winddown(set_a), ['member-0', 'member-1', 'member-2']),
+        ('set-create-bondmin-above-max-money', v.act_set_create(1, 1, 1, 1, P['admit'], bond_min=21000000 * v.COIN + 1),
+         []),   # D-1: 15.5 says only bondMin >= 1
         ('set-create-admit-key-off-curve-accepted', v.act_set_create(1, 1, 1, 1, off_curve), []),   # A-2
         ('set-join-member-key-off-curve-accepted', v.act_set_join(set_a, off_curve, 2000, 0), []),   # A-2
     ]
