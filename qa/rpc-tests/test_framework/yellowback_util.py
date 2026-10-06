@@ -98,8 +98,10 @@ from .util import (
     start_node,
     start_nodes,
     stop_node,
+    stop_nodes,
     sync_blocks,
     sync_mempools,
+    wait_bitcoinds,
 )
 from . import yellowback_model as ym
 from .yellowback_model import assert_model_matches  # noqa: F401  (re-exported, section 7)
@@ -283,6 +285,36 @@ def yellowback_node_args(extra=None, yellowback=True, sigma_ref=0, start_height=
     if extra:
         args += list(extra)
     return args
+
+
+ATTESTOR_SET_SPEC = {'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
+                     'open': True, 'maturity': 1}
+
+
+def start_nodes_with_attestor_set(num, tmpdir, args_fn, edges):
+    """U-22 for a script on the plain BitcoinTestFramework: start ``num`` fresh nodes with
+    ``args_fn(i)``, connect ``edges``, mine node 0 to VAULT_ACTIVATION, create the YED attestor set
+    there (``set_create``: open, one cancel signature), mine it, then restart every node with
+    ``args_fn(i)`` again -- which now carries ``-yellowbackattestorset``.  Returns the nodes (tip
+    VAULT_ACTIVATION + 1, node 0 holding the coinbases)."""
+    ATTESTOR_SET[0] = None
+    nodes = start_nodes(num, tmpdir, extra_args=[args_fn(i) for i in range(num)])
+    for a, b in edges:
+        connect_nodes_bi(nodes, a, b)
+    nodes[0].generate(VAULT_ACTIVATION - nodes[0].getblockcount())
+    sync_blocks(nodes)
+    created = nodes[0].set_create(dict(ATTESTOR_SET_SPEC))
+    sync_mempools(nodes)
+    nodes[0].generate(1)
+    sync_blocks(nodes)
+    ATTESTOR_SET[0] = created['setid']
+    stop_nodes(nodes)
+    wait_bitcoinds()
+    nodes = start_nodes(num, tmpdir, extra_args=[args_fn(i) for i in range(num)])
+    for a, b in edges:
+        connect_nodes_bi(nodes, a, b)
+    sync_blocks(nodes)
+    return nodes
 
 
 def pool_args(payout_addr, extra=None, **kw):
@@ -656,8 +688,7 @@ class YellowbackTestFramework(BitcoinTestFramework):
         user = self.nodes[USER]
         while user.getblockcount() < VAULT_ACTIVATION:
             self.mine(POOLS[0] if POOLS[0] < len(self.nodes) else USER, blocks_only=True)
-        created = user.set_create({'seats': 15, 'unlockthreshold': 1, 'cancelthreshold': 1, 'slashthreshold': 1,
-                                   'open': True, 'maturity': 1})
+        created = user.set_create(dict(ATTESTOR_SET_SPEC))
         self.sync_all()
         self.mine(USER, blocks_only=True)
         ATTESTOR_SET[0] = self.attestor_set = created['setid']
