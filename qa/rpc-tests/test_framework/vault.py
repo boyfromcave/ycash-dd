@@ -752,6 +752,58 @@ def intent_for(vp, recipient_spk):
                         vp.cancel_set_id, vp.set_id, vp.owner_key)
 
 
+# The opcode skeletons of V and I, ``None`` at a field (any push: an opcode <= OP_16 other than
+# OP_RESERVED), as the C++ ``VaultSkeleton`` / ``IntentSkeleton`` (src/vault/template.cpp).
+_F = None
+_V_SKELETON = [
+    _F, _F, _F, OP_2DROP, OP_DROP,
+    OP_DUP, OP_1, OP_EQUAL, OP_IF,
+    OP_DROP, _F, OP_1, OP_CHECKSETSIG,
+    OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,
+    OP_DROP, _F, OP_CHECKLOCKTIMEVERIFY, OP_DROP, _F, OP_CHECKSIG,
+    OP_ELSE, OP_DUP, OP_3, OP_EQUAL, OP_IF,
+    OP_DROP, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, OP_CHECKSIG,
+    OP_ELSE, OP_4, OP_EQUALVERIFY, _F, OP_CHECKLOCKTIMEVERIFY,
+    OP_ENDIF, OP_ENDIF, OP_ENDIF]
+_I_SKELETON = [
+    _F, _F, _F, OP_2DROP, OP_DROP,
+    OP_DUP, OP_1, OP_EQUAL, OP_IF,
+    OP_DROP, _F, OP_CHECKSEQUENCEVERIFY,
+    OP_ELSE, OP_DUP, OP_2, OP_EQUAL, OP_IF,
+    OP_DROP, _F, OP_2, OP_CHECKSETSIG,
+    OP_ELSE, OP_3, OP_EQUALVERIFY, _F, OP_CHECKSETDORMANT, OP_VERIFY, _F, OP_CHECKSIG,
+    OP_ENDIF, OP_ENDIF]
+_OP_RESERVED = 0x50
+
+
+def _matches_skeleton(spk, skel):
+    ops = get_ops(spk)
+    if ops is None or len(ops) != len(skel):
+        return False
+    for (op, _data), want in zip(ops, skel):
+        if want is None:
+            if op > OP_16 or op == _OP_RESERVED:
+                return False
+        elif op != want:
+            return False
+    return True
+
+
+def template_shape(spk):
+    """``'V'`` / ``'I'`` for an exact template, ``'malformed'`` for an output with a template's
+    opcode skeleton whose fields do not parse (wrong sizes, out-of-range numbers, non-minimal
+    pushes, or the V's two setId / ownerKey copies differing), ``None`` otherwise.  A malformed
+    shape makes the transaction invalid (``bad-txns-vault-malformed``, plan §15.5 reconciliation
+    (8), C++ ``MatchVault`` / ``MatchIntent``), so I-0 and V-1 cannot be bypassed by
+    mis-encoding."""
+    spk = bytes(spk)
+    if _matches_skeleton(spk, _V_SKELETON):
+        return 'V' if parse_vault(spk) is not None else 'malformed'
+    if _matches_skeleton(spk, _I_SKELETON):
+        return 'I' if parse_intent(spk) is not None else 'malformed'
+    return None
+
+
 def bond_script(member_key33, locktime):
     """B: ``<locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP <memberKey:33> OP_CHECKSIG`` (redeem)."""
     member_key33 = bytes(member_key33)
@@ -1093,6 +1145,10 @@ def make_tx(vin, vout, lock_time=0, expiry=0):
     tx.nLockTime = lock_time
     tx.nExpiryHeight = expiry
     return tx
+
+
+def is_coinbase(tx):
+    return len(tx.vin) == 1 and tx.vin[0].prevout.hash == 0 and tx.vin[0].prevout.n == 0xFFFFFFFF
 
 
 def tx_hex(tx):
@@ -1558,6 +1614,18 @@ class VaultModel(object):
             key = ('%064x' % txin.prevout.hash, txin.prevout.n)
             spent.append((i, key, self.coins.get(key)))
         if active:
+            # outputs first, as the C++ classifies them: a second act, a malformed V / I shape
+            # (reconciliation (8)), an act in a coinbase (9)
+            n_acts = 0
+            for o in tx.vout:
+                if is_act_script(o.scriptPubKey):
+                    n_acts += 1
+                    if n_acts > 1:
+                        raise VaultError('bad-vault-act-count')
+                elif template_shape(o.scriptPubKey) == 'malformed':
+                    raise VaultError('bad-txns-vault-malformed')
+            if n_acts and is_coinbase(tx):
+                raise VaultError('bad-vault-act-coinbase')
             # BIP68 on every input (U-11)
             for i, key, coin in spent:
                 seq = tx.vin[i].nSequence
