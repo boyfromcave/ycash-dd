@@ -59,8 +59,8 @@ env:
   # yellowback_reorg_stress was deleted the same day (still the v1 federation script, ycash6 plan P-7).
   # vault_upgrade (UPGRADE_VAULT activation, upgrade plan §15.9) joined on 2026-10-05; the audit
   # loop below covers qa/rpc-tests/vault_*.py as well. vault_rpc (the set_*/vault_* RPCs) joined the
-  # same day.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_primitive vault_slashing vault_bridge
+  # same day; vault_rpc_contract (live answers against doc/vault-rpc-contract.json) on 2026-10-06.
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
@@ -378,6 +378,9 @@ jobs:
           section() { awk -v h="$1" '$0 ~ h {f=1; next} f && /^#/ {exit} f' "$2" | awk 'NF{p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
           diff <(section '^### 8\.1 ' doc/yellowback-spec.md) <(section '^## Trust statement' doc/yellowback.md)
           python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
+          # The vault RPC contract (finding (47)) is generated from doc/vault-rpc.md and agrees with the
+          # RPC table in src/rpc/vault.cpp and the conversions in src/rpc/client.cpp.
+          python3 qa/vault-rpc-contract.py --check
 
       - name: v2 gates (blocking from Phase 3)
         # Every yed_* the node registers is in the RPC contract (P7); the Phase 3 acceptance
