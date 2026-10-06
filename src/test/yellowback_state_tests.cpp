@@ -44,7 +44,7 @@ using namespace yellowback;
 namespace {
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "4abefe81e3822134b15fada7418d9abe9ab3d3dc3332da96b383ef8a6f97e907";
+const std::string GOLDEN_HASH = "b0103e921a9bf4da5bd3f8ba7f740cd2e9fa2c09b4c72e91a820dbf2115f20bc";
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -695,7 +695,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
             static const std::map<int, std::string> expected = {
-                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 251, "mint9-no-bundle" } };
+                { 137, "bad-mint-amount" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" }, { 251, "mint9-no-bundle" } };
             invalidBlocks++;
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
             BOOST_REQUIRE(expected.count(height));
@@ -709,7 +709,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         BOOST_CHECK(SerializeRecord(undo) == SerializeRecord(ev.undo));
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 3);
+    BOOST_CHECK_EQUAL(invalidBlocks, 4);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
