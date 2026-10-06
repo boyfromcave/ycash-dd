@@ -48,6 +48,7 @@ WEIGHTS = {
     "yellowback_sapling": 300,
     "yellowback_wallet_lifecycle": 300,
     "vault_rpc": 250,
+    "vault_rpc_contract": 120,
     "yellowback_stock_node": 200,
     "yellowback_stratum": 200,
     "yellowback_chainviz": 200,
