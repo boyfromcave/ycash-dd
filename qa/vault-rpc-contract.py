@@ -12,8 +12,9 @@ set_* / vault_* RPCs, from doc/vault-rpc.md (its "Contract notation", "Shapes", 
     qa/vault-rpc-contract.py --check    fail if the committed JSON is stale, if a command
                                         registered in src/rpc/vault.cpp is not documented (or
                                         the reverse), if a command heading disagrees with its
-                                        Params: line, or if src/rpc/client.cpp's conversion
-                                        table disagrees with the parameter types
+                                        Params: line, or if ycash-cli's conversion table
+                                        (src/rpc/client.cpp; on 6.20.0 src/rpc/common.h)
+                                        disagrees with the parameter types
 
 Standard library only (CI runs it with the system python3).
 """
@@ -29,6 +30,9 @@ DOC = os.path.join(ROOT, 'doc', 'vault-rpc.md')
 OUT = os.path.join(ROOT, 'doc', 'vault-rpc-contract.json')
 RPC_SRC = os.path.join(ROOT, 'src', 'rpc', 'vault.cpp')
 CLIENT_SRC = os.path.join(ROOT, 'src', 'rpc', 'client.cpp')
+# 6.20.0 keeps ycash-cli's conversion table in src/rpc/common.h, one row per command:
+# { "name", {{required...}, {optional...}} } with s (passed as a string) or o (parsed as JSON).
+COMMON_SRC = os.path.join(ROOT, 'src', 'rpc', 'common.h')
 
 # Types whose JSON form is a string: a parameter of one of these is passed as is by ycash-cli.
 STRING_TYPES = {'str', 'hex', 'hash', 'key', 'outpoint', 'address'}
@@ -358,6 +362,11 @@ def check_sources(contract):
         problems.append('%s is documented but not registered in src/rpc/vault.cpp' % m)
     with open(CLIENT_SRC, encoding='utf-8') as f:
         conv = set((m, int(n)) for m, n in re.findall(r'\{\s*"((?:set|vault)_[a-z]+)",\s*(\d+)\s*\}', f.read()))
+    if os.path.exists(COMMON_SRC):
+        with open(COMMON_SRC, encoding='utf-8') as f:
+            for m, req, opt in re.findall(r'\{\s*"((?:set|vault)_[a-z]+)",\s*\{\{([^}]*)\},\s*\{([^}]*)\}\}\s*\}', f.read()):
+                kinds = [k.strip() for k in (req.split(',') + opt.split(',')) if k.strip()]
+                conv.update((m, i) for i, k in enumerate(kinds) if k == 'o')
     shapes = contract['shapes']
     for name, m in contract['methods'].items():
         for idx, p in enumerate(m['params']):
