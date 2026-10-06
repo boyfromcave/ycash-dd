@@ -191,7 +191,6 @@ class TemplateTests(unittest.TestCase):
 
 class ActTests(unittest.TestCase):
     def _all(self):
-        po = bytes(32) + struct.pack('<I', 1)
         return [
             v.act_set_create(5, 3, 1, 4, v.pubkey_of(ADMIT), flags=1, rate_limit_bps=2500, rate_window=144,
                              liveness_window=1008, bond_min=-1 + 2 * v.COIN, bond_lock_min=2016, maturity=6),
@@ -203,7 +202,6 @@ class ActTests(unittest.TestCase):
         ]
 
     def test_round_trip(self):
-        _ = struct
         for a in self._all():
             p = v.encode_act(a)
             self.assertEqual(p[:3], b'YV\x01')

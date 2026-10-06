@@ -157,7 +157,11 @@ def sha256d(b):
 
 
 def hash160(b):
-    return hashlib.new('ripemd160', sha256(b)).digest()
+    try:
+        return hashlib.new('ripemd160', sha256(b)).digest()
+    except ValueError:                   # OpenSSL 3 without the legacy provider (CI)
+        from .yellowback_model import ripemd160
+        return ripemd160(sha256(b))
 
 
 def txid_internal(txid_hex):

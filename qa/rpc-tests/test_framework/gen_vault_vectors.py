@@ -52,7 +52,6 @@ hashes are the **internal** byte order = uint256::begin()..end() unless the key 
 
 import json
 import os
-import struct
 import sys
 
 if __name__ == '__main__':
