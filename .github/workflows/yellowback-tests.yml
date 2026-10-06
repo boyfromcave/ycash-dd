@@ -1,124 +1,133 @@
 name: yellowback tests
 
 # Fork-local CI for Ycash Yellowback (YED). Upstream Ycash runs no tests in CI (book.yml only).
-# The same zcutil/build.sh a developer runs locally, so a green CI and a green laptop mean the
-# same thing. Layout per the workspace plan (docs/plans/yellowback-v2-development-plan.md, §6.0
-# item 6): `main`, `audit` and `python` block merges; `nightly`, `weekly-fuzz` and the three
-# variant builds `lockorder`, `sanitizers` and `coverage` (Phase 3, P6) open an issue.
 #
-# Functional scripts are listed by name: rpc-tests.py does not glob. YELLOWBACK_SCRIPTS is the
-# current phase's list (Phase 3: yellowback_index yellowback_activation yellowback_rpc_contract;
-# yellowback_mining and yellowback_enforcement join as Phases 4-5 land; the wallet-flow scripts
-# return at Phase 6, N26). SANITIZER_SCRIPTS is the subset the sanitizers job runs (§6.0 item 6:
-# yellowback_index yellowback_enforcement yellowback_mining once the latter two exist).
-# STOCK_BASELINE is the inherited Ycash suite that must keep passing against
-# the fork binary without -yellowback (P5); the names recorded as passing in Phase 0 are in
-# doc/yellowback.md "Build and test baseline".
-
-# feature/yellowback-sf (v2) was dropped from both trigger lists on 2026-09-20 and, since 2026-10-01,
-# is no comparison base for anything (owner): Yellowback is v3, price attestation. The frozen-file
-# check measures against the tag yellowback-v3-baseline (= feature/yellowback-price-attest at the
-# 2026-10-02 audit merge, re-tagged from 9da72131e to carry the reviewed A-1 hook move and A-7 template
-# tag change); every line budget against ycash-legacy (= upstream v4.5.0).
+# TIERS (the CI/CD design of 2026-10-06; the same file on harden/yellowback and upgrade/vault, which
+# differ only in the test lists and client pins of `env` below):
+#
+#   push / pull_request   build ──┬── unit
+#   (and dispatch tier    sidecars┴── functional (4 shards, one build artifact, never rebuilt per shard)
+#    push or all)         audit, python, agent (independent)
+#   nightly 03:00 UTC     nightly (make check, stock baseline, stock parity against a ycash-legacy
+#   (dispatch nightly)      build, attest agent, devnet role presets, lightwalletd devnet, fuzz smoke),
+#                         lockorder, sanitizers, coverage                     -- never block; open an issue
+#   weekly Sunday 04:00   weekly-fuzz (30 min per fuzz target, corpus PR)    -- never blocks
+#   (dispatch weekly)
+#   schedule              schedule-fanout: GitHub runs `schedule` on the default branch only, so the
+#                         scheduled run there dispatches the same tier on every other SCHEDULE_REFS
+#                         branch (workflow_dispatch with the branch's own copy of this file).
+#
+# EXPECTED WALL CLOCK of the push tier (GitHub-hosted ubuntu-22.04, 4 vCPU; measured 2026-10-04 on the
+# old single job: depends cold 13 min, build 16.6 min without ccache, unit 4.6 min, functional 36.4 min
+# at -j4 + stock 1.3 min = 62 min):
+#   warm (depends, ccache, cargo target, zk params and sidecar binaries cached):
+#        build ~6-9 min -> functional shards ~10-13 min (incl. ~2 min setup) => ~20-24 min end to end
+#   cold (nothing cached): depends ~13 + build ~17 + sidecars in parallel + shards ~13 => ~45-50 min
+#
+# The functional lists are named here, never globbed (rpc-tests.py does not glob, and silently drops a
+# name it does not list). qa/yellowback-audit.sh reads them from this file and fails when a
+# qa/rpc-tests/{yellowback,vault}_*.py script is not executable, not registered in
+# qa/pull-tester/rpc-tests.py, or in no list. qa/yellowback-ci-shard.py splits YELLOWBACK_SCRIPTS +
+# STOCK_BASELINE across the functional matrix (longest first, by measured weight); a new script lands
+# in some shard automatically.
 on:
   push:
-    branches:
+    # The node lines' branches; feature/yellowback-price-attest is the branch of record they return to.
+    branches: &node-line-branches
+      - harden/yellowback
+      - upgrade/vault
       - feature/yellowback-price-attest
   pull_request:
-    branches:
-      - feature/yellowback-price-attest
+    branches: *node-line-branches
   schedule:
     - cron: '0 3 * * *'
     - cron: '0 4 * * 0'
   workflow_dispatch:
     inputs:
-      weekly_fuzz:
-        description: Run only the weekly fuzz job (six targets, about 3.5 hours)
-        type: boolean
-        default: false
+      tier:
+        description: 'Which tier to run: all (push + nightly), push, nightly or weekly (fuzz, ~4.5 hours)'
+        type: choice
+        options: [all, push, nightly, weekly]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push or PR update cancels the older run of the same ref; scheduled and dispatched runs are
+  # never cancelled (their group is the run itself).
+  group: yellowback-tests-${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
-  # Plan section 6.0 item 6's list for Phase 6 and after, plus yellowback_hardening (Phase 8,
-  # written after that list). Each phase registered its script in qa/pull-tester/rpc-tests.py but
-  # this variable was not updated with it, so mining, enforcement, stock_node and hardening — the
-  # soft fork's own safety evidence among them — were never run by CI. Added 2026-09-11.
-  # yellowback_quote joined on 2026-09-22: the quote agent reads TOML with the stdlib tomllib
-  # (Python >= 3.11) and the main and nightly jobs ran ubuntu-22.04's 3.10, which is also why the
-  # nightly devnet role presets died at "quote agents did not publish" (the agents crashed on
-  # import). Both jobs now take 3.11 from actions/setup-python and pyzmq/simplejson from pip.
-  #
-  # The three yellowback_attest* scripts joined the list on 2026-09-20. They are the whole of the
-  # v3 A1-A3 test evidence and each phase registered its script in qa/pull-tester/rpc-tests.py,
-  # but this variable was not updated with them and the files were not executable (the runner
-  # exec's them directly, so an un-chmodded script dies with PermissionError before the framework
-  # starts) -- the identical omission recorded above for mining/enforcement/stock_node/hardening
-  # on 2026-09-11, repeated for v3. The audit job now greps for both halves so it cannot recur.
-  # yellowback_wallet_lifecycle and yellowback_framework_smoke joined on 2026-10-01 (audit I-1): both
-  # were registered in rpc-tests.py and allow-listed by the audit job but run by no job at all.
-  # yellowback_stockparity runs in nightly (the stock-parity check needs its own step);
-  # yellowback_reorg_stress was deleted the same day (still the v1 federation script, ycash6 plan P-7).
+  # The branches a scheduled run fans out to (schedule-fanout). Same set as the push list above.
+  SCHEDULE_REFS: harden/yellowback upgrade/vault
+  # History of this list: plan section 6.0 item 6 plus yellowback_hardening (2026-09-11: mining,
+  # enforcement, stock_node and hardening had been registered but never run); the three
+  # yellowback_attest* scripts (2026-09-20, same omission); yellowback_quote (2026-09-22, needs 3.11's
+  # tomllib); yellowback_wallet_lifecycle and yellowback_framework_smoke (2026-10-01, audit I-1).
+  # This is the harden/yellowback list; upgrade/vault's adds the vault_* suites and yellowback_upgrade
+  # and drops yellowback_activation, yellowback_enforcement and yellowback_attest_enforcement.
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke
+  # The functional scripts the nightly job runs by name, each in its own step (they need the Rust
+  # attest agent, the devnet, or a ycash-legacy build). The audit counts them as run by CI.
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity
+  # The subset the sanitizers job runs under ASan/UBSan.
   SANITIZER_SCRIPTS: yellowback_index
-  # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
-  # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
+  # The inherited Ycash suite that must keep passing against the fork binary (P5); the names recorded
+  # as passing in Phase 0 are in doc/yellowback.md "Build and test baseline". getblocktemplate_proposals,
+  # getblocktemplate_longpoll and invalidateblock abort ycashd at the pin (a stock regtest node
+  # activates no Ycash upgrade) and p2p-acceptblock expects Bitcoin's unrequested-block behaviour.
+  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend
+  # yellowback_stratum drives the real pool software, boyfromcave/yolo (Rust), and yellowback_chainviz
+  # the chain observer, boyfromcave/chain-viz (Rust), each built --locked at a commit by the sidecars
+  # job (bump by PR, audit I-5). Without a binary the script SKIPs, so the functional job refuses to
+  # start without both. yolo's harden/yellowback is its main; chain-viz's harden/yellowback (H5) speaks
+  # rpcversion 4.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: aba726b4f7d14e9b6949180011d860263deee1c4
-  # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
-  # this commit (its main on 2026-10-01; bump by PR, audit I-5) and built --locked the same way,
-  # exported as CHAINVIZ_BIN. Without the binary the script SKIPs.
+  YOLO_COMMIT: dc9c57a671e37821c21932b4859f9d28800d27e9
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: c388ed218a06ea59701ecbda9130d9789cb0a969
-  # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
-  # and the Go toolchain it builds with, verified against go.dev's published sha256.
+  CHAINVIZ_COMMIT: 4b010df9785a8bc181bd45e10087704cc2b121fd
+  # The lightwalletd fork the nightly drives (its harden/yellowback branch: rpcversion 4, H5),
+  # at a commit (audit E-6), and the Go toolchain it builds with, checked against go.dev's sha256.
   LWD_REPO: boyfromcave/lightwalletd
-  LWD_COMMIT: f84ed92eab522a466bc0b85df7f1abdf493c872c
+  LWD_COMMIT: 916d83679b10c275c1d08c592c35d3950309afbc
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
-  # The cargo-audit release the agent job installs (audit I-7); bump by PR.
+  # The workspace repository at a commit: the audit runs its contract generator (scripts/extract_spec.py,
+  # the upgrade line's mode) against this tree's committed contract. Bump by PR with the generator.
+  WORKSPACE_REPO: boyfromcave/yellowback
+  WORKSPACE_COMMIT: 7ad7862e275a612b94a82263765803be14114461
+  # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
+  OTHER_LINE_REPO: boyfromcave/ycash6
+  # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.
   CARGO_AUDIT_VERSION: 0.22.2
   CARGO_DENY_VERSION: 0.20.2   # 0.18.3 cannot parse the CVSS 4.0 advisories in the RustSec DB (2026-10-02)
-  # The plan's list is eleven scripts; four fail at the pin itself (recorded in doc/yellowback.md,
-  # Phase 0 baseline): getblocktemplate_proposals, getblocktemplate_longpoll and invalidateblock
-  # abort ycashd in CChainParams::GetFoundersRewardAddressAtHeight (chainparams.cpp, zero lines
-  # changed) because a stock regtest node activates no Ycash upgrade, and p2p-acceptblock expects
-  # Bitcoin's unrequested-block behaviour. They rejoin the list when the Phase 3 wrapper passes
-  # the six -nuparams to every node.
-  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend
+  # ccache (depends builds it; config.site points configure at it, so every compile already goes
+  # through it -- only its directory was never kept between runs).
+  CCACHE_MAXSIZE: 800M
+  CCACHE_COMPRESS: '1'
+  CCACHE_NOHASHDIR: '1'
 
 jobs:
-  main:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+  # ── push tier ────────────────────────────────────────────────────────────────────────────────────
+
+  build:
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 90
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
-            autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
             automake libtinfo5
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote and the devnet role presets start the quote
-        # agent, which reads TOML with the stdlib tomllib. Not newer: the inherited framework still
-        # imports asyncore, which 3.12 removed. pyzmq comes from pip because apt's python3-zmq is
-        # bound to the runner's interpreter.
-        with:
-          python-version: '3.11'
-      - name: Install Python test prerequisites
-        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports
-        # simplejson and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a
-        # one-line shim stands in for it). No framework file is changed.
-        run: |
-          python3 -m pip install --user simplejson pyzmq
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          python3 -c 'import asyncore, zmq, simplejson, pyblake2'
-
       - name: Cache depends
         id: cache-depends
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -127,490 +136,517 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-
+          # Every input of the depends build (patches, funcs.mk and config.site.in included); never a
+          # restore-key: a stale prefix would be a different toolchain.
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - name: Build depends
         if: steps.cache-depends.outputs.cache-hit != 'true'
-        run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
-
-      - name: Cache zk parameters
-        id: cache-params
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
+      - name: zk parameters in the cache (the unit and functional jobs restore them)
+        id: params
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.zcash-params
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
-
+          lookup-only: true
       - name: Fetch zk parameters
-        if: steps.cache-params.outputs.cache-hit != 'true'
+        if: steps.params.outputs.cache-hit != 'true'
         run: ./zcutil/fetch-params.sh
+      - name: Save zk parameters
+        if: steps.params.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - name: Cache ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ccache
+          # One entry per commit; a run restores its branch's newest, then any branch's visible to it
+          # (the default branch, or a PR's base). ccache checks every hit itself (compiler, flags,
+          # preprocessed source), so a restore can only cost time, never correctness.
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
+      - name: Cache the librustzcash build (target/)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target
+          # The vendored crates and the depends toolchain decide the dependency builds; src/rust the
+          # crate itself (cargo rebuilds what changed, so the prefix restore is safe).
+          key: rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-${{ hashFiles('src/rust/**', 'Cargo.toml') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-
+      - name: Configure (zcutil/build.sh's own steps, minus the full make)
+        run: |
+          host=$(./depends/config.guess)
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/$host/share/config.site" ./configure
+          grep -n 'ccache' config.log | head -5 || true   # informational: configure found depends' ccache
+      - name: Build ycashd, ycash-cli, test_bitcoin
+        # The three binaries every later job uses; the nightly job builds everything (make check).
+        run: |
+          ccache=$(ls depends/x86_64-pc-linux-gnu/native/bin/ccache)
+          "$ccache" -z
+          make -C src -j"$(nproc)" ycashd ycash-cli test/test_bitcoin
+          "$ccache" -s
+      - name: Package the build (one artifact for every test job)
+        # A tar, so the executable bits survive (upload-artifact zips without modes). tests_config.ini
+        # is configure's output that rpc-tests.py reads; its paths are this workspace's, which every
+        # GitHub-hosted job shares.
+        run: |
+          for b in src/ycashd src/ycash-cli src/test/test_bitcoin; do
+            head -c4 "$b" | od -An -c | grep -q 'E   L   F' || { echo "$b is not an ELF executable (a libtool wrapper?)"; exit 1; }
+          done
+          tar -cf node-bin.tar src/ycashd src/ycash-cli src/test/test_bitcoin qa/pull-tester/tests_config.ini
+          ls -l node-bin.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-bin
+          path: node-bin.tar
+          retention-days: 3
+          if-no-files-found: error
 
-      - name: Build ycashd
-        run: ./zcutil/build.sh -j$(nproc)
-
-      - name: Unit tests (the whole test_bitcoin, P5)
-        # Not only yellowback_*: the Phase 3 hooks sit in files that miner_tests, main_tests,
-        # mempool_tests and rpc_tests cover.
-        run: src/test/test_bitcoin --log_level=test_suite
-
-      - name: Check out yolo (the stratum pool yellowback_stratum drives)
-        if: ${{ !cancelled() }}
+  sidecars:
+    # yolo and chain-viz, built once per pinned commit and kept in the cache as binaries.
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Cached yolo binary
+        id: yolo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/sidecars/yolo
+          key: sidecar-yolo-${{ runner.os }}-${{ env.YOLO_COMMIT }}-regtest
+      - name: Cached chain-viz binary
+        id: chainviz
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/sidecars/chain-viz
+          key: sidecar-chainviz-${{ runner.os }}-${{ env.CHAINVIZ_COMMIT }}
+      - name: Check out yolo
+        if: steps.yolo.outputs.cache-hit != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ env.YOLO_REPO }}
           ref: ${{ env.YOLO_COMMIT }}
-          path: .yolo-ci
-      - name: Install a Rust toolchain for yolo
-        # SHA-pinned toolchain action instead of `curl https://sh.rustup.rs | sh` (audit I-4); yolo
-        # builds on stable and carries a Cargo.lock.
-        if: ${{ !cancelled() }}
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
-        with:
-          toolchain: stable
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: ${{ !cancelled() }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: yolo-cargo-${{ runner.os }}-${{ env.YOLO_COMMIT }}
-      - name: Build yolo and export YOLO_BIN
-        if: ${{ !cancelled() }}
-        # Built from a copy OUTSIDE this repository's tree. Both rustup and cargo resolve their
-        # configuration by walking up from the working directory, so a checkout under the
-        # workspace inherits two things meant for librustzcash: rust-toolchain (1.51, which
-        # cannot read yolo's v4 Cargo.lock -- run 36444762343) and the .cargo/config that the
-        # depends build writes to replace crates-io with the vendored sources (where yolo's
-        # crates do not exist). yolo's own rust-toolchain.toml (stable) covers the first;
-        # building under $RUNNER_TEMP covers both. RUSTUP_TOOLCHAIN pins stable regardless.
-        env:
-          RUSTUP_TOOLCHAIN: stable
-        run: |
-          rm -rf "$RUNNER_TEMP/yolo-ci"; cp -R .yolo-ci "$RUNNER_TEMP/yolo-ci"
-          cd "$RUNNER_TEMP/yolo-ci"
-          rustup show active-toolchain
-          # --features regtest: yellowback_stratum.py's negative cell passes --text --no-flags,
-          # which yolo accepts only in a regtest-feature build (yolo audit H-6).
-          cargo build --release --locked --features regtest
-          ./target/release/yolo --version
-          echo "YOLO_BIN=$RUNNER_TEMP/yolo-ci/target/release/yolo" >> "$GITHUB_ENV"
-      - name: Check out chain-viz (the chain observer yellowback_chainviz drives)
-        if: ${{ !cancelled() }}
+          path: yolo-src
+          persist-credentials: false
+      - name: Check out chain-viz
+        if: steps.chainviz.outputs.cache-hit != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ env.CHAINVIZ_REPO }}
           ref: ${{ env.CHAINVIZ_COMMIT }}
-          path: .chain-viz-ci
-      - name: Build chain-viz and export CHAINVIZ_BIN
-        if: ${{ !cancelled() }}
-        # Same recipe as yolo: built from a copy outside this tree (rust-toolchain and the
-        # depends' .cargo/config would otherwise apply), on the stable toolchain the yolo step
-        # installed, with the same registry cache, --locked at the pinned commit (audit I-5).
+          path: chain-viz-src
+          persist-credentials: false
+      - name: Install a Rust toolchain
+        # SHA-pinned toolchain action instead of `curl https://sh.rustup.rs | sh` (audit I-4); both
+        # build on stable and carry a Cargo.lock. This job checks out no node tree, so neither the node's
+        # rust-toolchain (1.51) nor depends' .cargo/config can apply (the trap of run 36444762343).
+        if: steps.yolo.outputs.cache-hit != 'true' || steps.chainviz.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
+        with:
+          toolchain: stable
+      - name: Cargo registry for the sidecars
+        if: steps.yolo.outputs.cache-hit != 'true' || steps.chainviz.outputs.cache-hit != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: sidecar-cargo-${{ runner.os }}-${{ env.YOLO_COMMIT }}-${{ env.CHAINVIZ_COMMIT }}
+          restore-keys: |
+            sidecar-cargo-${{ runner.os }}-
+      - name: Build yolo
+        if: steps.yolo.outputs.cache-hit != 'true'
         env:
           RUSTUP_TOOLCHAIN: stable
+        working-directory: yolo-src
         run: |
-          rm -rf "$RUNNER_TEMP/chain-viz-ci"; cp -R .chain-viz-ci "$RUNNER_TEMP/chain-viz-ci"
-          cd "$RUNNER_TEMP/chain-viz-ci"
-          rustup show active-toolchain
+          # --features regtest: yellowback_stratum.py's negative cell passes --text --no-flags, which
+          # yolo accepts only in a regtest-feature build (yolo audit H-6).
+          cargo build --release --locked --features regtest
+          mkdir -p ~/sidecars && cp target/release/yolo ~/sidecars/yolo
+      - name: Build chain-viz
+        if: steps.chainviz.outputs.cache-hit != 'true'
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        working-directory: chain-viz-src
+        run: |
           cargo build --release --locked
-          ./target/release/chain-viz --version
-          echo "CHAINVIZ_BIN=$RUNNER_TEMP/chain-viz-ci/target/release/chain-viz" >> "$GITHUB_ENV"
+          mkdir -p ~/sidecars && cp target/release/chain-viz ~/sidecars/chain-viz
+      - name: Package
+        run: |
+          ~/sidecars/yolo --version
+          ~/sidecars/chain-viz --version
+          tar -C ~/sidecars -cf sidecars.tar yolo chain-viz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sidecars
+          path: sidecars.tar
+          retention-days: 3
+          if-no-files-found: error
 
-      - name: Functional tests (Yellowback scripts of this phase)
-        # Runs even when an earlier step failed (the job still fails overall). A step that aborts
-        # the job hides everything after it: while two inherited unit cases were failing, this
-        # step and the one below never executed at all, so no functional suite had ever run on CI.
-        # One red result must never mask twelve unknown ones.
-        if: ${{ !cancelled() }}
-        # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below
-        # does not have to glob all of /tmp (root-only /tmp/snap-private-tmp on the GitHub runners
-        # makes upload-artifact fail with EACCES). --nocleanup is forwarded to every script:
-        # without it test_framework.py rmtree()s its tmpdir even when the test fails.
+  unit:
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # Only for hashFiles('zcutil/fetch-params.sh'), the zk-parameter cache key.
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+      - run: tar -xf node-bin.tar
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+          fail-on-cache-miss: true
+      - name: Unit tests (the whole test_bitcoin, P5)
+        # Not only yellowback_* and vault_*: the hooks sit in files that miner_tests, main_tests,
+        # mempool_tests, script_tests and rpc_tests cover.
+        run: src/test/test_bitcoin --log_level=test_suite
+
+  functional:
+    needs: [build, sidecars]
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      # Every shard reports: one red result must never mask the others (the 2026-09 lesson of the old
+      # single job, where a failing step hid every suite after it).
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        # 3.11, not the runner's 3.10: yellowback_quote and the devnet role presets start the quote
+        # agent, which reads TOML with the stdlib tomllib. Not newer: the inherited framework still
+        # imports asyncore, which 3.12 removed.
+        with:
+          python-version: '3.11'
+      - name: Install Python test prerequisites
+        # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports simplejson
+        # and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a one-line shim stands in
+        # for it). No framework file is changed.
+        run: |
+          python3 -m pip install --user simplejson pyzmq
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, zmq, simplejson, pyblake2, tomllib'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: node-bin
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sidecars
+      - name: Unpack the build and the sidecars
+        run: |
+          tar -xf node-bin.tar
+          grep -qx "BUILDDIR=$PWD" qa/pull-tester/tests_config.ini || { echo "tests_config.ini was configured for another path:"; cat qa/pull-tester/tests_config.ini; exit 1; }
+          mkdir -p "$RUNNER_TEMP/sidecars" && tar -C "$RUNNER_TEMP/sidecars" -xf sidecars.tar
+          test -x "$RUNNER_TEMP/sidecars/yolo" && test -x "$RUNNER_TEMP/sidecars/chain-viz"
+          echo "YOLO_BIN=$RUNNER_TEMP/sidecars/yolo" >> "$GITHUB_ENV"
+          echo "CHAINVIZ_BIN=$RUNNER_TEMP/sidecars/chain-viz" >> "$GITHUB_ENV"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+          fail-on-cache-miss: true
+      - name: Functional tests, shard ${{ matrix.shard }} (YELLOWBACK_SCRIPTS + STOCK_BASELINE)
+        # TMPDIR keeps every test's mkdtemp() under one directory we own, so the log upload below does
+        # not have to glob all of /tmp (root-only /tmp/snap-private-tmp makes upload-artifact fail with
+        # EACCES). --nocleanup is forwarded to every script: without it test_framework.py rmtree()s
+        # its tmpdir even when the test fails.
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $YELLOWBACK_SCRIPTS
-
-      - name: Functional tests (inherited stock baseline, without -yellowback)
-        if: ${{ !cancelled() }}
-        env:
-          TMPDIR: ${{ runner.temp }}/yellowback-tests
-        run: |
-          mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
-
+          python3 qa/yellowback-ci-shard.py --plan "$SHARDS" $YELLOWBACK_SCRIPTS $STOCK_BASELINE
+          names=$(python3 qa/yellowback-ci-shard.py --shard "$SHARD" --of "$SHARDS" $YELLOWBACK_SCRIPTS $STOCK_BASELINE)
+          # rpc-tests.py with no name runs its whole default suite: an empty shard runs nothing.
+          if [ -z "$names" ]; then echo "shard $SHARD/$SHARDS is empty"; exit 0; fi
+          echo "shard $SHARD/$SHARDS: $names"
+          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $names
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: yellowback-test-logs
+          name: yellowback-test-logs-shard-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: ignore
 
   audit:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-
+          persist-credentials: false
       - name: Fetch the pristine baseline branch and the v3 baseline tag
-        # Every diff below is against ycash-legacy (= upstream v4.5.0), and the frozen-file check
-        # against the tag yellowback-v3-baseline (v3, price attestation). A missing ref is an error,
-        # never a vacuous pass.
+        # Every diff is against ycash-legacy (= upstream v4.5.0), the frozen-file check against the tag
+        # yellowback-v3-baseline. A missing ref is an error, never a vacuous pass.
         run: |
           git fetch --no-tags origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
-          git rev-parse --verify ycash-legacy
           git fetch --no-tags origin +refs/tags/yellowback-v3-baseline:refs/tags/yellowback-v3-baseline
-          git rev-parse --verify 'yellowback-v3-baseline^{commit}'
-
-      - name: Zero delta in the frozen files vs yellowback-v3-baseline (v3 plan §4.1, §8.4 item 1)
-        # v3 adds no line to the soft-fork hooks, the policy layer or the consensus set: the list
-        # is the one file qa/yellowback-frozen-files.txt (quoted by the plan and the PR template),
-        # one path per line, directories allowed. --quiet exits 1 on any difference; the diff is
-        # printed first so the reviewer sees what moved.
+      - name: Audit mode (the branch decides; upgrade/vault is the network upgrade)
+        id: mode
+        env:
+          REF: ${{ github.base_ref || github.ref_name }}
         run: |
-          set -e
-          test -s qa/yellowback-frozen-files.txt
-          frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$')
-          echo "frozen set:"; echo "$frozen"
-          git --no-pager diff --stat yellowback-v3-baseline...HEAD -- $frozen
-          git diff --quiet yellowback-v3-baseline...HEAD -- $frozen
-
-      - name: Line budget and the consensus zero set (plan §4.1)
+          case "$REF" in
+            upgrade/vault) m=upgrade ;;
+            harden/yellowback|feature/yellowback-price-attest) m=harden ;;
+            *) if [ -d src/vault ]; then m=upgrade; else m=harden; fi ;;
+          esac
+          # The other node line's branch: the same name for a node-line branch, else upgrade/vault.
+          case " $SCHEDULE_REFS " in *" $REF "*) other=$REF ;; *) other=upgrade/vault ;; esac
+          echo "mode=$m" >> "$GITHUB_OUTPUT"; echo "other=$other" >> "$GITHUB_OUTPUT"
+          echo "audit mode $m (ref $REF)"
+      - name: Check out the workspace's contract generator (upgrade line)
+        if: steps.mode.outputs.mode == 'upgrade'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.WORKSPACE_REPO }}
+          ref: ${{ env.WORKSPACE_COMMIT }}
+          path: .workspace-ci
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+            docs/plans
+      - name: Fetch the other node line (upgrade line)
+        if: steps.mode.outputs.mode == 'upgrade'
+        env:
+          OTHER: ${{ steps.mode.outputs.other }}
         run: |
-          set -e
-          for f in src/main.cpp:40 src/miner.cpp:35 src/rpc/mining.cpp:35; do
-            p=${f%%:*}; b=${f##*:}
-            n=$(git diff --numstat ycash-legacy...HEAD -- $p | awk '{s+=$1+$2} END {print s+0}')
-            echo "$p: $n changed lines (budget $b)"
-            test "$n" -le "$b" || exit 1
-          done
-          # Zero lines in the consensus set of plan §4.1. Phase 8's wallet-tier hardening (H5/H7/H8)
-          # landed 2026-09-11, so src/wallet/rpcwallet.cpp, src/wallet/rpcdump.cpp and
-          # src/rpc/rawtransaction.cpp have left this set (M7) and the wallet core is named
-          # explicitly: src/wallet/wallet.{h,cpp} stay at zero, the rest of src/wallet does not.
-          test -z "$(git diff --stat ycash-legacy...HEAD -- src/consensus src/script src/primitives src/pow src/chainparams.cpp src/wallet/wallet.h src/wallet/wallet.cpp src/txdb.cpp src/txdb.h configure.ac)"
+          git clone --quiet --depth 1 --filter=blob:none --no-checkout --branch "$OTHER" \
+            "https://github.com/$OTHER_LINE_REPO.git" "$RUNNER_TEMP/other-line"
+          git -C "$RUNNER_TEMP/other-line" log -1 --format='%H %s'
+      - name: qa/yellowback-audit.sh
+        # Every leg runs even when an earlier one fails; the script exits non-zero if any gating leg did.
+        # On upgrade/vault the frozen-file and line-budget legs are report-only (upgrade plan §9, G-9).
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          YB_WORKSPACE: .workspace-ci
+          YB_OTHER_LINE_DIR: ${{ runner.temp }}/other-line
+          YB_OTHER_LINE_REV: HEAD
+        run: qa/yellowback-audit.sh --mode "$MODE" --out "$RUNNER_TEMP/audit"
+      - name: Upload the consensus-diff report (the two-reviewer gate's material, G-9)
+        if: ${{ !cancelled() && steps.mode.outputs.mode == 'upgrade' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: consensus-diff
+          path: ${{ runner.temp }}/audit/
+          if-no-files-found: error
 
-      - name: Determinism, no clock, no sockets, no bans (plan §3.10, §8.4 items 2 and 8)
-        # The state machine and the pure modules may not read the clock, the mempool, the wallet
-        # or configuration, and never use floating point. Comment lines are skipped (they may
-        # name what is forbidden). tag.cpp joins the list when Phase 1 adds it (K23).
-        run: |
-          set -e
-          # attest and bundle join the set in v3 (plan §3.10); they exist from Phase A0's crypto chunk.
-          pure=""
-          for f in state math tag payload script view attest bundle; do
-            for x in src/yellowback/$f.cpp src/yellowback/$f.h; do test -f "$x" && pure="$pure $x"; done
-          done
-          echo "pure modules:$pure"
-          ! grep -n "GetTime\|GetAdjustedTime\|mempool\|pwalletMain\|GetArg\|double\|float" $pure | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
-          # libsecp256k1 is reached through one wrapper only, VerifyCompactSig in attest.cpp (v3 §3.10,
-          # §8.4 item 2), so the fuzz harness can stub it and low-S is enforced in one place. Comment
-          # lines are skipped; nothing else under src/yellowback or src/rpc/yellowback* may name it.
-          ! grep -n "secp256k1_" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp 2>/dev/null | grep -v '^src/yellowback/attest\.cpp:' | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
-          # index.cpp may read the mempool (RemoveInvalidVaultSpends) but never the clock or floating point.
-          ! grep -n "GetTime\|GetAdjustedTime\|double\|float" src/yellowback/index.cpp src/yellowback/index.h | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
-          # The clock has three homes: the quote RPC (stamps receivedAt), policy.cpp (BuildTagScript,
-          # M11), and the wallet RPC's carrier wait (A3's two-step mint -- a user-facing deadline in
-          # wallet-tier code, never a consensus input).  The patterns are anchored: an unescaped
-          # 'rpc/yellowback.cpp' also matched nothing but itself, which is how the third home
-          # surfaced as a failure rather than a decision.
-          homes=$(grep -l "GetTime\|GetAdjustedTime" src/yellowback/*.cpp src/rpc/yellowback*.cpp 2>/dev/null | grep -v 'yellowback/policy\.cpp$\|rpc/yellowback\.cpp$\|rpc/yellowbackwallet\.cpp$' || true)
-          test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
-          # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
-          ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis" || exit 1
-          # Every yellowback script the runner knows must be executable (rpc-tests.py exec's it
-          # directly) and must be run by some job: registered-but-never-run is how the v2
-          # enforcement suite and then the whole v3 attestation suite sat silent in CI.
-          # The allow-list names only the scripts a nightly step runs by name (audit I-1: it used
-          # to carry four scripts no job ran and four that did not exist).
-          for f in qa/rpc-tests/yellowback_*.py; do
-            test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
-            n=$(basename "$f" .py)
-            grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity " in
-              *" $n "*) ;;
-              *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
-            esac
-          done
-          # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
-          # name a job passes it must be registered there (ported from ycash6, audit I-1).
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_devnet_roles yellowback_stockparity; do
-            test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
-            grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
-          done
-          # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
-          # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
-          ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n' || exit 1
-          # Never ban a peer for a Yellowback verdict (N1): DoS(0) only, ever, and never the other
-          # ban entry point Misbehaving( (audit I-9). main.cpp's own inserted lines are checked
-          # against the baseline diff in "v2 gates" below; the whole of stock main.cpp is full of
-          # DoS(100) and must not be grepped here.
-          # Every `! check` in these steps carries `|| exit 1`: bash -e ignores the status of a
-          # command negated with `!`, so until 2026-10-01 only the last line of a step could fail.
-          # That hid this grep's inclusion of src/main.cpp and the comment hit below.
-          ! grep -n "DoS([1-9]\|Misbehaving(" src/yellowback/*.cpp src/rpc/yellowback*.cpp || exit 1
-          # EvaluateBlock is total (K1): no throw, no assert in the state machine or the arithmetic.
-          ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h || exit 1
-          # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
-          ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp | grep -v ':[0-9]*:[[:space:]]*\(//\|\*\)' || exit 1
-          # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
-          ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || exit 1
-
-      - name: Documents (fork-local only, P4)
-        # Staleness against the plan is a workspace check (make status -> spec-check), not a fork check.
-        run: |
-          set -e
-          ! grep -q 'no consensus change' doc/yellowback.md || exit 1
-          grep -q 'federation prototype, being replaced' doc/yellowback.md
-          grep -q 'Build and test baseline' doc/yellowback.md
-          # The published spec copy was not hand-edited: its header hash equals the hash of its body.
-          test "$(sed -n 's/^Source: .*sha256: \([0-9a-f]*\).*/\1/p' doc/yellowback-spec.md)" = "$(sed '1,/^---$/d' doc/yellowback-spec.md | sha256sum | cut -c1-64)"
-          # The trust statement in doc/yellowback.md is the spec's §8.1, byte for byte (leading and
-          # trailing blank lines aside).
-          section() { awk -v h="$1" '$0 ~ h {f=1; next} f && /^#/ {exit} f' "$2" | awk 'NF{p=1} p' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
-          diff <(section '^### 8\.1 ' doc/yellowback-spec.md) <(section '^## Trust statement' doc/yellowback.md)
-          python3 -c 'import json; json.load(open("doc/yellowback-rpc-contract.json"))'
-
-      - name: v2 gates (blocking from Phase 3)
-        # Every yed_* the node registers is in the RPC contract (P7); the Phase 3 acceptance
-        # checks; and the federation is gone from the module (the whole-directory roster grep, N26).
-        run: |
-          set -e
-          registered=$(grep -oh '"yed_[a-z]*"' src/rpc/yellowback*.cpp | tr -d '"' | sort -u)
-          missing=$(for c in $registered; do python3 -c "import json,sys; d=json.load(open('doc/yellowback-rpc-contract.json')); sys.exit(0 if '$c' in d else 1)" || echo "$c"; done)
-          test -z "$missing" || { echo "registered but not in doc/yellowback-rpc-contract.json: $missing"; exit 1; }
-          ! git grep -in roster -- src/yellowback || exit 1
-          test -f doc/yellowback-rpc.md && grep -q 'rpcversion 4' doc/yellowback-rpc.md   # 4 since hardening H-9.3
-          python3 -c 'import json,sys; d=json.load(open("doc/yellowback-rpc-contract.json")); sys.exit(0 if "yed_getinfo" in d and "suppressedBlocks" in d["yed_getinfo"]["returns"] else 1)'
-          # v3 contract (Phase A0): rpcversion 3, the attest object on yed_getinfo, every §4.5 command and
-          # error identifier present in the generated JSON — the C++ agents implement these names.
-          python3 - <<'PY'
-          import json, sys
-          d = json.load(open("doc/yellowback-rpc-contract.json"))
-          missing = []
-          if d.get("rpcversion") != 4: missing.append("rpcversion=4")   # 3 in v3 (W14); 4 since hardening H-9.3
-          if "attest" not in d["yed_getinfo"]["returns"]: missing.append("yed_getinfo.attest")
-          for c in ["yed_listattestors", "yed_getattestations", "yed_addattestation", "yed_buildbundle", "yed_getselection",
-                    "yed_getnotice", "yed_claimnotice", "yed_sweepcarriers", "yed_registerattestor", "yed_withdrawbond",
-                    "yed_revive", "yed_reportequivocation", "yed_signattestation"]:
-              if c not in d: missing.append(c)
-          for e in ["attest-unknown-seq", "attest-not-eligible", "attest-stale", "attest-bad-sig", "attest-range",
-                    "bundle-insufficient", "mint10-diverged", "notice-standing", "notice-not-underwater", "bond-below-min",
-                    "lock-below-min", "bond-locked", "not-dormant", "not-equivocation", "attest-key-not-held",
-                    "equivocation-guard"]:
-              if e not in d["errors"]: missing.append("errors." + e)
-          if missing: print("contract missing:", missing); sys.exit(1)
-          PY
-          # The spec copy carries the v3 delta (make spec appends the v3 plan's section 3).
-          grep -q '^## v3 delta' doc/yellowback-spec.md
-          test -f doc/yellowback-attestor.md && test -f qa/yellowback-frozen-files.txt
-          git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep 'DoS(\|Misbehaving(' | { ! grep -v 'DoS(0'; } || exit 1
-          # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is printed for the reviewer.
-          echo "main.cpp residual (lines not mentioning g_yellowback):"
-          git diff ycash-legacy...HEAD -- src/main.cpp | grep '^+' | grep -v 'g_yellowback\|#include\|^+$\|^+++' || true
-
-      - name: Rule -> test tags (blocking; v2 plan §7)
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
-        if: ${{ !cancelled() }}
-        # Every identifier of §3.2 and §3.7-3.9 must appear on a `// Rule:` / `# Rule:` line of a
-        # unit case or a functional script. Blocking since 2026-10-01 (audit I-2): the step carried
-        # continue-on-error from before Phase 6 long after Phase 6 was delivered. `-P` as ycash6:
-        # `\b` is a PCRE word boundary, not a POSIX ERE one.
-        run: |
-          set -e
-          tagged=$(grep -ho '^\(//\|#\) Rule: .*' src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py | sed 's/.*Rule: //' | tr ' ' '\n' | sort -u)
-          echo "rules with a tagged test:"; echo "$tagged" | tr '\n' ' '; echo
-          test -n "$tagged"
-          rc=0
-          for id in TAG-1 TAG-2 TAG-3 TAG-4 TAG-5 PRICE-1 PRICE-2 SIGMA-1 FEE-0 FEE-1 FEE-2 FEE-W REG-1 REG-2 REG-3 REG-4 IN-1 IN-2 IN-3 TX-0 \
-                    MINT-1 MINT-2 MINT-3 MINT-4 MINT-5 MINT-6 MINT-7 MINT-8 XFER-1 XFER-2 XFER-3 RED-1 RED-2 RED-3 RED-4 \
-                    ACT-1 ACT-2 ACT-3 ACT-4 ACT-5 ACT-6 ACT-7 HALT-1 HALT-2 HALT-3 HALT-4 BLK-1 BLK-2 BLK-3 TPL-1 TPL-2 TPL-3 \
-                    MP-1 MINER-1 MINER-2 MINER-3 MINTPOL-1 SNAP UNDO; do
-            git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged: $id"; rc=1; }
-          done
-          exit $rc
-
-      - name: Rule -> test tags, v3 identifiers (blocking since Phase A1, v3 plan §7)
-        # The v3 rules of plan §3.8 (ARM-1/2, REG-A1, BUNDLE-1, MINT-9/10, NOT-1, EQV-1, REV-1, PIN-1/2,
-        # AFEE-0/1, RED-5) landed with Phase A1 (yellowback_state_tests.cpp); every identifier must be
-        # tagged. Fold the list into the loop above.
-        if: ${{ !cancelled() }}
-        run: |
-          set -e
-          rc=0
-          for id in ARM-1 ARM-2 REG-A1 BUNDLE-1 MINT-9 MINT-10 NOT-1 EQV-1 REV-1 PIN-1 PIN-2 AFEE-0 AFEE-1 RED-5; do
-            git grep -qP "^(//|#) Rule: .*\b$id\b" -- src/test/yellowback_*.cpp qa/rpc-tests/yellowback_*.py || { echo "no test tagged (v3): $id"; rc=1; }
-          done
-          exit $rc
-
-  # The Rust attestor agent of v3 plan §5 (contrib/yellowback/attest/, Phase A4): built with the
-  # toolchain its own rust-toolchain.toml pins, never by depends. Runs only when the crate exists —
-  # a checkout without it (Phases A0-A3) skips every step and the job is green by construction.
-  # GitHub's `paths:` filter is workflow-wide, not per job, so the gate is the presence check below
-  # plus a cargo cache keyed on Cargo.lock; the crate is small and the job is cheap.
+  # The Rust attestor agent of v3 plan §5 (contrib/yellowback/attest/): built with the toolchain its own
+  # rust-toolchain.toml pins, never by depends; its own lock. Also proves fixtures/expected.json is still
+  # what the Python aggregator (the reference) computes.
   agent:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: contrib/yellowback/attest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Crate present?
-        id: crate
-        run: |
-          if [ -f contrib/yellowback/attest/Cargo.toml ] && [ -f contrib/yellowback/attest/rust-toolchain.toml ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"; echo "contrib/yellowback/attest/ not present yet (Phase A4); nothing to build"
-          fi
+        with:
+          persist-credentials: false
       - name: Read the crate's toolchain pin (rust-toolchain.toml)
         # The pin lives in the crate, not in this workflow (v3 plan S8, W13); the SHA-pinned action
         # below installs exactly that channel (audit I-4: no `curl https://sh.rustup.rs | sh`).
-        if: steps.crate.outputs.present == 'true'
         id: toolchain
         run: |
-          chan=$(sed -n 's/^channel = "\(.*\)"/\1/p' contrib/yellowback/attest/rust-toolchain.toml)
+          chan=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
           test -n "$chan"
           echo "channel=$chan" >> "$GITHUB_OUTPUT"
       - name: Install the pinned toolchain
-        if: steps.crate.outputs.present == 'true'
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (master, 2026-10-01)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: steps.crate.outputs.present == 'true'
+      - name: Cargo registry and git sources (keyed on Cargo.lock)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            contrib/yellowback/attest/target
-          key: attest-cargo-${{ runner.os }}-${{ hashFiles('contrib/yellowback/attest/Cargo.lock', 'contrib/yellowback/attest/rust-toolchain.toml') }}
+          key: attest-cargo-${{ runner.os }}-${{ hashFiles('contrib/yellowback/attest/Cargo.lock') }}
+          restore-keys: |
+            attest-cargo-${{ runner.os }}-
+      - name: The crate's target/ (keyed on Cargo.lock + toolchain)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: contrib/yellowback/attest/target
+          key: attest-target-${{ runner.os }}-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('contrib/yellowback/attest/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            attest-target-${{ runner.os }}-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('contrib/yellowback/attest/Cargo.lock') }}-
+      - name: cargo-audit and cargo-deny binaries (keyed on their pinned versions)
+        id: tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+          key: attest-tools-${{ runner.os }}-${{ steps.toolchain.outputs.channel }}-audit-${{ env.CARGO_AUDIT_VERSION }}-deny-${{ env.CARGO_DENY_VERSION }}
       - name: cargo build --locked
-        if: steps.crate.outputs.present == 'true'
-        working-directory: contrib/yellowback/attest
         run: cargo build --locked
       - name: cargo test
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+        if: ${{ !cancelled() }}
         run: cargo test --locked
       - name: cargo clippy -D warnings
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+        if: ${{ !cancelled() }}
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: rustfmt
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+        if: ${{ !cancelled() }}
         run: cargo fmt --check
-      - name: cargo audit (RustSec advisories over Cargo.lock; audit I-7)
-        # The agent is the one Yellowback component that opens outbound connections and holds a
-        # signing key; its lock names ~390 crates. A known vulnerability fails the job; the
-        # cargo-audit release is pinned (CARGO_AUDIT_VERSION) and installed --locked.
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+      - name: Install cargo-audit and cargo-deny (cache miss only; pinned, --locked)
+        if: steps.tools.outputs.cache-hit != 'true'
         run: |
           cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
-          cargo audit --version
-          cargo audit --db "$RUNNER_TEMP/advisory-db"   # its own clone: a cached or cargo-deny-populated ~/.cargo/advisory-db is refused as non-empty
-      - name: cargo deny (advisories, licences, bans, sources per deny.toml; audit D-12)
-        # The crate's deny.toml (cargo-deny 0.18 syntax, as chain-viz's) is the policy; the
-        # cargo-deny release is pinned (CARGO_DENY_VERSION) and installed --locked.
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
-        run: |
           cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+      - name: cargo audit (RustSec advisories over Cargo.lock; audit I-7)
+        # The agent is the one Yellowback component that opens outbound connections and holds a signing
+        # key; a known vulnerability fails the job.
+        if: ${{ !cancelled() }}
+        run: |
+          cargo audit --version
+          cargo audit --db "$RUNNER_TEMP/advisory-db"   # its own clone: a cargo-deny-populated ~/.cargo/advisory-db is refused as non-empty
+      - name: cargo deny (advisories, licences, bans, sources per deny.toml; audit D-12)
+        if: ${{ !cancelled() }}
+        run: |
           cargo deny --version
           cargo deny --locked check
       - name: expected.json is the Python aggregator's answer
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+        if: ${{ !cancelled() }}
         run: python3 fixtures/expected.py && git diff --exit-code fixtures/expected.json
       - name: The sample configuration parses
-        if: steps.crate.outputs.present == 'true' && !cancelled()
-        working-directory: contrib/yellowback/attest
+        if: ${{ !cancelled() }}
         run: cargo run --locked -q -- check-config --conf attest.toml.sample
       - name: No agent crate in the node's build (v3 plan §8.4 item 14)
-        if: steps.crate.outputs.present == 'true' && !cancelled()
+        if: ${{ !cancelled() }}
+        working-directory: .
         run: |
           ! grep -q 'iroh' Cargo.lock || exit 1
-          ! ls depends/packages | grep -qi 'iroh\|yellowback-attest' || exit 1
+          test -z "$(find depends/packages -iname '*iroh*' -o -iname '*yellowback-attest*')" || exit 1
 
   python:
-    if: github.event_name != 'schedule' && inputs.weekly_fuzz != true
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # yellowback-quote reads TOML with the stdlib tomllib (Python >= 3.11, plan section 5);
-        # ubuntu-22.04's python3 is 3.10. The functional script yellowback_quote.py runs the agent
-        # too, so it joins the main job's list only once that job's interpreter is >= 3.11.
+        # yellowback-quote reads TOML with the stdlib tomllib (Python >= 3.11, plan section 5).
         with:
           python-version: '3.11'
-      - run: python3 -m pip install --user pyflakes
+      - name: Python prerequisites (pyflakes; simplejson and the pyblake2 shim for the inherited framework)
+        run: |
+          python3 -m pip install --user pyflakes simplejson
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/attest/calibrate/test_calibrate.py
       - name: pyflakes (functional tests and the shared helpers)
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall. The two v3 framework files
-        # (Phase A0's pyfw chunk) are listed by name; a file that is not there yet is skipped, one
-        # that is there is checked.
         if: ${{ !cancelled() }}
         run: |
-          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py"
+          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py qa/yellowback-ci-shard.py"
           for f in qa/rpc-tests/test_framework/yellowback_attest.py qa/rpc-tests/test_framework/test_yellowback_attest.py; do
             test -f "$f" && files="$files $f"
           done
           python3 -m pyflakes $files
       - name: sign_attestation known-answer test and the attest framework's unit tests (v3 plan §6.0 item 6)
-        # test_framework/test_yellowback_attest.py holds the low-S known-answer vectors (R18) that the
-        # C++ yellowback_attest_tests replays; it imports the inherited framework, hence the same
-        # prerequisites the main job installs. Skipped, loudly, until the pyfw chunk lands.
+        # test_framework/test_yellowback_attest.py holds the low-S known-answer vectors (R18) that the C++
+        # yellowback_attest_tests replays.
+        if: ${{ !cancelled() }}
+        run: cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest test_framework.test_yellowback_model test_framework.test_yellowback_util -v
+      - name: vault framework unit tests and the vault_vectors.json check (upgrade plan §15.9)
+        # test_framework/vault.py is the second implementation of the vault primitive; its unit tests and
+        # gen_vault_vectors.py --check fail on a stale golden vector. The upgrade line only.
         if: ${{ !cancelled() }}
         run: |
-          if [ ! -f qa/rpc-tests/test_framework/test_yellowback_attest.py ]; then
-            echo "qa/rpc-tests/test_framework/test_yellowback_attest.py not present yet (Phase A0 pyfw chunk)"; exit 0
-          fi
-          python3 -m pip install --user simplejson
-          site=$(python3 -c 'import site; print(site.getusersitepackages())')
-          mkdir -p "$site"
-          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
-                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
-          cd qa/rpc-tests && python3 -m unittest test_framework.test_yellowback_attest test_framework.test_yellowback_model test_framework.test_yellowback_util -v
+          if [ ! -f qa/rpc-tests/test_framework/test_vault.py ]; then echo "no vault framework on this line (upgrade/vault only)"; exit 0; fi
+          python3 -m pyflakes qa/rpc-tests/test_framework/vault.py qa/rpc-tests/test_framework/test_vault.py qa/rpc-tests/test_framework/gen_vault_vectors.py qa/rpc-tests/test_framework/vault_harness.py qa/rpc-tests/vault_*.py
+          python3 qa/rpc-tests/test_framework/gen_vault_vectors.py --check
+          cd qa/rpc-tests && python3 -m unittest test_framework.test_vault -v
       - name: pyflakes (contrib; blocking from Phase 7)
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
         run: python3 -m pyflakes contrib/yellowback/*.py contrib/yellowback/yellowback-quote contrib/yellowback/pool/check-coinbase contrib/yellowback/devnet/yellowback-devnet contrib/yellowback/attest/calibrate/*.py
       - name: The quote agent's acceptance line (plan Phase 7)
+        if: ${{ !cancelled() }}
         run: contrib/yellowback/yellowback-quote --conf contrib/yellowback/pool/yellowback-quote.toml.sample --dry-run --mock-price /dev/stdin <<< 0.05
       - name: Fuzz corpora and the embedded replay tables agree (N34)
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
-        if: ${{ !cancelled() }}
         # Also checks that src/test/data/yellowback_golden.json is the qa/ model's copy (N18, N23).
+        if: ${{ !cancelled() }}
         run: python3 src/test/gen_yellowback_corpus.py --check
 
-  # The attestor agent (plan §5, W13): its own toolchain (rust-toolchain.toml), its own lock,
-  # never the node's depends/. Also proves fixtures/expected.json is still what the Python
-  # aggregator (the reference) computes, so the Rust/Python cross-check cannot drift silently.
+  # ── schedule fan-out ─────────────────────────────────────────────────────────────────────────────
+
+  schedule-fanout:
+    # GitHub fires `schedule` only on the default branch. That run dispatches the same tier on every other
+    # node-line branch, where workflow_dispatch runs that branch's own copy of this file. A branch that
+    # does not exist on the remote (or whose copy predates the `tier` input) is a warning, not a failure.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the tier on the other node-line branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TIER: ${{ github.event.schedule == '0 4 * * 0' && 'weekly' || 'nightly' }}
+          THIS_REF: ${{ github.ref_name }}
+        run: |
+          for r in $SCHEDULE_REFS; do
+            [ "$r" = "$THIS_REF" ] && continue
+            if gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$r" -f tier="$TIER"; then
+              echo "dispatched $TIER on $r"
+            else
+              echo "::warning::could not dispatch $TIER on $r"
+            fi
+          done
+
+  # ── nightly tier ─────────────────────────────────────────────────────────────────────────────────
+
   nightly:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'nightly'))
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
       contents: read
       issues: write
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -618,7 +654,7 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11 for the quote agent's tomllib (see the main job); the devnet role presets need it.
+        # 3.11 for the quote agent's tomllib (see the functional job); the devnet role presets need it.
         with:
           python-version: '3.11'
       - name: Install Python test prerequisites
@@ -635,44 +671,61 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.zcash-params
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - name: ccache from the push tier (restore only; the full build's objects are the same compiles)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.ref_name }}-
+            ccache-${{ runner.os }}-
       - run: ./zcutil/fetch-params.sh
-      - run: ./zcutil/build.sh -j$(nproc)
+      - run: ./zcutil/build.sh -j"$(nproc)"
       - name: Full make check (minus the pin's broken ycash-tx vectors)
         # `make check` is check-TESTS (test_bitcoin and ycash-gtest, every suite) then check-local:
-        # test/bitcoin-util-test.py, secp256k1 check, univalue check. The util script cannot pass
-        # at the v4.5.0 pin: its inherited vectors execute ./zcash-tx (Ycash builds ycash-tx) and,
-        # with that name linked, ten cases still expect Zcash t1... addresses where Ycash prints
-        # s1... (chainparams.cpp PUBKEY_ADDRESS 0x1C,0x28). Both files are frozen at the pin, so
-        # the step runs the other three parts by hand. Recorded in doc/yellowback.md (baseline).
+        # test/bitcoin-util-test.py, secp256k1 check, univalue check. The util script cannot pass at the
+        # v4.5.0 pin: its inherited vectors execute ./zcash-tx (Ycash builds ycash-tx) and, with that name
+        # linked, ten cases still expect Zcash t1... addresses where Ycash prints s1... (chainparams.cpp
+        # PUBKEY_ADDRESS 0x1C,0x28). Both files are frozen at the pin, so the step runs the other three
+        # parts by hand. Recorded in doc/yellowback.md (baseline).
         run: |
           make -C src check-TESTS
           make -C src/secp256k1 check
           make -C src/univalue check
       - name: Inherited functional tests recorded as passing in Phase 0
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
-        # The list is STOCK_BASELINE above, recorded by name in doc/yellowback.md "Build and test baseline".
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
-      - name: Stock parity (the fork without -yellowback is v4.5.0; plan section 8.4 item 21)
-        # yellowback_reorg_stress.py (the v1 federation script, never runnable) was deleted on
-        # 2026-10-01 (audit I-1; ycash6 plan P-7). yellowback_stockparity runs here: without a
-        # ycash-legacy build (REF_YCASHD) both nodes are the fork binary without the flag, which the
-        # script reports as the weaker check.
+      - name: Build ycash-legacy (v4.5.0) for the stock-parity check
+        # A git worktree of the pristine baseline sharing this checkout's depends tree (depends/ is
+        # byte-identical between ycash-legacy and the fork; a difference fails here).
+        if: ${{ !cancelled() }}
+        run: |
+          git fetch --no-tags --depth=1 origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
+          git diff --quiet ycash-legacy HEAD -- depends || { echo "depends/ differs from ycash-legacy; the shared depends tree does not apply"; exit 1; }
+          git worktree add "$RUNNER_TEMP/ycash-legacy" ycash-legacy
+          host=$(./depends/config.guess)
+          ln -s "$PWD/depends/$host" "$RUNNER_TEMP/ycash-legacy/depends/$host"
+          cd "$RUNNER_TEMP/ycash-legacy"
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/$host/share/config.site" ./configure
+          make -C src -j"$(nproc)" ycashd
+          echo "REF_YCASHD=$RUNNER_TEMP/ycash-legacy/src/ycashd" >> "$GITHUB_ENV"
+      - name: Stock parity (node 0 a real ycash-legacy v4.5.0, node 1 the fork; plan section 8.4 item 21)
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
+          test -x "$REF_YCASHD" || { echo "no ycash-legacy build: the script would run the weaker fork-only check"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_stockparity
       - name: Read the agent crate's toolchain pin (rust-toolchain.toml)
         if: ${{ !cancelled() }}
@@ -687,9 +740,8 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Build the attestor agent for the agent script
-        # The only functional script that runs the shipped Rust binary (v3 plan Phase A4). It
-        # SKIPs when the binary is missing, so a crate build failure must fail here, loudly,
-        # rather than turning the next step into a silent pass. --locked as the agent job (audit I-6).
+        # The only functional script that runs the shipped Rust binary (v3 plan Phase A4). It SKIPs when
+        # the binary is missing, so a crate build failure must fail here, loudly. --locked (audit I-6).
         if: ${{ !cancelled() }}
         working-directory: contrib/yellowback/attest
         run: |
@@ -704,9 +756,9 @@ jobs:
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_attest_agent
       - name: Devnet role presets end to end (extended)
-        # The role-based regtest plan's regression suite (R7): brings up each preset through the
-        # devnet script itself -- heartbeat, price walk, six personas, a shock, a liquidation --
-        # and asserts the seat is empty and the world moved. Same binary as the step above.
+        # The role-based regtest plan's regression suite (R7): brings up each preset through the devnet
+        # script itself -- heartbeat, price walk, six personas, a shock, a liquidation -- and asserts the
+        # seat is empty and the world moved. Same binary as the step above.
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
@@ -715,18 +767,15 @@ jobs:
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
-        # The light-client server's regtest suite: this fork's ycashd under a five-node devnet,
-        # lightwalletd-dd (its feature branch) and the lightwalletd-legacy baseline both served
-        # from node 0, then `go test -tags devnet` — the GetBlockRange byte-equality gate, the
-        # YED views vs the wallet's, a mint built from raw parts through the server. Unverified
-        # until the next scheduled run (the F-32 precedent); the driver is the same one a laptop runs.
+        # The light-client server's regtest suite: this fork's ycashd under a five-node devnet, the
+        # lightwalletd fork (LWD_COMMIT) and the lightwalletd-legacy baseline both served from node 0, then
+        # `go test -tags devnet` -- the GetBlockRange byte-equality gate, the YED views vs the wallet's,
+        # a mint built from raw parts through the server.
         if: ${{ !cancelled() }}
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
-          # The fork at a commit, not a branch name, and the Go tarball against its published
-          # sha256 (audit E-6): both pins are in env at the top of this file.
-          git clone --quiet https://github.com/$LWD_REPO.git "$RUNNER_TEMP/lightwalletd-dd"
+          git clone --quiet "https://github.com/$LWD_REPO.git" "$RUNNER_TEMP/lightwalletd-dd"
           git -C "$RUNNER_TEMP/lightwalletd-dd" checkout --quiet "$LWD_COMMIT"
           git -C "$RUNNER_TEMP/lightwalletd-dd" branch --quiet --track lightwalletd-legacy origin/lightwalletd-legacy
           curl -sSL -o "$RUNNER_TEMP/go.tar.gz" "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
@@ -735,65 +784,55 @@ jobs:
           export PATH="$RUNNER_TEMP/go/bin:$PATH"
           YCASH_DD="$PWD" YELLOWBACK_LWD_REPO="$RUNNER_TEMP/lightwalletd-dd" LWD_PYTHON="$(command -v python3)" LWD_DEVNET_DIR="$RUNNER_TEMP/yb-devnet-lwd" \
             "$RUNNER_TEMP/lightwalletd-dd/scripts/devnet-test.sh" --up --down --dir "$RUNNER_TEMP/yb-devnet-lwd" --portseed 8
-      # Later phases add here (§6.0 item 6): the STOCK_BASELINE a second time with
-      # BITCOIND=qa/yellowback-wrapped-ycashd.sh (Phase 3, once -yellowback needs no genesis
-      # arguments); yellowback_enforcement.py --extended and yellowback_runbook.py (Phases 4-5);
-      # the ycash-legacy worktree build, yellowback_stockparity.py, yellowback_stock_node.py and
-      # yellowback_enforcement.py --stock-binary (Phase 3+).
       - name: Fuzz smoke (N34)
-        # Independent check: runs even if an earlier step failed, so one red result
-        # does not hide the others. The job still fails overall.
         if: ${{ !cancelled() }}
-        # Ycash's harness builds one target at a time: --enable-fuzz-main replaces main() and the
-        # target's fuzz.cpp is linked as src/fuzz.cpp (plan §6.0 item 0). Each Yellowback target
-        # runs 10 minutes from its corpus; findings land in <Target>/output and are uploaded, and
-        # every file copied into <Target>/crashes/ is replayed by yellowback_fuzz_tests forever.
+        # Ycash's harness builds one target at a time: --enable-fuzz-main replaces main() and the target's
+        # fuzz.cpp is linked as src/fuzz.cpp (plan §6.0 item 0). Every Yellowback* and Vault* target with a
+        # fuzz.cpp runs 10 minutes from its corpus; findings land in <Target>/output and are uploaded, and
+        # every file copied into <Target>/crashes/ is replayed by the unit fuzz-replay tests forever.
         run: |
           set -e
           sudo apt-get install -y clang
-          # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
-          # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
-          # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
-          # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
-          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
-          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
-          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
-          # works around for libc++'s __config_site. Without the link the runtime archives are not
-          # found and every -fsanitize/--coverage link test fails.
+          # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works" program
+          # (int main) fails to link with it in CXXFLAGS ("cannot create executables"). Instrument with
+          # fuzzer-no-link at configure time and add the runtime on the ycashd link alone, the way Bitcoin
+          # Core's --with-sanitizers=fuzzer does.
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every variant
+          # builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM tarball keeps its
+          # compiler-rt runtimes under the x86_64-unknown-linux-gnu per-target directory -- the mismatch
+          # native_clang.mk already works around for libc++'s __config_site. Without the link the runtime
+          # archives are not found and every -fsanitize/--coverage link test fails.
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
-          # The steps above already built a normal ycashd. configure only adds -DZCASH_FUZZ to
-          # the flags; make will not rebuild bitcoind.o, so src/ycashd stays the real binary and
-          # exits asking for ycash.conf. Drop those objects before the fuzz configure.
-          # -DFUZZ_WITH_LIBFUZZER compiles LLVMFuzzerTestOneInput (zcutil/libfuzzer/zcash-wrapper
-          # does the same). Without it, fuzz.cpp contributes no entry point.
+          # The steps above built a normal ycashd. configure only adds -DZCASH_FUZZ to the flags; make
+          # will not rebuild bitcoind.o, so drop the objects before the fuzz configure.
+          # -DFUZZ_WITH_LIBFUZZER compiles LLVMFuzzerTestOneInput (zcutil/libfuzzer/zcash-wrapper does the
+          # same). Without it, fuzz.cpp contributes no entry point.
           make -C src clean
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
-            # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
-            # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
-            ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
-            # ycashd is libtool-linked: the make inputs are bitcoind.o and, when libtool
-            # compiles, bitcoind.lo. The binary may be src/ycashd or src/.libs/ycashd.
-            # GNU make stats the symlink target, so a new fuzz.cpp that is older than the
-            # object is not a reason to rebuild. Remove every product of this one file.
-            # The object is src/ycashd-bitcoind.o (ycashd_CPPFLAGS gives it a per-program name); before
-            # 2026-10-01 this line missed it, so every target after the first re-linked the first one.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done)
+          echo "fuzz targets:" $targets
+          for t in $targets; do
+            # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime make
+            # follows, so remove every product of this one file (src/ycashd-bitcoind.o: ycashd_CPPFLAGS
+            # gives it a per-program name; before 2026-10-01 a missed object re-linked the first target).
+            ln -sfn "fuzzing/$t/fuzz.cpp" src/fuzz.cpp
             rm -f src/ycashd-bitcoind.o src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
-            make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
-            mkdir -p src/fuzzing/$t/output
-            ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=600
+            make -C src -j"$(nproc)" ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
+            mkdir -p "src/fuzzing/$t/output" "src/fuzzing/$t/input"
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd "src/fuzzing/$t/output" "src/fuzzing/$t/input" -max_len=4096 -max_total_time=600
           done
       - name: Upload fuzz findings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-fuzz-findings
-          path: src/fuzzing/Yellowback*/output/crash-*
+          path: |
+            src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault*/output/crash-*
           if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
@@ -806,15 +845,17 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
         run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed: run $GITHUB_RUN_ID" \
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "nightly failed on $REF: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
-  # The three variant builds of §6.0 item 6 (P6): a DEBUG_LOCKORDER build over the functional
-  # suite, the sanitizers over the unit suites and three scripts, and lcov with the per-file
-  # floors of qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure.
+  # The three variant builds of §6.0 item 6 (P6): a DEBUG_LOCKORDER build over the functional suite, the
+  # sanitizers over the unit suites and SANITIZER_SCRIPTS, and lcov with the per-file floors of
+  # qa/yellowback-coverage-floor.sh. Nightly; never block; open an issue on failure. No ccache: their
+  # flags differ from the push build's, so its cache would only cost space.
   lockorder:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'nightly'))
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -822,6 +863,8 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -829,8 +872,8 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
-        # at import (exit 1) and the suite reports "agent 2 exited with 1".
+        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies at
+        # import (exit 1) and the suite reports "agent 2 exited with 1".
         with:
           python-version: '3.11'
       - name: Install Python test prerequisites
@@ -847,35 +890,34 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.zcash-params
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
       - name: Build with --enable-debug (defines DEBUG_LOCKORDER, configure.ac:249)
-        # DEBUG_LOCKORDER_LOGONLY (sync.cpp): Ycash v4.5.0 itself trips the deadlock assertion on
-        # the first peer connection (getpeerinfo vs SendMessages, all four sites byte-identical to
-        # the pin; doc/yellowback.md "Build and test baseline"), so an aborting detector never
-        # reaches Yellowback code. With the switch every inversion is still detected and written
-        # to debug.log; the step after the suite fails on any that names Yellowback.
+        # DEBUG_LOCKORDER_LOGONLY (sync.cpp): Ycash v4.5.0 itself trips the deadlock assertion on the
+        # first peer connection (getpeerinfo vs SendMessages, all four sites byte-identical to the pin;
+        # doc/yellowback.md "Build and test baseline"), so an aborting detector never reaches Yellowback
+        # code. With the switch every inversion is still detected and written to debug.log; the step
+        # after the suite fails on any that names Yellowback.
         run: |
           ./autogen.sh
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug CPPFLAGS=-DDEBUG_LOCKORDER_LOGONLY
-          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+          make -C src -j"$(nproc)" ycashd ycash-cli test/test_bitcoin
       - name: Functional suite under DEBUG_LOCKORDER (sync.cpp aborts on a potential deadlock)
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
-        # yellowback_stratum and yellowback_chainviz need the yolo / chain-viz binaries only the
-        # main job builds; here they would SKIP (exit 0) and count as passes (audit I-3), so they
-        # are left out, by name, with a line in the log.
+        # yellowback_stratum and yellowback_chainviz need the sidecar binaries the push tier builds; here
+        # they would SKIP (exit 0) and count as passes (audit I-3), so they are left out, by name.
         run: |
           mkdir -p "$TMPDIR"
           variant=""
           for n in $YELLOWBACK_SCRIPTS; do
             case "$n" in
-              yellowback_stratum|yellowback_chainviz) echo "not run in this variant: $n (needs the sidecar binary the main job builds)" ;;
+              yellowback_stratum|yellowback_chainviz) echo "not run in this variant: $n (needs a sidecar binary)" ;;
               *) variant="$variant $n" ;;
             esac
           done
@@ -883,9 +925,9 @@ jobs:
       - name: No potential deadlock involving Yellowback in any debug.log
         if: always()
         # qa/yellowback-lockorder-check.py groups every report; the inherited getpeerinfo/SendMessages
-        # pair is counted, the provably-benign cs_yellowback/ControlMutex pair (both under cs_main;
-        # F-37) is allow-listed with its proof in the script, anything else naming Yellowback fails.
-        run: qa/yellowback-lockorder-check.py "${{ runner.temp }}/yellowback-tests"
+        # pair is counted, the provably-benign cs_yellowback/ControlMutex pair (both under cs_main; F-37)
+        # is allow-listed with its proof in the script, anything else naming Yellowback fails.
+        run: qa/yellowback-lockorder-check.py "$RUNNER_TEMP/yellowback-tests"
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -897,12 +939,13 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
         run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "lockorder failed: run $GITHUB_RUN_ID" \
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "lockorder failed on $REF: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   sanitizers:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'nightly'))
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -913,12 +956,18 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5 clang
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        # 3.11 like every other functional run (SANITIZER_SCRIPTS may name a script that imports tomllib).
+        with:
+          python-version: '3.11'
       - name: Install Python test prerequisites
         run: |
           python3 -m pip install --user simplejson
@@ -932,45 +981,43 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.zcash-params
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
       - name: address + undefined (configure.ac:211)
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
-          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
-          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
-          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
-          # works around for libc++'s __config_site. Without the link the runtime archives are not
-          # found and every -fsanitize/--coverage link test fails.
+          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every variant
+          # builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM tarball keeps its
+          # compiler-rt runtimes under the x86_64-unknown-linux-gnu per-target directory. Without the link
+          # the runtime archives are not found and every -fsanitize/--coverage link test fails.
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
-          # --with-sanitizers=address appends -static-libasan and configure.ac (frozen at the
-          # v4.5.0 pin) aborts when the probe fails. depends' clang 18 rejects that GCC flag
-          # ("unknown argument '-static-libasan'"); compiler-rt's asan archive is already static.
+          # --with-sanitizers=address appends -static-libasan and configure.ac (frozen at the v4.5.0 pin)
+          # aborts when the probe fails. depends' clang 18 rejects that GCC flag; compiler-rt's asan
+          # archive is already static.
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure \
             CXXFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
             LDFLAGS='-fsanitize=address,undefined' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
-          src/test/test_bitcoin --run_test='yellowback_*'
+          make -C src -j"$(nproc)" ycashd ycash-cli test/test_bitcoin
+          src/test/test_bitcoin --run_test='yellowback_*,vault_*'
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
           make -C src clean
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --with-sanitizers=thread \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          make -C src -j$(nproc) test/test_bitcoin
-          src/test/test_bitcoin --run_test='yellowback_*,miner_tests,mempool_tests'
+          make -C src -j"$(nproc)" test/test_bitcoin
+          src/test/test_bitcoin --run_test='yellowback_*,vault_*,miner_tests,mempool_tests'
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -982,12 +1029,13 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
         run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "sanitizers failed: run $GITHUB_RUN_ID" \
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "sanitizers failed on $REF: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   coverage:
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz != true)
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'nightly'))
     runs-on: ubuntu-22.04
     timeout-minutes: 600
     permissions:
@@ -995,6 +1043,8 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -1002,8 +1052,7 @@ jobs:
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5 lcov
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib. On 3.10 every agent dies
-        # at import (exit 1) and the suite reports "agent 2 exited with 1".
+        # 3.11, not the runner's 3.10: yellowback_quote imports tomllib.
         with:
           python-version: '3.11'
       - name: Install Python test prerequisites
@@ -1020,50 +1069,44 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.zcash-params
           key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
       - run: ./zcutil/fetch-params.sh
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
       - name: Build with --enable-lcov (configure.ac:167), unit and functional suites against the instrumented ycashd
         env:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"     # before configure: config.guess needs TMPDIR to exist ("cannot guess build type")
           ./autogen.sh
-          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
-          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
-          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
-          # works around for libc++'s __config_site. Without the link the runtime archives are not
-          # found and every -fsanitize/--coverage link test fails.
+          # The compiler-rt triple link (see the sanitizers job).
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-lcov \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          make -C src -j$(nproc) ycashd ycash-cli test/test_bitcoin
+          make -C src -j"$(nproc)" ycashd ycash-cli test/test_bitcoin
           make check || true
           src/test/test_bitcoin
-          mkdir -p "$TMPDIR"
           # As the lockorder job: the two sidecar scripts would SKIP here (audit I-3).
           variant=""
           for n in $YELLOWBACK_SCRIPTS; do
             case "$n" in
-              yellowback_stratum|yellowback_chainviz) echo "not run in this variant: $n (needs the sidecar binary the main job builds)" ;;
+              yellowback_stratum|yellowback_chainviz) echo "not run in this variant: $n (needs a sidecar binary)" ;;
               *) variant="$variant $n" ;;
             esac
           done
           qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $variant
-      - name: lcov over src/yellowback and src/rpc/yellowback*, the floors of qa/yellowback-coverage-floor.sh
+      - name: lcov over src/yellowback, src/vault and their RPCs, the floors of qa/yellowback-coverage-floor.sh
         run: |
           set -e
-          # --enable-lcov compiles with depends' clang 18, which writes .gcno notes as gcov
-          # version '408*'. The runner's gcov is GCC 11.4 ('B14*') and refuses them
-          # ("GCOV failed"). native_clang.mk does not stage llvm-cov; it is in the cached
-          # clang tarball, and the staged native lib/ satisfies its $ORIGIN/../lib lookup.
+          # --enable-lcov compiles with depends' clang 18, which writes .gcno notes as gcov version '408*'.
+          # The runner's gcov is GCC 11.4 ('B14*') and refuses them ("GCOV failed"). native_clang.mk does
+          # not stage llvm-cov; it is in the cached clang tarball, and the staged native lib/ satisfies its
+          # $ORIGIN/../lib lookup.
           tar=$(echo depends/sources/clang-llvm-*-x86_64-linux-gnu-ubuntu-18.04.tar.xz)
           inner=$(tar -tJf "$tar" | awk '/\/bin\/llvm-cov$/{print; exit}')
           test -n "$inner"
@@ -1078,7 +1121,9 @@ jobs:
           chmod +x "$wrapper"
           "$wrapper" --version
           lcov --capture --directory src --gcov-tool "$wrapper" --output-file lcov-all.info --rc lcov_branch_coverage=0
-          lcov --extract lcov-all.info '*/src/yellowback/*' '*/src/rpc/yellowback*' --output-file lcov.info
+          patterns="*/src/yellowback/* */src/rpc/yellowback*"
+          [ -d src/vault ] && patterns="$patterns */src/vault/* */src/rpc/vault*"
+          set -f; lcov --extract lcov-all.info $patterns --output-file lcov.info; set +f
           lcov --list lcov.info
           genhtml lcov.info --output-directory coverage-html
           qa/yellowback-coverage-floor.sh lcov.info
@@ -1095,27 +1140,30 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref_name }}
         run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "coverage failed: run $GITHUB_RUN_ID" \
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "coverage failed on $REF: run $GITHUB_RUN_ID" \
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
+  # ── weekly tier ──────────────────────────────────────────────────────────────────────────────────
+
   weekly-fuzz:
-    # Thirty minutes per Yellowback target with corpus minimisation, then a PR with the new corpus
-    # files and the regenerated C++ replay table (plan §6.0 item 6, §7 "Fuzzing"). Never blocks.
-    # It was two hours per target until 2026-09-28: six of those are twelve hours in one job, and
-    # GitHub-hosted runners cancel every job at six hours whatever timeout-minutes says, so the
-    # first run (36377015194) died in the third target with nothing committed. The budget starts
-    # small to get baseline runs through; raise -max_total_time only while 6 x budget + relinks
-    # stays under the cap, or split the targets into a matrix.
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.weekly_fuzz == true)
+    # Thirty minutes per fuzz target with corpus minimisation, then a PR with the new corpus files and the
+    # regenerated C++ replay table (plan §6.0 item 6, §7 "Fuzzing"). Never blocks. GitHub-hosted runners
+    # cancel every job at six hours whatever timeout-minutes says (run 36377015194 died in its third
+    # two-hour target), so targets x 30 min + relinks must stay under the cap: seven targets are ~4.3 h.
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
     runs-on: ubuntu-22.04
-    timeout-minutes: 330
+    timeout-minutes: 340
     permissions:
       contents: write
       pull-requests: write
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # No credentials left in .git/config (artipacked): the corpus push below passes the token itself.
+        with:
+          persist-credentials: false
       - name: Install build prerequisites
         run: |
           sudo apt-get update
@@ -1127,49 +1175,37 @@ jobs:
             depends/x86_64-pc-linux-gnu
             depends/built
             depends/sources
-          key: depends-${{ runner.os }}-${{ hashFiles('depends/packages/**', 'depends/Makefile', 'depends/hosts/**', 'depends/builders/**') }}
-      - run: BUILD_STAGE=depends ./zcutil/build.sh -j$(nproc)
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
+      - run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
       - name: Fuzz every target for thirty minutes and minimise the corpus
         run: |
           set -e
-          # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
-          # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
-          # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
-          # link alone, the way Bitcoin Core's --with-sanitizers=fuzzer does.
-          # config.site sets CC/CXX after the command line (autoconf restores nothing), so every
-          # variant builds with depends' clang 18 targeting x86_64-pc-linux-gnu, while the LLVM
-          # tarball keeps its compiler-rt runtimes (asan, ubsan, profile, fuzzer) under the
-          # x86_64-unknown-linux-gnu per-target directory -- the mismatch native_clang.mk already
-          # works around for libc++'s __config_site. Without the link the runtime archives are not
-          # found and every -fsanitize/--coverage link test fails.
+          # The fuzzer-no-link configure and the compiler-rt triple link: see the nightly fuzz step.
           rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
           ls "$rt"; test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
           depends/x86_64-pc-linux-gnu/native/bin/clang -target x86_64-pc-linux-gnu -print-file-name=libclang_rt.asan.a
           # BUILD_STAGE=depends exits before autogen.sh, so a checkout has no ./configure.
-          # The nightly fuzz step inherits one from the earlier full build; this job does not.
           ./autogen.sh
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          for t in YellowbackTag YellowbackPayload YellowbackScript YellowbackEvaluate YellowbackPayee YellowbackBundle; do
-            # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime
-            # make follows, so each target has to rebuild bitcoind.o or every run fuzzes the first.
-            ln -sfn fuzzing/$t/fuzz.cpp src/fuzz.cpp
-            # See the nightly fuzz step: retargeting the symlink does not rebuild, and
-            # libtool may have left bitcoind.lo and .libs/ycashd beside the .o.
-            # The object is src/ycashd-bitcoind.o (ycashd_CPPFLAGS gives it a per-program name); before
-            # 2026-10-01 this line missed it, so every target after the first re-linked the first one.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done)
+          echo "fuzz targets:" $targets
+          for t in $targets; do
+            # Retargeting the symlink does not rebuild; remove every product of bitcoind.cpp (see nightly).
+            ln -sfn "fuzzing/$t/fuzz.cpp" src/fuzz.cpp
             rm -f src/ycashd-bitcoind.o src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
-            make -C src -j$(nproc) ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
-            mkdir -p src/fuzzing/$t/output src/fuzzing/$t/merged
-            ASAN_OPTIONS=detect_leaks=0 src/ycashd src/fuzzing/$t/output src/fuzzing/$t/input -max_len=4096 -max_total_time=1800 || true
+            make -C src -j"$(nproc)" ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
+            mkdir -p "src/fuzzing/$t/output" "src/fuzzing/$t/merged" "src/fuzzing/$t/input" "src/fuzzing/$t/crashes"
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd "src/fuzzing/$t/output" "src/fuzzing/$t/input" -max_len=4096 -max_total_time=1800 || true
             # Crashes become permanent replay cases; the minimised corpus (seeds + new coverage) replaces input/.
-            for c in src/fuzzing/$t/output/crash-*; do [ -f "$c" ] && cp "$c" "src/fuzzing/$t/crashes/$(date +%Y%m%d)-$(basename "$c")"; done
-            ASAN_OPTIONS=detect_leaks=0 src/ycashd -merge=1 src/fuzzing/$t/merged src/fuzzing/$t/input src/fuzzing/$t/output
-            i=0; for f in src/fuzzing/$t/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
+            for c in "src/fuzzing/$t"/output/crash-*; do [ -f "$c" ] && cp "$c" "src/fuzzing/$t/crashes/$(date +%Y%m%d)-$(basename "$c")"; done
+            ASAN_OPTIONS=detect_leaks=0 src/ycashd -merge=1 "src/fuzzing/$t/merged" "src/fuzzing/$t/input" "src/fuzzing/$t/output"
+            i=0; for f in "src/fuzzing/$t"/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
+            git add -f "src/fuzzing/$t/input" "src/fuzzing/$t/crashes"
           done
           python3 src/test/gen_yellowback_corpus.py --write || true
-          git add -f src/fuzzing/Yellowback*/input src/fuzzing/Yellowback*/crashes src/test/yellowback_fuzz_tests.cpp
+          git add -f src/test/yellowback_fuzz_tests.cpp
       - name: Upload corpus and crashes
         # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
         if: always()
@@ -1180,38 +1216,39 @@ jobs:
             src/fuzzing/Yellowback*/input
             src/fuzzing/Yellowback*/crashes
             src/fuzzing/Yellowback*/output/crash-*
+            src/fuzzing/Vault*/input
+            src/fuzzing/Vault*/crashes
+            src/fuzzing/Vault*/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
         env:
           GH_TOKEN: ${{ github.token }}
+          # The corpus PR targets the branch this run fuzzed (one of the push branches above).
+          BASE: ${{ github.ref_name }}
         run: |
           if git diff --cached --quiet; then echo "no new corpus files"; exit 0; fi
-          branch="weekly-fuzz/$(date +%Y%m%d)"
+          branch="weekly-fuzz/$(date +%Y%m%d)-${BASE//\//-}"
           git config user.name "yellowback-weekly-fuzz"
           git config user.email "weekly-fuzz@users.noreply.github.com"
           git checkout -b "$branch"
-          git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d))"
-          git push origin "$branch"
-          # The branch of record, which must stay the same as the push/pull_request lists at the
-          # top of this file. It was feature/yellowback-sf until 2026-09-20; that branch is now a
-          # frozen v2 baseline, so a corpus PR against it targeted something nobody merges into
-          # and that nothing may be committed to.
-          gh pr create --repo "$GITHUB_REPOSITORY" --base feature/yellowback-price-attest --head "$branch" \
-            --title "fuzz: weekly corpus update $(date +%Y-%m-%d)" \
+          git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d), $BASE)"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" \
+            --title "fuzz: weekly corpus update $(date +%Y-%m-%d) ($BASE)" \
             --body "$(printf '%s\n' \
               '## 1. What and why' '' \
-              "Weekly libFuzzer run (30 min per target, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/Yellowback*/input/ and the C++ replay table src/test/yellowback_fuzz_tests.cpp was regenerated by gen_yellowback_corpus.py --write. Maintenance; no code change." '' \
+              "Weekly libFuzzer run (30 min per target, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/*/input/ and the C++ replay table src/test/yellowback_fuzz_tests.cpp was regenerated by gen_yellowback_corpus.py --write. Maintenance; no code change." '' \
               '## 2. How it was verified' '' \
               "The fuzz targets ran to their time cap in the workflow; the replay table is regenerated from the corpus. **Any file under src/fuzzing/*/crashes/ in this diff is a finding: replay it and fix before merging.** No crashes/ files = merge." '' \
               '## 3. What this PR touches in src/' '' \
               'n/a — no src/ change (src/test/yellowback_fuzz_tests.cpp is generated test data, not code under review)')" || true
       - name: Fail on a crash (the input is already in the artifact, crashes/ and the corpus PR)
-        # Each target runs with || true so one crash does not cost the others their 30 minutes; this
-        # step turns the run red afterwards instead of reporting a crash as a green run.
+        # Each target runs with || true so one crash does not cost the others their 30 minutes; this step
+        # turns the run red afterwards instead of reporting a crash as a green run.
         if: always()
         run: |
-          if ls src/fuzzing/Yellowback*/output/crash-* >/dev/null 2>&1; then
-            ls -l src/fuzzing/Yellowback*/output/crash-*
+          if ls src/fuzzing/*/output/crash-* >/dev/null 2>&1; then
+            ls -l src/fuzzing/*/output/crash-*
             echo "::error::a fuzz target crashed: replay the input from the artifact (or crashes/ in the corpus PR) and fix"
             exit 1
           fi
