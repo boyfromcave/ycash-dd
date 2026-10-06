@@ -646,12 +646,12 @@ class ModelTests(unittest.TestCase):
         bad_delay = v.vault_script_unchecked(vparams(set_id=sid, cancel_set_id=sid, delay=0))
         self.assertIsNone(v.parse_vault(bad_delay))
         self.assertEqual(v.template_shape(bad_delay), 'malformed')
-        # non-minimal push of the delay (a data push of 10 instead of OP_10... 10 > 16 is data;
-        # use 5: OP_5 is minimal, 0x01 0x05 is not)
+        # non-minimal push of the delay (OP_5 is minimal, 0x01 0x05 is not)
         vp5 = vparams(set_id=sid, cancel_set_id=sid, delay=5)
         s5 = v.vault_script(vp5)
-        nonmin = s5.replace(bytes([v.OP_1 + 4, v.OP_2DROP]), bytes([0x01, 0x05, v.OP_2DROP]), 1)
+        nonmin = v.nonminimal_delay_vault(vp5)
         self.assertNotEqual(nonmin, s5)
+        self.assertEqual(len(nonmin), len(s5) + 1)
         self.assertEqual(v.template_shape(nonmin), 'malformed')
         # the two setId copies differ
         other = bytes(32)

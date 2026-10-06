@@ -661,6 +661,16 @@ def vault_script_unchecked(p):
             + bytes([OP_ENDIF, OP_ENDIF, OP_ENDIF]))
 
 
+def nonminimal_delay_vault(p):
+    """The V of ``p`` (``delay`` 1..16) with the delay as the data push ``01 <delay>`` instead of
+    ``OP_<delay>``: the V skeleton with a non-minimal field (a malformed shape, negative tests)."""
+    assert 1 <= p.delay <= 16
+    head = push(p.tag) + push(p.cancel_set_id)
+    good = vault_script(p)
+    assert good[len(head)] == OP_1 + p.delay - 1
+    return head + bytes([0x01, p.delay]) + good[len(head) + 1:]
+
+
 def vault_script(p):
     """The V scriptPubKey (bare, U-12) of ``VaultParams`` ``p``; raises on out-of-range fields."""
     check_vault_ranges(p)
