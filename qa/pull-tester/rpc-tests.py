@@ -186,6 +186,9 @@ EXTENDED_SCRIPTS = [
     # The devnet's role presets end to end (role-based regtest plan, R7): drives the devnet
     # script itself, needs the same Rust binary, SKIPs without it; ~30 minutes.
     'yellowback_devnet_roles.py',
+    # The devnet on the vault upgrade (upgrade plan §4, §5): upgrade-walk's core and the WYEC bridge
+    # persona through the devnet script; same Rust binary, SKIPs without it; < 10 minutes.
+    'yellowback_devnet_upgrade.py',
     'yellowback_sapling.py',
     'yellowback_stockparity.py',
     # These tests are not run by the travis build process.
