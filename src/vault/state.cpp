@@ -553,6 +553,10 @@ std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Ac
     if (tx.IsCoinBase()) return std::string("bad-vault-act-coinbase");
     if (tx.vin.empty()) return std::string("bad-vault-act-novin");
 
+    // A SET_CREATE carrying signatures is a count error, reported as such.
+    if (act.type == ACT_SET_CREATE && !act.sigs.empty()) return std::string("bad-vault-act-sigs");
+    if (!ActFieldsValid(act)) return std::string("bad-vault-act-params");
+
     const uint256 msg = ActMsg(EncodePayload(act), tx.vin[0].prevout);
     std::vector<CPubKey> keys;
     for (const auto& sig : act.sigs) {

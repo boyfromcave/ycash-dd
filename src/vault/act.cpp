@@ -139,6 +139,38 @@ bool SetCreateBody::Valid() const
     return true;
 }
 
+namespace {
+bool SigHeaderOk(const std::vector<unsigned char>& sig)
+{
+    return sig.size() == RECOVERABLE_SIG_SIZE && sig[0] >= 31 && sig[0] <= 34;
+}
+bool RoleOk(uint8_t role) { return role == 1 || role == 2; }
+} // namespace
+
+bool ActFieldsValid(const Act& act)
+{
+    for (const auto& sig : act.sigs) {
+        if (!SigHeaderOk(sig)) return false;
+    }
+    switch (act.type) {
+    case ACT_SET_CREATE:
+        return act.create.Valid();
+    case ACT_SET_JOIN:
+        return IsCompressedKey(act.join.memberKey) && act.join.bondLocktime >= 1 && act.join.bondLocktime < 500000000;
+    case ACT_SET_HEARTBEAT:
+        return IsCompressedKey(act.heartbeat.memberKey);
+    case ACT_SET_REMOVE:
+        return IsCompressedKey(act.remove.memberKey) && act.remove.burn <= 1;
+    case ACT_SET_EQUIVOCATION:
+        return RoleOk(act.equivocation.roleA) && RoleOk(act.equivocation.roleB) &&
+               SigHeaderOk(act.equivocation.sigA) && SigHeaderOk(act.equivocation.sigB);
+    case ACT_SET_WINDDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 SetId Act::TargetSet() const
 {
     switch (type) {

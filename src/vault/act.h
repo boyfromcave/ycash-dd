@@ -136,6 +136,12 @@ std::vector<unsigned char> EncodePayload(const Act& act);
 /** The full OP_RETURN script: OP_RETURN <P> <S_1>...<S_n>. Empty if the type is unknown. */
 CScript EncodeAct(const Act& act);
 
+/** The context-free field rules of §15.5 that the decoder does not apply: SET_CREATE
+ *  parameter ranges (SetCreateBody::Valid), compressed keys, JOIN bondLocktime in
+ *  1..499999999, REMOVE burn in {0,1}, EQUIVOCATION roles in {1,2}, and every signature
+ *  header (S_i, sigA, sigB) in 31..34. Rejected at rule time as bad-vault-act-params. */
+bool ActFieldsValid(const Act& act);
+
 /** Decode a `YV` output. nullopt on success; otherwise a reject reason:
  *  bad-vault-act-malformed, bad-vault-act-version, bad-vault-act-type. */
 std::optional<std::string> DecodeAct(const CScript& spk, Act& out);
