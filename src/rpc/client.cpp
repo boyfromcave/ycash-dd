@@ -182,6 +182,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_mint", 5 },              // maxCollateralZat
     { "yed_claim", 3 },             // wait
     { "yed_claim", 4 },             // minOutZat
+    { "yed_claim", 5 },             // maxBurnCents
     { "yed_listtokens", 2 },        // count
     { "yed_listtokens", 3 },        // skip
     { "yed_listclaimable", 0 },     // count
