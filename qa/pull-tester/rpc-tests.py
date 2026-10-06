@@ -63,6 +63,12 @@ BASE_SCRIPTS= [
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
     'vault_rpc.py',
+    # The primitive with raw transactions, cross-checked against VaultModel: set lifecycle, lock /
+    # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
+    # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
+    'vault_primitive.py',
+    'vault_slashing.py',
+    'vault_bridge.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
