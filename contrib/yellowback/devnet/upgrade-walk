@@ -244,8 +244,18 @@ class Walk:
 
     def two_step(self, i, method, *args, keys=None):
         """yed_mint / yed_claim with wait=false: the carrier, one block, then the main transaction."""
-        self.fresh(i)
-        res = self.call(i, method, *args, False, keys=keys or ["pending", "carrierTxid", "refHeight", "xMint", "aMint", "pMint", "xClaim", "aClaim", "pClaim", "bundleSeqs"])
+        keys = keys or ["pending", "carrierTxid", "refHeight", "xMint", "aMint", "pMint", "xClaim", "aClaim", "pClaim", "bundleSeqs"]
+        for attempt in range(4):
+            self.fresh(i)
+            try:
+                res = self.call(i, method, *args, False, keys=keys)
+                break
+            except Exception as error:
+                message = str(getattr(error, "error", {}).get("message", error))
+                if "bundle-insufficient" not in message or attempt == 3: raise
+                # the agents sign every ATTEST_INTERVAL blocks; a selection can still miss a tick that lands a moment later
+                self.out("    ! %s -- the agents lag the tip; one more block and retry" % message[:160])
+                time.sleep(2); self.mine(1, quiet=True)
         self.ok(res["pending"] is True and res.get("carrierTxid"), "%s took the carrier step (carrier %s)" % (method, res.get("carrierTxid")))
         self.wait_mempool(res["carrierTxid"])
         self.mine(1, quiet=True)
@@ -725,7 +735,11 @@ class Walk:
         burn = [b for b in st["burns"] if b["id"] == "burn-%s-1" % shape][0]
         self.out("    burn -> intent %s (signatures %s)" % (burn["intent"], burn.get("signers")))
         if not burn.get("released"):
-            self.chainviz("a WYEC intent outstanding", intent=burn["intent"])
+            itx = burn["intent"].split(":")[0]
+            if itx in self.node(USER).getrawmempool():
+                self.wait_mempool(itx); self.mine(1)
+            if any(r["outpoint"] == burn["intent"] for r in self.node(USER).vault_list({"kind": "intent", "tag": "WYEC"})):
+                self.chainviz("a WYEC intent outstanding", intent=burn["intent"])
         st = self.wait_bridge(lambda s: any(b["id"] == "burn-%s-1" % shape and b.get("released") for b in s["burns"]),
                               "the daemon released the intent after the delay", blocks=30)
         burn = [b for b in st["burns"] if b["id"] == "burn-%s-1" % shape][0]

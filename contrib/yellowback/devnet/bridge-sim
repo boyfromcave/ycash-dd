@@ -179,10 +179,14 @@ class Bridge:
         return self.node(OWNER).vault_list(q)
 
     # ------------------------------------------------------------------ up
-    def fund(self, nodes, amount):
+    def fund(self, nodes, amount, coins=4):
+        """Several coins per node: every act, unlock and release spends a whole confirmed coin (the RPCs lock
+        what they choose) and its change confirms a block later, so a one-coin wallet stalls every other block."""
         txids = []
         for k, i in enumerate(nodes):
-            txids.append(self.node(FUNDERS[k % len(FUNDERS)]).sendtoaddress(self.node(i).getnewaddress(), amount))
+            n = coins * (2 if i in (SHAPES["guardians"]["coordinator"], SHAPES["relayer"]["coordinator"]) else 1)
+            outs = {self.node(i).getnewaddress(): float(amount) / coins for _ in range(n)}
+            txids.append(self.node(FUNDERS[k % len(FUNDERS)]).sendmany("", outs))
         for t in txids: self.wait_mempool(t)
         self.mine(1)
 
@@ -217,7 +221,7 @@ class Bridge:
         print("bridge up: shape %s; coordinator node%d; signers %s%s" % (shape, coord, ",".join(map(str, cfg["signers"])),
               "; challengers %s" % ",".join(map(str, cfg["cancellers"])) if cfg["cancellers"] else ""))
         nodes = sorted(set(cfg["signers"]) | set(cfg["cancellers"] or ()) | {coord})
-        self.fund(nodes, 8)
+        self.fund(nodes, 12)
         created = self.node(coord).set_create(dict(cfg["set"]))
         print("  set_create on node%d: setid %s admitkey %s" % (coord, created["setid"], created["admitkey"][:16]))
         cancel_set = created["setid"]
@@ -272,7 +276,10 @@ class Bridge:
         vp = v.VaultParams(TAG.encode(), v.txid_internal(b["set"]), v.txid_internal(b["cancelset"]), b["delay"],
                            lock_h + b["bridge_max_age"], 0, owner_key)
         value = zat(amount)
-        coins = sorted([u for u in n.listunspent(1) if u.get("spendable", True)], key=lambda u: -u["amount"])
+        locked = {(c["txid"], c["vout"]) for c in n.listlockunspent()}
+        pending = {(i["txid"], i["vout"]) for t in n.getrawmempool() for i in n.getrawtransaction(t, 1)["vin"] if "txid" in i}
+        coins = sorted([u for u in n.listunspent(1) if u.get("spendable", True) and (u["txid"], u["vout"]) not in locked | pending
+                        and u["amount"] >= 1], key=lambda u: -u["amount"])
         vin, total = [], 0
         for u in coins:
             vin.append((u["txid"], u["vout"], b"", 0xFFFFFFFF)); total += zat(u["amount"])
@@ -284,7 +291,10 @@ class Bridge:
         raw = ym.serialize_tx_v4(vin, vout, 0, self.tip() + 40).hex()
         signed = n.signrawtransaction(raw)
         if not signed["complete"]: sys.exit("signrawtransaction incomplete: %s" % jdump(signed.get("errors")))
-        txid = n.sendrawtransaction(signed["hex"])
+        try:
+            txid = n.sendrawtransaction(signed["hex"])
+        except Exception as error:
+            sys.exit("the lock was refused: %s" % getattr(error, "error", {}).get("message", error))
         print("locked %s YEC under %s: %s:0 (owner key %s, ownerHeight %d, destination %s)"
               % (amount, b["set"][:16], txid, owner_key.hex()[:16], lock_h + b["bridge_max_age"], dest_bytes.hex()))
         self.wait_mempool(txid)
