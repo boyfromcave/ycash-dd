@@ -401,11 +401,13 @@ BOOST_AUTO_TEST_CASE(act5_param_set_start_admissible)
     // No sunset (regtest 0): only the freeze clause can admit a start.
     BOOST_CHECK(!ParamSetStartAdmissible(10, 0, W, halted));
     BOOST_CHECK(ParamSetStartAdmissible(1100, 0, W, halted));
-    // The mainnet set: a change before its sunset with enforcement never halted is not admissible.
+    // A released mainnet set (the withdrawn 6.21.0-rc1 sunset, 3,495,480; mainnet is unset since
+    // hardening F-5): a change before its sunset with enforcement never halted is not admissible.
     const Params& m = MainParams();
-    BOOST_CHECK(!ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
-    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
-    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return true; }));
+    const int mainSunset = 3075000 + 420480;
+    BOOST_CHECK(!ParamSetStartAdmissible(mainSunset - 1, mainSunset, m.signalWindow, [](int) { return false; }));
+    BOOST_CHECK(ParamSetStartAdmissible(mainSunset, mainSunset, m.signalWindow, [](int) { return false; }));
+    BOOST_CHECK(ParamSetStartAdmissible(mainSunset - 1, mainSunset, m.signalWindow, [](int) { return true; }));
 }
 
 // The §3.1 table, both columns; the four regtest flags land where the plan says.
@@ -413,9 +415,10 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
 {
     const Params& m = MainParams();
     BOOST_CHECK_EQUAL(m.network, "main");
-    BOOST_CHECK(m.IsConfigured());    // set per release: with ycashd 6.21.0-rc1, as on the 6.20.0 line
-    BOOST_CHECK_EQUAL(m.startHeight, 3075000);
-    BOOST_CHECK_EQUAL(m.enforceUntilHeight, m.startHeight + 420480);   // L8: one year of blocks
+    // Hardening F-5 (H-8): unset until the gate-passing release; -yellowback refuses mainnet until then.
+    BOOST_CHECK(!m.IsConfigured());
+    BOOST_CHECK_EQUAL(m.startHeight, 0);
+    BOOST_CHECK_EQUAL(m.enforceUntilHeight, 0);
     BOOST_CHECK_EQUAL(m.pFastWindow, 96);   BOOST_CHECK_EQUAL(m.pFastMinFill, 48);
     BOOST_CHECK_EQUAL(m.pMidWindow, 576);   BOOST_CHECK_EQUAL(m.pMidMinFill, 384);
     BOOST_CHECK_EQUAL(m.pSlowWindow, 2016); BOOST_CHECK_EQUAL(m.pSlowMinFill, 1344);
