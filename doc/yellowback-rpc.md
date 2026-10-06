@@ -91,9 +91,10 @@ before); ELIGIBLE again after a heartbeat that follows. `seated` holds at most `
 - **Outpoints** are objects `{"txid": "<hex>", "vout": n}`; a vault is named by its outpoint
   string `"<txid>:0"` where the prototype did (`vault`).
 - **Term classes** are the strings `"A"`, `"B"`, `"C"`; vault statuses `"ACTIVE"`, `"VOID"`,
-  `"CLOSED"`, `"CLAIMED"`; activation statuses `"signaling"`, `"locked_in"`, `"active"`; halt-mask
+  `"CLOSED"`, `"CLAIMED"`, `"CLAIMING"`; upgrade statuses (`yed_getactivation`) `"pending"`,
+  `"active"` (the v2 `"signaling"` / `"locked_in"` left with signalling, upgrade plan §6); halt-mask
   names `"NOT_ACTIVE"`, `"NO_PRICE"`, `"PARTICIPATION"`, `"GLOBAL_RATIO"`, `"DIVERGENCE"`,
-  `"ENFORCEMENT"` (§3.6).
+  `"ENFORCEMENT"` (§3.6; `PARTICIPATION` and `ENFORCEMENT` are no longer set since the upgrade).
 - **Payees** are rendered as the P2PKH address (`s1…` mainnet, `sm…` testnet/regtest) of the key
   hash, `null` when there is none (FEE-0, or a VOID release / sweep).
 - **Verdicts** are the §4.2a strings (`ok`, `bad-mint-collateral`, `vault-spend-malformed`, …).
@@ -137,8 +138,10 @@ before); ELIGIBLE again after a heartbeat that follows. `seated` holds at most `
   not, a v3 wallet always takes the carrier step for these commands: before arming the bundle
   is empty and the carrier is still created, so one code path exists (the carrier costs
   `CARRIER_VALUE` = 10,000 zat plus the network fee).
-- **Gating.** Every command requires `-experimentalfeatures -yellowback`; without them the node
-  answers JSON-RPC `-32601` "Method not found". Every refusal is `RPC_INVALID_PARAMETER` (a bad
+- **Gating.** Every command requires Yellowback to be live: the vault upgrade scheduled and the
+  network's YED attestor set configured (U-22; regtest: `-nuparams=6d5b7a31:<h>` and
+  `-yellowbackattestorset=<setid>`); otherwise the node answers JSON-RPC `-32601` "Method not
+  found (Yellowback is not active: …)". Every refusal is `RPC_INVALID_PARAMETER` (a bad
   argument), `RPC_WALLET_ERROR` (funds, locking) or `RPC_VERIFY_REJECTED` (a rule), with a
   message that **begins with a stable identifier** from the table in *Error identifiers*; the
   wallet matches the identifier, never the text after it.

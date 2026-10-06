@@ -1397,9 +1397,11 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
             "vault_buildcancel \"intentoutpoint\"\n"
             "\nBuild the CANCEL spend of an intent before it matures: its value back into the vault it was unlocked from\n"
             "(I-2), fee from this wallet (unsigned). Collect the cancel set's signatures with set_signcancel, then vault_send.\n"
-            "Called again for the same intent it returns the same transaction while its fee inputs are unspent (members sign\n"
-            "once: a second, different cancel signature is an equivocation).\n"
-            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at)}\n"
+            "An intent still in the mempool can be cancelled too: the cancel spends it as a mempool child. Called again for\n"
+            "the same intent it returns the same transaction while its fee inputs are unspent (members sign once: a second,\n"
+            "different cancel signature is an equivocation).\n"
+            "\nResult: {\"hex\", \"required\", \"cancelsetid\", \"deadline\" (the last height a cancel can confirm at; for an\n"
+            "unconfirmed intent, if the intent confirms in the next block), \"intentconfirmed\"}\n"
             + HelpExampleCli("vault_buildcancel", "\"txid:0\"") + HelpExampleRpc("vault_buildcancel", "\"txid:0\""));
     EnsureWallet(fHelp);
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -1409,13 +1411,41 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     int h;
     IntentParams ip;
     if (!GetCoin(op, coin, h) || !ParseIntent(coin.scriptPubKey, ip)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not an unspent intent output");
-    auto rec = GetTemplateOut(*g_vaultdb, op);
-    if (!rec || rec->origin.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "the intent is not confirmed (its originating vault script is read from the vault database)");
-    if (NextHeight() - rec->height >= ip.delay) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the intent matured at height %d; it can no longer be cancelled", rec->height + ip.delay));
+    // The originating V script (the vaultHash preimage the cancel re-creates): from the vault
+    // database for a confirmed intent, else from the vault coin its mempool transaction spends
+    // (finding (50): a watcher pre-builds and signs the cancel as soon as the intent appears).
+    // A mempool intent counts as confirming in the next block, as AcceptToMemoryPool and the
+    // mempool re-check treat it (I-2 with coinHeight = tip+1), so the cancel may be its child.
+    CScript origin;
+    int64_t coinHeight;
+    const bool confirmed = h >= 0;
+    if (confirmed) {
+        auto rec = GetTemplateOut(*g_vaultdb, op);
+        if (!rec || rec->origin.empty()) throw JSONRPCError(RPC_INTERNAL_ERROR, "the intent's originating vault script is missing from the vault database");
+        origin = rec->origin;
+        coinHeight = rec->height;
+    } else {
+        CTransaction parent;
+        if (!mempool.lookup(op.hash, parent)) throw JSONRPCError(RPC_INVALID_PARAMETER, "not an unspent intent output");
+        for (const CTxIn& in : parent.vin) {
+            CTxOut vcoin;
+            int vh;
+            VaultParams vp;
+            if (GetCoin(in.prevout, vcoin, vh) && ParseVault(vcoin.scriptPubKey, vp) && ScriptHash256(vcoin.scriptPubKey) == ip.vaultHash) {
+                origin = vcoin.scriptPubKey;
+                break;
+            }
+        }
+        if (origin.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "the mempool intent's originating vault is not among its transaction's inputs");
+        coinHeight = NextHeight();
+    }
+    if (NextHeight() - coinHeight >= ip.delay) throw JSONRPCError(RPC_MISC_ERROR, strprintf("the intent matured at height %d; it can no longer be cancelled", coinHeight + ip.delay));
+    // Rebuilt byte-identical while the remembered build's fee inputs are unspent (sign once): the same
+    // transaction whether the intent was in the mempool or has confirmed since.
     CMutableTransaction mtx;
     bool reused = false;
     auto cached = g_cancelBuilds.find(op);
-    if (cached != g_cancelBuilds.end()) {
+    if (cached != g_cancelBuilds.end() && cached->second.vout.size() > 0 && cached->second.vout[0].scriptPubKey == origin) {
         reused = true;
         const CMutableTransaction& c = cached->second;
         for (size_t i = 1; i < c.vin.size() && reused; i++) {
@@ -1431,7 +1461,7 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     if (!reused) {
         mtx = NewTx();
         mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
-        mtx.vout.push_back(CTxOut(coin.nValue, rec->origin));
+        mtx.vout.push_back(CTxOut(coin.nValue, origin));
         Fund(mtx, coin.nValue);
         g_cancelBuilds[op] = mtx;
     }
@@ -1440,7 +1470,8 @@ UniValue vault_buildcancel(const UniValue& params, bool fHelp)
     o.pushKV("hex", EncodeHexTx(CTransaction(mtx)));
     o.pushKV("required", k ? *k : 0);
     o.pushKV("cancelsetid", ip.cancelSetId.GetHex());
-    o.pushKV("deadline", rec->height + ip.delay - 1);
+    o.pushKV("deadline", coinHeight + ip.delay - 1);
+    o.pushKV("intentconfirmed", confirmed);
     return o;
 }
 
