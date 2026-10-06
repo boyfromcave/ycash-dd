@@ -142,7 +142,7 @@ BOOST_AUTO_TEST_CASE(roundtrip_all_types)
         BOOST_CHECK(IsActOutput(s));
         Act b;
         auto err = DecodeAct(s, b);
-        BOOST_CHECK_MESSAGE(!err, err ? *err : "");
+        BOOST_CHECK_MESSAGE(!err, (err ? *err : std::string()));
         BOOST_CHECK_EQUAL(b.type, a.type);
         BOOST_CHECK(EncodePayload(b) == P);
         BOOST_CHECK(b.sigs == a.sigs);
@@ -292,7 +292,8 @@ BOOST_AUTO_TEST_CASE(messages)
 {
     valtype P = EncodePayload(SampleActs()[1]);
     COutPoint op(U(9), 0x01020304);
-    valtype buf(std::string("YcashSetAct").begin(), std::string("YcashSetAct").end());
+    const std::string actTag = "YcashSetAct";
+    valtype buf(actTag.begin(), actTag.end());
     BOOST_CHECK_EQUAL(buf.size(), 11U);
     buf.insert(buf.end(), P.begin(), P.end());
     buf.insert(buf.end(), op.hash.begin(), op.hash.end());
@@ -364,6 +365,46 @@ BOOST_AUTO_TEST_CASE(recoverable_signatures)
     CKey u;
     u.MakeNewKey(false);
     BOOST_CHECK(!SignRecoverable(u, msg, sig));
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(vault_act_field_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(act_fields_valid)
+{
+    for (const Act& a : SampleActs()) {
+        Act b = a;
+        if (b.type == ACT_SET_EQUIVOCATION) {
+            b.equivocation.sigA[0] = 31;
+            b.equivocation.sigB[0] = 34;
+        }
+        BOOST_CHECK(ActFieldsValid(b));
+    }
+    Act j = SampleActs()[1];
+    j.join.bondLocktime = 500000000;
+    BOOST_CHECK(!ActFieldsValid(j));
+    j.join.bondLocktime = 499999999;
+    BOOST_CHECK(ActFieldsValid(j));
+    j.sigs = {valtype(65, 30)};
+    BOOST_CHECK(!ActFieldsValid(j));
+    j.sigs = {valtype(65, 33)};
+    BOOST_CHECK(ActFieldsValid(j));
+    Act r = SampleActs()[3];
+    r.remove.burn = 2;
+    BOOST_CHECK(!ActFieldsValid(r));
+    Act e = SampleActs()[4];
+    e.equivocation.sigA[0] = 31;
+    e.equivocation.sigB[0] = 31;
+    BOOST_CHECK(ActFieldsValid(e));
+    e.equivocation.roleA = 0;
+    BOOST_CHECK(!ActFieldsValid(e));
+    e.equivocation.roleA = 1;
+    e.equivocation.sigB[0] = 27;
+    BOOST_CHECK(!ActFieldsValid(e));
+    Act c = SampleActs()[0];
+    c.create.seats = 0;
+    BOOST_CHECK(!ActFieldsValid(c));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

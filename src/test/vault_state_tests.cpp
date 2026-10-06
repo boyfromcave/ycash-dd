@@ -60,6 +60,7 @@ SetCreateBody Params(bool open)
 struct Res {
     std::optional<std::string> e;
     Res(std::optional<std::string> e) : e(std::move(e)) {}
+    Res(std::nullopt_t) {}
     std::string operator*() const { return e ? *e : std::string("OK"); }
     explicit operator bool() const { return e.has_value(); }
     bool operator!() const { return !e.has_value(); }
@@ -235,7 +236,7 @@ COutPoint Lock(Chain& c, const VaultParams& v, CAmount value)
     m.vin.push_back(CTxIn(c.Fund(value + COIN), CScript(), 0xffffffff));
     m.vout.push_back(CTxOut(value, BuildVault(v)));
     auto err = c.Block1(m);
-    BOOST_REQUIRE_MESSAGE(!err, err ? *err : "");
+    BOOST_REQUIRE_MESSAGE(!err, (err ? *err : std::string()));
     return COutPoint(CTransaction(m).GetHash(), 0);
 }
 
@@ -255,7 +256,7 @@ SetId SetWithMembers(Chain& c, const std::vector<CKey>& members, SetCreateBody p
     SetId s = CreateSet(c, p);
     for (const CKey& k : members) {
         auto err = c.Block1(JoinTx(c, s, k, {}));
-        BOOST_REQUIRE_MESSAGE(!err, err ? *err : "");
+        BOOST_REQUIRE_MESSAGE(!err, (err ? *err : std::string()));
     }
     c.Empty(p.maturity);
     return s;
@@ -845,7 +846,7 @@ BOOST_AUTO_TEST_CASE(undo_roundtrip_byte_identical)
 BOOST_AUTO_TEST_CASE(db_connect_disconnect)
 {
     Chain c; // used for funding coins and tx building only
-    VaultDB db(GetTempPath() / "vault_db_test", 1 << 20, /*fMemory=*/true, /*fWipe=*/true);
+    VaultDB db(fs::temp_directory_path() / "vault_db_test", 1 << 20, /*fMemory=*/true, /*fWipe=*/true);
     uint256 tip;
     int64_t tipHeight;
     BOOST_CHECK(!db.GetTip(tip, tipHeight));
@@ -856,7 +857,7 @@ BOOST_AUTO_TEST_CASE(db_connect_disconnect)
         VaultState st(db);
         BlockUndo undo;
         auto err = st.ApplyBlock(block, h, c.coins, undo);
-        BOOST_REQUIRE_MESSAGE(!err, err ? *err : "");
+        BOOST_REQUIRE_MESSAGE(!err, (err ? *err : std::string()));
         BOOST_REQUIRE(db.ConnectBlock(hash, h, prev, st, undo));
         for (const auto& tx : block.vtx)
             for (size_t o = 0; o < tx.vout.size(); o++)

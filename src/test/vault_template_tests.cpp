@@ -175,7 +175,8 @@ BOOST_AUTO_TEST_CASE(vault_field_ranges)
     // Replace the owner key's header byte inside the script with 0x04: malformed.
     CScript good = BuildVault(SampleVault());
     valtype b(good.begin(), good.end());
-    valtype key(SampleVault().ownerKey.begin(), SampleVault().ownerKey.end());
+    const CPubKey ownerKey = SampleVault().ownerKey;
+    valtype key(ownerKey.begin(), ownerKey.end());
     auto it = std::search(b.begin(), b.end(), key.begin(), key.end());
     BOOST_REQUIRE(it != b.end());
     *it = 0x04;
@@ -260,7 +261,8 @@ BOOST_AUTO_TEST_CASE(intent_for_vault)
     BOOST_CHECK(i.recipientHash == ScriptHash256(recipient));
     BOOST_CHECK(i.setId == v.setId && i.cancelSetId == v.cancelSetId && i.delay == v.delay && i.ownerKey == v.ownerKey);
     // SHA256 single, of the raw script bytes: SHA256("") check.
-    BOOST_CHECK_EQUAL(HexStr(ScriptHash256(CScript()).begin(), ScriptHash256(CScript()).end()),
+    const uint256 empty = ScriptHash256(CScript());
+    BOOST_CHECK_EQUAL(HexStr(empty.begin(), empty.end()),
                       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 }
 

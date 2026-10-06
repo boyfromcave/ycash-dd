@@ -45,7 +45,8 @@ JSON_TEST_FILES = \
   test/data/merkle_commitments_sapling.json \
   test/data/sapling_key_components.json \
   test/data/yellowback_golden.json \
-  test/data/yellowback_attest_vectors.json
+  test/data/yellowback_attest_vectors.json \
+  test/data/vault_vectors.json
 
 RAW_TEST_FILES = test/data/alertTests.raw
 
@@ -116,6 +117,7 @@ BITCOIN_TESTS =\
   test/vault_act_tests.cpp \
   test/vault_state_tests.cpp \
   test/vault_template_tests.cpp \
+  test/vault_vectors_tests.cpp \
   test/sha256compress_tests.cpp \
   test/yellowback_address_tests.cpp \
   test/yellowback_attest_tests.cpp \
