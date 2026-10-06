@@ -1854,8 +1854,15 @@ bool AcceptToMemoryPool(
         PrecomputedTransactionData txdata(tx);
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
-        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        // A template input's script reads the set state at this node's tip, which the relaying
+        // peer's tip need not share: its failure is no proof of misbehaviour (DoS 0).
+        const bool fVaultTemplateInput = vaultFlags && vault::HasTemplateInput(tx, view);
+        CValidationState vaultScriptState;
+        CValidationState& scriptState = fVaultTemplateInput ? vaultScriptState : state;
+        if (!ContextualCheckInputs(tx, scriptState, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
+            if (fVaultTemplateInput)
+                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
             return error("AcceptToMemoryPool: ConnectInputs failed %s", hash.ToString());
         }
 
@@ -1868,8 +1875,10 @@ bool AcceptToMemoryPool(
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
+        if (!ContextualCheckInputs(tx, scriptState, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
+            if (fVaultTemplateInput)
+                state.DoS(0, false, vaultScriptState.GetRejectCode(), vaultScriptState.GetRejectReason());
             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
         }
 

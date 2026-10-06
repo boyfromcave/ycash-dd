@@ -62,15 +62,19 @@ private:
  *  height cannot be found. */
 bool CoinsFromUndo(const CBlock& block, const CBlockUndo& undo, int64_t height, const KVReader& base, MapCoinAccessor& out);
 
+/** Does `tx` spend a V- or I-shaped coin (inputs read from `view`)? */
+bool HasTemplateInput(const CTransaction& tx, const CCoinsViewCache& view);
+
 /** Does `tx` touch the primitive: an act or a V/I-shaped output, an input spending a V/I-shaped
  *  coin, or an input spending an indexed member bond? Inputs are read from `view`. */
 bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
 
 /** After a tip change (ConnectTip, DisconnectTip): re-run CheckTx for `nextHeight` on every
- *  mempool transaction that touches the primitive and evict failures (set state, I-2 age and
- *  dormancy change with height). When a reorg has just dropped `nextHeight` below activation,
- *  evicts every transaction that spends or creates a template output; otherwise a no-op
- *  before activation. */
+ *  mempool transaction that touches the primitive, and the scripts of its template inputs
+ *  against the new snapshot, and evict failures (set state, I-2 age, membership and dormancy
+ *  change with height and with the acts just connected or disconnected). When a reorg has
+ *  just dropped `nextHeight` below activation, evicts every transaction that spends or
+ *  creates a template output; otherwise a no-op before activation. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
 
 /** Start-up reconciliation (U-18): disconnect the database back to chainActive using its own

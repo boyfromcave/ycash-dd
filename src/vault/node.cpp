@@ -10,11 +10,15 @@
 #include "consensus/upgrades.h"
 #include "hash.h"
 #include "main.h"
+#include "policy/policy.h"
 #include "primitives/block.h"
+#include "script/interpreter.h"
+#include "script/standard.h"
 #include "txmempool.h"
 #include "undo.h"
 #include "util.h"
 #include "vault/act.h"
+#include "vault/checker.h"
 #include "vault/template.h"
 
 #include <set>
@@ -84,6 +88,20 @@ bool CoinsFromUndo(const CBlock& block, const CBlockUndo& undo, int64_t height, 
     return true;
 }
 
+bool HasTemplateInput(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    if (tx.IsCoinBase()) return false;
+    for (const CTxIn& in : tx.vin) {
+        const CCoins* coins = view.AccessCoins(in.prevout.hash);
+        if (!coins || !coins->IsAvailable(in.prevout.n)) continue;
+        const CScript& spk = coins->vout[in.prevout.n].scriptPubKey;
+        VaultParams vp;
+        IntentParams ip;
+        if (MatchVault(spk, vp) != Shape::NONE || MatchIntent(spk, ip) != Shape::NONE) return true;
+    }
+    return false;
+}
+
 bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view)
 {
     for (const CTxOut& o : tx.vout) {
@@ -131,6 +149,33 @@ bool TouchesTemplate(const CTransaction& tx, const CCoinsViewCache& view)
     return false;
 }
 
+/** Re-run the script of every template input of `tx` at `height` against `snapshot`:
+ *  OP_CHECKSETSIG (current members) and OP_CHECKSETDORMANT (dormancy, wind-down) read set
+ *  state, which a tip change moves. */
+std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const CCoinsViewCache& view, int height,
+                                                  const std::shared_ptr<const SetSnapshot>& snapshot, const Consensus::Params& params)
+{
+    if (tx.IsCoinBase()) return std::nullopt;
+    std::optional<PrecomputedTransactionData> txdata;
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(height, params);
+    const uint32_t branch = CurrentEpochBranchId(height, params);
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
+        if (!coins || !coins->IsAvailable(tx.vin[i].prevout.n)) continue;
+        const CTxOut& prev = coins->vout[tx.vin[i].prevout.n];
+        VaultParams vp;
+        IntentParams ip;
+        if (MatchVault(prev.scriptPubKey, vp) == Shape::NONE && MatchIntent(prev.scriptPubKey, ip) == Shape::NONE) continue;
+        if (!txdata) txdata.emplace(tx);
+        ScriptError err = SCRIPT_ERR_OK;
+        if (!VerifyScript(tx.vin[i].scriptSig, prev.scriptPubKey, flags,
+                          SetSigChecker(&tx, i, prev.nValue, false, *txdata, snapshot, height), branch, &err)) {
+            return strprintf("template input %u: %s", i, ScriptErrorString(err));
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params)
@@ -159,7 +204,9 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
             continue;
         }
         if (!IsVaultRelevant(tx, view)) continue;
-        if (auto why = CheckTx(tx, coins, nextHeight, *snapshot)) {
+        std::optional<std::string> why = CheckTx(tx, coins, nextHeight, *snapshot);
+        if (!why) why = RecheckTemplateScripts(tx, view, nextHeight, snapshot, params);
+        if (why) {
             LogPrint("vault", "vault: dropping %s from the mempool at height %d: %s\n", tx.GetHash().ToString(), nextHeight, *why);
             failing.push_back(tx);
         }
