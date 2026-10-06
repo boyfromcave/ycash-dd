@@ -715,6 +715,32 @@ class YellowbackTestFramework(BitcoinTestFramework):
         p.wait()
         self.nodes[i] = None
 
+    def restart_quiet(self, i, extra=None):
+        """``restart`` with the node's stderr in ``node<i>/stderr.txt``: for a node expected to stop
+        itself (AbortNode writes its "fatal internal error" to stderr, and rpc-tests.py fails any
+        script whose stderr is not empty)."""
+        if self.nodes[i] is not None:
+            stop_node(self.nodes[i], i)
+        err = open(os.path.join(self.options.tmpdir, 'node%d' % i, 'stderr.txt'), 'w')
+        self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i, extra),
+                                   binary=self.node_binaries()[i], stderr=err)
+        if i in POOLS:
+            self.import_pool_keys(self.nodes)
+        if self.mock_time is not None:
+            self.nodes[i].setmocktime(self.mock_time)
+        self.reconnect(i)
+
+    def wait_stopped(self, i, timeout=60):
+        """Wait for node ``i`` to exit on its own (an AbortNode), reap it; the proxy becomes None."""
+        p = bitcoind_processes[i]
+        deadline = time.time() + timeout
+        while p.poll() is None:
+            if time.time() > deadline:
+                raise AssertionError('node %d did not stop within %ds' % (i, timeout))
+            time.sleep(0.25)
+        bitcoind_processes.pop(i)
+        self.nodes[i] = None
+
     def restart(self, i, extra=None, timewait=None):
         """Stop (if running) and restart node ``i`` with its role arguments plus ``extra``, then
         reconnect its edges of the current topology."""
@@ -777,10 +803,8 @@ def assert_best_hash(nodes, label=''):
 
 
 def assert_rejected(node, blockhash):
-    """The node rejected ``blockhash`` under BLK-1: it counts in ``rejectedBlocks`` and sits off
-    the active chain (``confirmations == -1``)."""
-    info = node.yed_getinfo()
-    assert_greater_than(info['rejectedBlocks'], 0)
+    """The node rejected ``blockhash`` (U-21: an invalid block, DoS 100): it sits off the active
+    chain (``confirmations == -1``). ``rejectedBlocks`` left with the enforcement machinery."""
     assert_equal(node.getblock(blockhash)['confirmations'], -1)
 
 
@@ -1173,7 +1197,7 @@ def wait_for_rejection(nodes, blockhash, timeout=30):
     for node in nodes:
         while True:
             try:
-                if node.getblock(blockhash)['confirmations'] == -1 and node.yed_getinfo()['rejectedBlocks'] > 0:
+                if node.getblock(blockhash)['confirmations'] == -1:
                     break
             except Exception:
                 pass
