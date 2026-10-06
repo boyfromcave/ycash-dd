@@ -9,10 +9,15 @@ medians appear as the windows fill, activation, reorgs across a tag change and a
 window's fill bound, the REG-4 judgement undone by a reorg, restart, -reindex-yellowback,
 -reindex, -prune refused, crash recovery with an unflushed chainstate (and the wipe-and-rebuild
 fallback beyond UNDO_KEEP), the first Python-built owner-path redemption confirmed through
-sendrawtransaction, a rejection that survives kill -9 (the kill switch's two branches), a fresh
-node syncing across an accepted rule-breaking block (BLK-2 clause 3), the start height above the
-tip, the contiguous history, a loud parameter mismatch, an unhealthy node across a reorg,
-verifychain at runtime, and yed_getblockverdict's precondition.
+sendrawtransaction, a rejection that survives kill -9, a fresh node syncing the valid chain, the
+retired -yellowbackstartheight refused at init, the contiguous history, a loud parameter mismatch,
+an index storage fault stopping the node, verifychain at runtime, and yed_getblockverdict's
+precondition.
+
+The vault upgrade (upgrade plan §6, U-21/U-22): Yellowback is live from the upgrade's activation
+height (= startHeight), a rule-breaking block is invalid (DoS 100: the stock node that mined one is
+disconnected and has to be brought back), and the kill switch, the valve, catch-up suppression
+and -yellowbackstartheight are gone.
 
 Raw builders only (N26): the vaults come from build_mint_tx and the spends from
 build_vault_spend_raw.
@@ -47,9 +52,7 @@ from test_framework.yellowback_util import (
     STOCK,
     UNDO_KEEP,
     USER,
-    VALVE_BLOCKS,
     YellowbackTestFramework,
-    assert_banscore_zero,
     assert_best_hash,
     assert_same_statehash,
     debug_log_contains,
@@ -90,7 +93,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         print('initial synchronous index state')
         for node in self.enforcing_nodes():
             info = wait_yed_healthy(node)
-            assert_equal(info['rpcversion'], 4)
+            assert_equal(info['rpcversion'], 5)
             assert_equal(info['network'], 'regtest')
             assert_equal(info['height'], node.getblockcount())
             assert_equal(info['startHeight'], START_HEIGHT)
@@ -102,7 +105,6 @@ class YellowbackIndexTest(YellowbackTestFramework):
             result = self.quote(pool, '2.00')
             assert_equal(result['priceMicroUsd'], 2_000_000)
             assert_equal(result['nextTag']['kind'], 'quote')
-            assert_equal(result['nextTag']['signal'], True)
         self.mine_round_robin(POOLS, MIN_FILL[0] - 1)
         assert_equal(nodes[0].yed_getprice()['pFast'], None)
         self.mine_round_robin(POOLS, 1)
@@ -140,12 +142,12 @@ class YellowbackIndexTest(YellowbackTestFramework):
         self.sync_all(blocks_only=True)
 
         # ------------------------------------------------------------------ activation
-        print('activation after the full signalling window and delay')
+        print('the vault upgrade is active (U-22: no signalling window); minting opens once the windows fill')
         self.mine_round_robin(POOLS, ACTIVATION_BLOCKS)
         for node in self.enforcing_nodes():
             activation = node.yed_getactivation()
-            assert_equal(activation['status'], 'active')
-            assert_equal(activation['signalCount'], 64)
+            assert_equal((activation['status'], activation['activationHeight']), ('active', START_HEIGHT))
+            assert 'signalCount' not in activation
             assert_equal(node.yed_getstats()['mintingAllowed'], True)
         self.checkpoint('after activation')
 
@@ -233,26 +235,20 @@ class YellowbackIndexTest(YellowbackTestFramework):
         stop_node(nodes[OBSERVER], OBSERVER)
         nodes[OBSERVER] = None
         assert_start_raises_init_error(OBSERVER, tmpdir, self.node_args(OBSERVER, ['-prune=550']),
-                                       '-yellowback is incompatible with -prune')
+                                       'Yellowback is live on this network and incompatible with -prune')
         self.restart(OBSERVER)
         self.sync_all(blocks_only=True)
 
-        print('index_start_height_above_tip and params_mismatch_fails_loudly')
-        for i in ENFORCING + [OBSERVER]:
-            self.restart(i, ['-yellowbackstartheight=50'])
-        for i in ENFORCING:
-            wait_yed_healthy(nodes[i], timeout=120)
-        rows = nodes[2].yed_gethistory(1, 60)
-        assert_equal([r['height'] for r in rows], list(range(50, 61)))
-        p49 = nodes[2].yed_getprice(49)
-        assert_equal((p49['pFast'], p49['pMid'], p49['pSlow'], p49['pMint'], p49['pClaim']), (None,) * 5)
-        assert_equal(nodes[2].yed_getinfo()['startHeight'], 50)
-        assert_same_statehash(self.enforcing_nodes())
-        for i in ENFORCING + [OBSERVER]:
-            self.restart(i)
-        for i in ENFORCING:
-            wait_yed_healthy(nodes[i], timeout=120)
-        assert_equal(self.statehash(2), before)
+        print('startheight_retired and params_mismatch_fails_loudly')
+        # U-22: the start height is the upgrade's activation height; -yellowbackstartheight is refused
+        stop_node(nodes[4], 4)
+        nodes[4] = None
+        assert_start_raises_init_error(4, tmpdir, self.node_args(4, ['-yellowbackstartheight=50']),
+                                       '-yellowbackstartheight is retired')
+        self.restart(4)
+        wait_yed_healthy(nodes[4], timeout=120)
+        assert_equal(nodes[2].yed_getinfo()['startHeight'], START_HEIGHT)
+        assert_equal(self.statehash(4), before)
         self.restart(4, ['-yellowbacksigmaref=1'])
         wait_yed_healthy(nodes[4], timeout=120)
         assert_equal(nodes[4].yed_getinfo()['params']['sigmaRefBps'], 1)
@@ -299,78 +295,51 @@ class YellowbackIndexTest(YellowbackTestFramework):
         print('rejected_survives_kill9: node 1 mines a malformed spend; kill -9 right after the rejection')
         rejected, bad_txid = mine_rejected_block(self, user, vault_b)
         wait_for_rejection(self.enforcing_nodes(), rejected)
-        assert_banscore_zero(nodes)
         verdict = nodes[2].yed_getblockverdict(rejected)
-        assert_equal(verdict['blockInvalid'], True)
+        assert_equal((verdict['blockInvalid'], verdict['verdict']), (True, 'vault-spend-malformed'))
         assert verdict['reason'].startswith('vault-spend-malformed:' + bad_txid), verdict
+        assert debug_log_contains(tmpdir, 2, 'BAN THRESHOLD EXCEEDED')            # DoS 100 (a local peer: disconnected)
         self.kill9(2)
-        self.restart(2, ['-yellowbackenforce=0'])
+        self.restart(2)
         wait_yed_healthy(nodes[2], timeout=120)
-        sync_blocks([nodes[STOCK], nodes[2]], timeout=120)
-        assert_equal(nodes[2].getbestblockhash(), nodes[STOCK].getbestblockhash())    # the reorg happened (N8)
-        assert_equal(nodes[2].getblock(rejected)['confirmations'], 1)
-        assert_equal(nodes[2].yed_getinfo()['rejectedBlocks'], 0)
-        assert_equal(nodes[2].yed_getinfo()['enforcing'], False)
-        # killswitch_rejected_hash_not_in_mapblockindex: the block index was never flushed after the
-        # rejection, so the recorded hash is not in mapBlockIndex at start: skipped and cleared.
-        assert debug_log_contains(tmpdir, 2, 'is not in the block index; skipped'), 'expected the skipped branch of the kill switch'
-        assert_equal(user.yed_getvault(vault_b_txid)['status'], 'ACTIVE')                    # the enforcing nodes still refuse it
-        assert_equal(nodes[2].yed_getvault(vault_b_txid)['unbacked'], True)                  # node 2 recorded the sweep
-        print('the kill switch on cleanly stopped nodes: the rejected block is re-downloaded and accepted')
-        # Ycash's RewindBlockIndex erases every index entry without a cached branch id (set only by
-        # a successful ConnectBlock, main.cpp:3225) at start, so a rejected block is never in
-        # mapBlockIndex when the loop runs — the "skipped" branch — and the node rejoins by
-        # re-downloading it once the mark is gone (docs/mapping.md section 13.4).
-        for i in (0, 3, 4):
-            self.restart(i, ['-yellowbackenforce=0'])
-            wait_yed_healthy(nodes[i], timeout=120)
+        assert nodes[2].getbestblockhash() != nodes[STOCK].getbestblockhash()
+        assert_equal(nodes[2].yed_getvault(vault_b_txid)['status'], 'ACTIVE')
+        assert_equal(self.statehash(2), self.statehash(3))
+        print('  the stock node is brought back: invalidateblock, a restart (its mempool goes), the valid chain wins')
+        for k in range(2):                             # the overlay moves on without node 1 (it is disconnected)
+            self.nodes[POOLS[k]].generate(1)
+            sync_blocks([self.nodes[i] for i in ENFORCING])
+        nodes[STOCK].invalidateblock(rejected)
+        self.restart(STOCK)                                   # reconnects its edges (the ban disconnected them)
         self.sync_all(blocks_only=True)
         assert_best_hash(nodes)
-        assert debug_log_contains(tmpdir, 3, 'is not in the block index; skipped')
-        for i in ENFORCING:
-            assert_equal(nodes[i].yed_getinfo()['rejectedBlocks'], 0)
         assert_same_statehash(self.enforcing_nodes() + [nodes[OBSERVER]])
 
-        print('ibd_across_accepted_invalid: a fresh enforcing node syncs across the accepted block (BLK-2 clause 3)')
-        nodes[STOCK].generate(VALVE_BLOCKS + 1)
-        self.sync_all(blocks_only=True)
+        print('fresh_node_syncs_the_valid_chain: a fresh Yellowback node never takes the rejected block')
         initialize_datadir(tmpdir, 6)
         nodes.append(start_node(6, tmpdir, yellowback_node_args()))
         connect_nodes_bi(nodes, 6, STOCK)
         sync_blocks([nodes[STOCK], nodes[6]], timeout=180)
-        info = wait_yed_healthy(nodes[6], timeout=120)
-        assert_equal(info['rejectedBlocks'], 0)
-        assert_equal(info['suppressedBlocks'], 1)
-        assert_equal(info['valveTripped'], False)
-        assert_equal(info['enforcing'], True)
-        assert debug_log_contains(tmpdir, 6, 'catch-up: accepted rule-breaking block')
+        wait_yed_healthy(nodes[6], timeout=120)
         assert_equal(self.statehash(6), self.statehash(2))
 
         # ------------------------------------------------------------------ unhealthy across a reorg
-        print('blk3_unhealthy_across_reorg: an unhealthy node follows a reorg without applying')
-        self.restart(4, ['-yellowbacktestfault=storage:commit'])
-        self.mine(POOLS[0])
-        info = nodes[4].yed_getinfo()
-        assert_equal(info['healthy'], False)
-        assert_equal(info['enforcing'], False)
-        stale = nodes[4].yed_getstatehash()['statehash'] if False else info['height']
-        self.split_network()
-        nodes[2].generate(1)
-        self.sync_all(blocks_only=True)
-        nodes[STOCK].generate(2)
-        self.join_network()
-        assert_best_hash(nodes)
-        assert_equal(nodes[4].yed_getinfo()['healthy'], False)
-        assert_equal(nodes[4].yed_getinfo()['height'], stale)
+        print('unhealthy_stops_the_node: an index storage fault stops node 4 (AbortNode); -reindex-yellowback recovers')
+        self.restart_quiet(4, ['-yellowbacktestfault=storage:commit'])
+        nodes[POOLS[0]].generate(1)
+        self.wait_stopped(4)
+        assert debug_log_contains(tmpdir, 4, 'Failed to write to the Yellowback index')
         self.restart(4, ['-reindex-yellowback'])
         wait_yed_healthy(nodes[4], timeout=120)
+        self.sync_all(blocks_only=True)
+        assert_best_hash(nodes)
         assert_equal(self.statehash(4), self.statehash(2))
 
-        print('killswitch_fresh_datadir: node 2 wiped and started with -yellowbackenforce=0 (K21)')
+        print('fresh_datadir: node 2 wiped and resynced (K21 without the kill switch)')
         stop_node(nodes[2], 2)
         nodes[2] = None
         shutil.rmtree(os.path.join(tmpdir, 'node2', 'regtest'))
-        self.restart(2, ['-yellowbackenforce=0'])
+        self.restart(2)
         sync_blocks([nodes[STOCK], nodes[2]], timeout=300)
         wait_yed_healthy(nodes[2], timeout=120)
         assert_equal(self.statehash(2), self.statehash(3))

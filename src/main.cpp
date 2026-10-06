@@ -1882,8 +1882,12 @@ bool AcceptToMemoryPool(
             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
         }
 
-        if (yellowback::g_yellowback && !yellowback::g_yellowback->MempoolCheck(tx))
-            return state.DoS(0, false, REJECT_NONSTANDARD, "yellowback-vault-spend");
+        // The YED module's validity at the next block (upgrade plan U-21): state-dependent (the module's
+        // state moves with the tip, which the relaying peer need not share), so DoS 0 (cf. finding 25).
+        if (yellowback::g_yellowback) {
+            if (auto ybBad = yellowback::g_yellowback->MempoolCheckReason(tx))
+                return state.DoS(0, error("AcceptToMemoryPool: yellowback: %s: %s", hash.ToString(), ybBad->c_str()), REJECT_INVALID, "bad-yellowback-" + *ybBad);
+        }
 
         {
             // Store transaction in memory
@@ -2940,7 +2944,10 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
             return DISCONNECT_FAILED;
         }
     }
-    if (updateIndices && yellowback::g_yellowback) yellowback::g_yellowback->UndoDisconnect(pindex);
+    if (updateIndices && yellowback::g_yellowback && !yellowback::g_yellowback->UndoDisconnect(pindex)) {
+        AbortNode(state, "Failed to disconnect the block from the Yellowback index");
+        return DISCONNECT_FAILED;
+    }
     // UPGRADE_VAULT (plan U-18): undo the block's set-state changes; the state before the
     // activation block is empty, so disconnecting that block empties the database.
     if (updateIndices && vault::g_vaultdb &&
@@ -3393,8 +3400,12 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             return state.DoS(100, error("ConnectBlock(): vault: %s", vaultBad->c_str()), REJECT_INVALID, *vaultBad);
     }
 
+    // The YED module (upgrade plan U-21): its block verdict is a consensus rejection wherever UPGRADE_VAULT
+    // is active, with no node-local conjunct; an index that cannot evaluate the block stops the node.
     if (yellowback::g_yellowback) {
-        if (auto ybBad = yellowback::g_yellowback->CheckConnect(block, pindex, fJustCheck)) return state.DoS(0, error("ConnectBlock(): %s", ybBad->c_str()), REJECT_INVALID, "yellowback-vault-spend");
+        const auto yb = yellowback::g_yellowback->CheckConnect(block, pindex, fJustCheck);
+        if (yb.failure) return AbortNode(state, "Yellowback index failure: " + *yb.failure);
+        if (yb.invalid) return state.DoS(100, error("ConnectBlock(): %s", yb.reason.c_str()), REJECT_INVALID, *yb.invalid);
     }
     if (fJustCheck)
         return true;
@@ -3471,7 +3482,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     // add this block to the view's block chain
     view.SetBestBlock(pindex->GetBlockHash());
-    if (yellowback::g_yellowback) yellowback::g_yellowback->CommitConnect(block, pindex);
+    if (yellowback::g_yellowback && !yellowback::g_yellowback->CommitConnect(block, pindex))
+        return AbortNode(state, "Failed to write to the Yellowback index");
     if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo))
         return AbortNode(state, "Failed to write to the vault database");
 
@@ -4766,8 +4778,6 @@ static bool AcceptBlockHeader(const CBlockHeader& block, CValidationState& state
     // Get prev block index
     CBlockIndex* pindexPrev = NULL;
     if (hash != chainparams.GetConsensus().hashGenesisBlock) {
-        if (yellowback::g_yellowback && yellowback::g_yellowback->NoteHeaderOnRejectedChain(block))
-            return state.DoS(0, error("%s: descends from a Yellowback-rejected block", __func__), REJECT_INVALID, "bad-prevblk-yellowback");
         BlockMap::iterator mi = mapBlockIndex.find(block.hashPrevBlock);
         if (mi == mapBlockIndex.end())
             return state.DoS(10, error("%s: prev block not found", __func__), 0, "bad-prevblk");

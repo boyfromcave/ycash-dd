@@ -215,6 +215,7 @@ BITCOIN_CORE_H = \
   yellowback/db.h \
   yellowback/index.h \
   yellowback/math.h \
+  yellowback/module.h \
   yellowback/params.h \
   yellowback/policy.h \
   yellowback/payload.h \
@@ -483,6 +484,7 @@ libbitcoin_common_a_SOURCES = \
   yellowback/attest.cpp \
   yellowback/bundle.cpp \
   yellowback/coinselect.cpp \
+  yellowback/module.cpp \
   yellowback/params.cpp \
   yellowback/payload.cpp \
   yellowback/script.cpp \
