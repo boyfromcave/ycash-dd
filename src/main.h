@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <exception>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdint.h>
@@ -50,8 +51,10 @@ class CBlockTreeDB;
 class CBloomFilter;
 class CChainParams;
 class CInv;
+class CBlockUndo;
 class CScriptCheck;
 class CValidationInterface;
+namespace vault { class SetSnapshot; }
 class CValidationState;
 class PrecomputedTransactionData;
 
@@ -382,7 +385,8 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& ma
 bool ContextualCheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &view, bool fScriptChecks,
                            unsigned int flags, bool cacheStore, PrecomputedTransactionData& txdata,
                            const Consensus::Params& consensusParams, uint32_t consensusBranchId,
-                           std::vector<CScriptCheck> *pvChecks = NULL);
+                           std::vector<CScriptCheck> *pvChecks = NULL,
+                           std::shared_ptr<const vault::SetSnapshot> vaultSnapshot = nullptr);
 
 /** Check a transaction contextually against a set of consensus rules */
 bool ContextualCheckTransaction(const CTransaction& tx, CValidationState &state,
@@ -473,6 +477,9 @@ bool ContextualCheckSequenceLocks(const CTransaction& tx, const CCoinsViewCache&
  */
 bool CheckSequenceLocks(const CTransaction& tx);
 
+/** Read the undo data of a connected block (the vault database's start-up replay). */
+bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex* pindex);
+
 /**
  * Closure representing one script verification
  * Note that this stores references to the spending transaction
@@ -489,6 +496,10 @@ private:
     uint32_t consensusBranchId;
     ScriptError error;
     PrecomputedTransactionData *txdata;
+    // UPGRADE_VAULT (plan §15.2, U-17): the set state OP_CHECKSETSIG / OP_CHECKSETDORMANT read
+    // when nFlags has SCRIPT_VERIFY_VAULT, and the spending height they are evaluated at.
+    std::shared_ptr<const vault::SetSnapshot> vaultSnapshot;
+    int64_t vaultHeight = 0;
 
 public:
     CScriptCheck(): amount(0), ptxTo(0), nIn(0), nFlags(0), cacheStore(false), consensusBranchId(0), error(SCRIPT_ERR_UNKNOWN_ERROR) {}
@@ -508,6 +519,14 @@ public:
         std::swap(consensusBranchId, check.consensusBranchId);
         std::swap(error, check.error);
         std::swap(txdata, check.txdata);
+        std::swap(vaultSnapshot, check.vaultSnapshot);
+        std::swap(vaultHeight, check.vaultHeight);
+    }
+
+    void SetVault(std::shared_ptr<const vault::SetSnapshot> snapshot, int64_t height)
+    {
+        vaultSnapshot = std::move(snapshot);
+        vaultHeight = height;
     }
 
     ScriptError GetScriptError() const { return error; }

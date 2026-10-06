@@ -1,4 +1,5 @@
 // Copyright (c) 2011-2013 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -16,6 +17,7 @@
 #include "fs.h"
 #include "key.h"
 #include "main.h"
+#include "vault/node.h"
 #include "miner.h"
 #include "pubkey.h"
 #include "random.h"
@@ -104,6 +106,7 @@ TestingSetup::TestingSetup(const std::string& chainName) : JoinSplitTestingSetup
         pblocktree = new CBlockTreeDB(1 << 20, true);
         pcoinsdbview = new CCoinsViewDB(1 << 23, true);
         pcoinsTip = new CCoinsViewCache(pcoinsdbview);
+        vault::g_vaultdb = new vault::VaultDB(pathTemp / "vaults", 1 << 20, true);
         InitBlockIndex(chainparams);
         nScriptCheckThreads = 3;
         for (int i=0; i < nScriptCheckThreads-1; i++)
@@ -117,6 +120,8 @@ TestingSetup::~TestingSetup()
         threadGroup.interrupt_all();
         threadGroup.join_all();
         UnloadBlockIndex();
+        delete vault::g_vaultdb;
+        vault::g_vaultdb = nullptr;
         delete pcoinsTip;
         delete pcoinsdbview;
         delete pblocktree;
