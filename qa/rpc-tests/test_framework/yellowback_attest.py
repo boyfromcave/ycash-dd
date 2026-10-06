@@ -14,7 +14,7 @@ What lives here (and nowhere else in Python):
 - the v3 payload encoders (section 3.3), the bundle codec (section 8.2 of the proposal) and
   the carrier / bond scripts (section 3.4);
 - the raw transaction builders: ``build_register_tx``, ``build_carrier_tx``, ``spend_carrier``,
-  ``build_mint_tx_v3``, ``post_notice_raw``, ``equivocation_raw``, ``revive_raw``;
+  ``build_mint_tx_v3``, ``post_notice_raw``, ``equivocation_raw``, ``legacy_revive_raw``;
 - the second implementation of W9 selection (``select_attestors``), ``bond_weight``,
   ``weighted_quantile``, ``bundle_stat``;
 - the node drivers ``feed``, ``feed_all``, ``build_bundle``, ``register_and_arm``,
@@ -49,7 +49,7 @@ from .yellowback_util import (
     ATTEST_ARM_DELAY, ATTEST_ARM_MIN, BOND_MATURITY, BOND_MIN_LOCK, BOND_MIN_ZAT,
     BUNDLE_MAX, CARRIER_VALUE, K_SLACK, M_SELECT, N_SLOTS, Q_HIGH_BPS, Q_LOW_BPS, REF_LAG, REF_WINDOW,
     SIGNING_BRANCH_ID, TOKEN_VALUE, YELLOWBACK_FEE, ATTESTOR_A, ATTESTOR_B, USER, POOLS,
-    FEE_VOUT_NONE, GRACE, PAYLOAD_VERSION_V3, AGE_CAP, FOUNDING_WINDOW,
+    FEE_VOUT_NONE, PAYLOAD_VERSION_V3, AGE_CAP, FOUNDING_WINDOW,
 )
 
 __all__ = [
@@ -62,7 +62,7 @@ __all__ = [
     'encode_claim_notice', 'encode_equivocation', 'encode_revive', 'encode_bundle', 'decode_bundle',
     'outpoint_selector', 'select_attestors', 'bond_weight', 'weighted_quantile', 'bundle_stat',
     'build_register_tx', 'build_carrier_tx', 'spend_carrier', 'build_mint_tx_v3',
-    'post_notice_raw', 'equivocation_raw', 'revive_raw', 'withdraw_bond_raw', 'bond_secret_for',
+    'post_notice_raw', 'equivocation_raw', 'legacy_revive_raw', 'withdraw_bond_raw', 'bond_secret_for',
     'feed', 'feed_all', 'build_bundle', 'register_and_arm', 'assert_void_reason', 'hot_secret_for', 'send_and_lock',
     # A3: the wallet's two-step flow and the offline registry (stand-ins for the A2 node RPCs)
     'has_rpc', 'two_step', 'two_step_pending', 'wait_for_spender', 'wallet_mint', 'wallet_claim', 'wallet_notice',
