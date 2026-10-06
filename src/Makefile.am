@@ -224,6 +224,12 @@ BITCOIN_CORE_H = \
   yellowback/txbuilder.h \
   yellowback/view.h \
   yellowback/wallet.h \
+  vault/act.h \
+  vault/checker.h \
+  vault/db.h \
+  vault/module.h \
+  vault/state.h \
+  vault/template.h \
   serialize.h \
   spentindex.h \
   streams.h \
@@ -328,6 +334,8 @@ libbitcoin_server_a_SOURCES = \
   yellowback/index.cpp \
   yellowback/policy.cpp \
   rpc/yellowback.cpp \
+  vault/checker.cpp \
+  vault/db.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
@@ -478,6 +486,10 @@ libbitcoin_common_a_SOURCES = \
   yellowback/state.cpp \
   yellowback/tag.cpp \
   yellowback/view.cpp \
+  vault/act.cpp \
+  vault/module.cpp \
+  vault/state.cpp \
+  vault/template.cpp \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
