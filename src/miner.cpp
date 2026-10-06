@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -543,6 +544,13 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
             if (!view.HaveInputs(tx))
                 continue;
 
+            // BIP68 relative lock-times at nHeight (UPGRADE_VAULT, plan §15.2).
+            if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT)) {
+                CValidationState lockState;
+                if (!ContextualCheckSequenceLocks(tx, view, nHeight, lockState, false))
+                    continue;
+            }
+
             CAmount nTxFees = view.GetValueIn(tx)-tx.GetValueOut();
 
             nTxSigOps += GetP2SHSigOpCount(tx, view);
@@ -554,7 +562,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
             // create only contains transactions that are valid in new blocks.
             CValidationState state;
             PrecomputedTransactionData txdata(tx);
-            if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true, txdata, chainparams.GetConsensus(), consensusBranchId))
+            // UPGRADE_VAULT adds CSV and the set opcodes at nHeight (plan §15.1).
+            if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(nHeight, chainparams.GetConsensus()), true, txdata, chainparams.GetConsensus(), consensusBranchId))
                 continue;
 
             if (chainparams.ZIP209Enabled() && monitoring_pool_balances) {

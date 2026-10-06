@@ -119,6 +119,7 @@ BITCOIN_TESTS =\
   test/vault_template_tests.cpp \
   test/vault_vectors_tests.cpp \
   test/sha256compress_tests.cpp \
+  test/vault_script_tests.cpp \
   test/yellowback_address_tests.cpp \
   test/yellowback_attest_tests.cpp \
   test/yellowback_bundle_tests.cpp \

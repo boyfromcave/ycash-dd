@@ -1,6 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2015-2020 The Zcash Developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -135,6 +136,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_CANOPY].nActivationHeight = 1100006;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nProtocolVersion = 270015;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
+        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
@@ -393,6 +399,11 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nProtocolVersion = 270014;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): no height until the gate-passing release (P8). The protocol
+        // version is today's PROTOCOL_VERSION, so it gates no peer until P8 assigns one.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
 
 
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
@@ -598,6 +609,10 @@ public:
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nProtocolVersion = 270014;
         consensus.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        // Vault (plan §15.1): set by -nuparams=6d5b7a31:<height>.
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nProtocolVersion = 270013;
+        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
