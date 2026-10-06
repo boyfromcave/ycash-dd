@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2015-2020 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -773,6 +774,96 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
                              : GetTime();
 
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
+}
+
+unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params)
+{
+    if (!params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT))
+        return 0;
+    return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
+}
+
+std::optional<int> CalculateSequenceLocks(const CTransaction& tx, const std::vector<int>& prevHeights)
+{
+    assert(prevHeights.size() == tx.vin.size());
+
+    // Will be set to the equivalent height of the last block which, if
+    // included in the chain, would not satisfy every input's relative
+    // lock-time. -1 means no relative lock-time (Bitcoin's nMinHeight).
+    int nMinHeight = -1;
+
+    for (size_t txinIndex = 0; txinIndex < tx.vin.size(); txinIndex++) {
+        const CTxIn& txin = tx.vin[txinIndex];
+
+        // Sequence numbers with the most significant bit set are not
+        // treated as relative lock-times.
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) {
+            continue;
+        }
+
+        // Ycash enforces height-based relative locks only: a time-based
+        // one (BIP68's type flag) makes the transaction invalid.
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) {
+            return std::nullopt;
+        }
+
+        // nMinHeight is the last height that does not satisfy the lock:
+        // a coin at height H with a lock of n is spendable from H + n.
+        int nCoinHeight = prevHeights[txinIndex];
+        nMinHeight = std::max(nMinHeight, nCoinHeight + (int)(txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) - 1);
+    }
+
+    return nMinHeight;
+}
+
+bool EvaluateSequenceLocks(int nBlockHeight, int nMinHeight)
+{
+    return nMinHeight < nBlockHeight;
+}
+
+bool ContextualCheckSequenceLocks(const CTransaction& tx, const CCoinsViewCache& view, int nBlockHeight,
+                                  CValidationState& state, bool fMempool)
+{
+    std::vector<int> prevHeights(tx.vin.size());
+    for (size_t i = 0; i < tx.vin.size(); i++) {
+        const CCoins* coins = view.AccessCoins(tx.vin[i].prevout.hash);
+        assert(coins);
+        // A coin still in the mempool is assumed to confirm in the next block.
+        prevHeights[i] = (coins->nHeight == MEMPOOL_HEIGHT) ? nBlockHeight : coins->nHeight;
+    }
+
+    std::optional<int> nMinHeight = CalculateSequenceLocks(tx, prevHeights);
+    if (!nMinHeight) {
+        return state.DoS(fMempool ? 0 : 100, false, REJECT_INVALID, "bad-txns-vault-timelock");
+    }
+    if (!EvaluateSequenceLocks(nBlockHeight, *nMinHeight)) {
+        if (fMempool)
+            return state.DoS(0, false, REJECT_NONSTANDARD, "non-BIP68-final");
+        return state.DoS(100, false, REJECT_INVALID, "bad-txns-nonfinal");
+    }
+    return true;
+}
+
+bool CheckSequenceLocks(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(mempool.cs);
+
+    // As CheckFinalTx(): the next block is at chainActive.Height() + 1.
+    const int nBlockHeight = chainActive.Height() + 1;
+    if (!Params().GetConsensus().NetworkUpgradeActive(nBlockHeight, Consensus::UPGRADE_VAULT))
+        return true;
+    if (tx.IsCoinBase())
+        return true;
+
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    for (const CTxIn& txin : tx.vin) {
+        if (!view.HaveCoins(txin.prevout.hash))
+            return false;
+    }
+    CValidationState state;
+    return ContextualCheckSequenceLocks(tx, view, nBlockHeight, state, true);
 }
 
 unsigned int GetLegacySigOpCount(const CTransaction& tx)
@@ -1636,6 +1727,12 @@ bool AcceptToMemoryPool(
             return state.Invalid(false, rejectCode, rejectReason);
         }
 
+        // BIP68 (UPGRADE_VAULT, plan §15.2): only accept transactions whose relative
+        // lock-times the next block satisfies, with mempool parents at that height.
+        if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) &&
+            !ContextualCheckSequenceLocks(tx, view, nextBlockHeight, state, true))
+            return false;
+
         // Bring the best block into scope
         view.GetBestBlock();
 
@@ -1743,7 +1840,9 @@ bool AcceptToMemoryPool(
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
-        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, txdata, chainparams.GetConsensus(), consensusBranchId))
+        // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
+        const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
+        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId))
         {
             return error("AcceptToMemoryPool: ConnectInputs failed %s", hash.ToString());
         }
@@ -1757,7 +1856,7 @@ bool AcceptToMemoryPool(
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true, txdata, chainparams.GetConsensus(), consensusBranchId))
+        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId))
         {
             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
         }
@@ -2935,6 +3034,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     unsigned int flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
 
+    // UPGRADE_VAULT (plan §15.1-§15.2): CSV, the set opcodes, and BIP68 sequence locks.
+    const bool fVaultActive = chainparams.GetConsensus().NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_VAULT);
+    flags |= GetVaultScriptFlags(pindex->nHeight, chainparams.GetConsensus());
+
     // DERSIG (BIP66) is also always enforced, but does not have a flag.
 
     CBlockUndo blockundo;
@@ -3011,6 +3114,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                     "reason", rejectReason.c_str());
                 return state.DoS(100, false, rejectCode, rejectReason);
             }
+
+            // BIP68 relative lock-time, height-based (UPGRADE_VAULT, plan §15.2). Checked
+            // whether or not scripts are (fExpensiveChecks), as nLockTime finality is.
+            if (fVaultActive && !ContextualCheckSequenceLocks(tx, view, pindex->nHeight, state, false))
+                return error("ConnectBlock(): %s: %s", tx.GetHash().ToString(), state.GetRejectReason());
 
             // insightexplorer
             // https://github.com/bitpay/bitcoin/commit/017f548ea6d89423ef568117447e61dd5707ec42#diff-7ec3c68a81efff79b6ca22ac1f1eabbaR2597

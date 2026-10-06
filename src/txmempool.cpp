@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -303,11 +304,12 @@ void CTxMemPool::remove(const CTransaction &origTx, std::list<CTransaction>& rem
 void CTxMemPool::removeForReorg(const CCoinsViewCache *pcoins, unsigned int nMemPoolHeight, int flags)
 {
     // Remove transactions spending a coinbase which are now immature and no-longer-final transactions
+    // (nLockTime, and from UPGRADE_VAULT the BIP68 relative lock-times, plan §15.2)
     LOCK(cs);
     list<CTransaction> transactionsToRemove;
     for (indexed_transaction_set::const_iterator it = mapTx.begin(); it != mapTx.end(); it++) {
         const CTransaction& tx = it->GetTx();
-        if (!CheckFinalTx(tx, flags)) {
+        if (!CheckFinalTx(tx, flags) || !CheckSequenceLocks(tx)) {
             transactionsToRemove.push_back(tx);
         } else if (it->GetSpendsCoinbase()) {
             for (const CTxIn& txin : tx.vin) {
