@@ -575,6 +575,21 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
             if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(nHeight, chainparams.GetConsensus()), true, txdata, chainparams.GetConsensus(), consensusBranchId))
                 continue;
 
+            // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx
+            std::optional<vault::VaultState> vaultTrial;
+            if (vaultRunning) {
+                vaultTrial.emplace(*vaultRunning);
+                vault::ViewCoinAccessor vaultCoins(view, nHeight);
+                if (auto vaultBad = vaultTrial->ApplyTx(tx, nHeight, vaultCoins)) {
+                    LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", tx.GetHash().ToString(), vaultBad->c_str());
+                    continue;
+                }
+            }
+
+            // The YED module (upgrade plan U-21), after the primitive's trial: a kept candidate's effect joins the
+            // template overlay, so nothing but the turnstile may refuse it afterwards.
+            if (ybview && !yellowback::policy::FilterTemplate(*ybview, tx, nHeight)) continue;
+
             if (chainparams.ZIP209Enabled() && monitoring_pool_balances) {
                 // Does this transaction lead to a turnstile violation?
 
@@ -601,12 +616,10 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
                 saplingValue = saplingValueDummy;
             }
 
-            if (ybview && !yellowback::policy::FilterTemplate(*ybview, tx, nHeight)) continue;
-            if (vaultRunning) {
-                vault::ViewCoinAccessor vaultCoins(view, nHeight);
-                if (auto vaultBad = vaultRunning->ApplyTx(tx, nHeight, vaultCoins)) {
-                    LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", tx.GetHash().ToString(), vaultBad->c_str());
-                    continue;
+            if (vaultTrial) {
+                for (const auto& change : vaultTrial->Changes()) {
+                    if (change.second) vaultRunning->Put(change.first, *change.second);
+                    else vaultRunning->Erase(change.first);
                 }
             }
             UpdateCoins(tx, view, nHeight);
