@@ -41,6 +41,7 @@
 #include "utilmoneystr.h"
 #include "validationinterface.h"
 #include "yellowback/index.h"
+#include "vault/node.h"
 #ifdef ENABLE_WALLET
 #include "yellowback/wallet.h"
 #endif
@@ -246,6 +247,11 @@ void Shutdown()
         LOCK(cs_main);
         if (pcoinsTip != NULL) {
             FlushStateToDisk();
+        }
+        if (vault::g_vaultdb) {
+            vault::g_vaultdb->Flush();
+            delete vault::g_vaultdb;
+            vault::g_vaultdb = nullptr;
         }
         delete pcoinsTip;
         pcoinsTip = NULL;
@@ -519,10 +525,10 @@ std::string HelpMessage(HelpMessageMode mode)
     }
 #ifdef YCASH_WR
     std::string debugCategories = "addrman, alert, bench, coindb, db, deletetx, estimatefee, http, libevent, lock, mempool, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, vault, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
 #else
     std::string debugCategories = "addrman, alert, bench, coindb, db, estimatefee, http, libevent, lock, mempool, net, partitioncheck, pow, proxy, prune, "
-                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
+                             "rand, receiveunsafe, reindex, rpc, selectcoins, tor, vault, yellowback, zmq, zrpc, zrpcunsafe (implies zrpc)"; // Don't translate these
 #endif // YCASH_WR
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
         _("If <category> is not supplied or if <category> = 1, output all debugging information.") + " " + _("<category> can be:") + " " + debugCategories + ". " +
@@ -1865,6 +1871,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         return false;
     }
     LogPrintf(" block index %15dms\n", GetTimeMillis() - nStart);
+
+    // The vault primitive's set-state database (docs/plans/yellowback-upgrade-plan.md U-18), on
+    // every node: empty until UPGRADE_VAULT activates, wiped by -reindex, and reconciled with
+    // chainActive here (disconnect off-chain blocks by its own undo, replay the rest from disk)
+    // before anything else can connect a block.
+    vault::g_vaultdb = new vault::VaultDB(GetDataDir() / "vaults", 1 << 22, false, fReindex);
+    {
+        LOCK(cs_main);
+        std::string vaultErr;
+        if (!fReindex && !vault::Reconcile(chainparams, vaultErr))
+            return InitError(vaultErr + ". " + _("Restart with -reindex to rebuild the vault database."));
+    }
 
     fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
     CAutoFile est_filein(fsbridge::fopen(est_path, "rb"), SER_DISK, CLIENT_VERSION);

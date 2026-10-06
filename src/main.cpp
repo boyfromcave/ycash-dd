@@ -38,6 +38,8 @@
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
 #include "warnings.h"
 #include "yellowback/index.h"
+#include "vault/checker.h"
+#include "vault/node.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1733,6 +1735,16 @@ bool AcceptToMemoryPool(
             !ContextualCheckSequenceLocks(tx, view, nextBlockHeight, state, true))
             return false;
 
+        // UPGRADE_VAULT (plan §15.6): acts and template rules for the next block, against the
+        // set state at the tip (mempool parents count as confirming in the next block).
+        std::shared_ptr<const vault::SetSnapshot> vaultSnapshot;
+        if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
+            vaultSnapshot = vault::TipSnapshot();
+            vault::ViewCoinAccessor vaultCoins(view, nextBlockHeight);
+            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot))
+                return state.DoS(0, error("AcceptToMemoryPool: vault: %s: %s", hash.ToString(), vaultBad->c_str()), REJECT_INVALID, *vaultBad);
+        }
+
         // Bring the best block into scope
         view.GetBestBlock();
 
@@ -1842,7 +1854,7 @@ bool AcceptToMemoryPool(
         PrecomputedTransactionData txdata(tx);
         // UPGRADE_VAULT adds CSV and the set opcodes for the next block (plan §15.1).
         const unsigned int vaultFlags = GetVaultScriptFlags(nextBlockHeight, chainparams.GetConsensus());
-        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId))
+        if (!ContextualCheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
             return error("AcceptToMemoryPool: ConnectInputs failed %s", hash.ToString());
         }
@@ -1856,7 +1868,7 @@ bool AcceptToMemoryPool(
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId))
+        if (!ContextualCheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS | vaultFlags, true, txdata, chainparams.GetConsensus(), consensusBranchId, NULL, vaultSnapshot))
         {
             return error("AcceptToMemoryPool: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s", hash.ToString());
         }
@@ -2454,6 +2466,13 @@ void UpdateCoins(const CTransaction& tx, CCoinsViewCache& inputs, int nHeight)
 
 bool CScriptCheck::operator()() {
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
+    // UPGRADE_VAULT: OP_CHECKSETSIG / OP_CHECKSETDORMANT read the set snapshot (plan §15.2).
+    if (nFlags & SCRIPT_VERIFY_VAULT) {
+        if (!VerifyScript(scriptSig, scriptPubKey, nFlags, vault::SetSigChecker(ptxTo, nIn, amount, cacheStore, *txdata, vaultSnapshot, vaultHeight), consensusBranchId, &error)) {
+            return ::error("CScriptCheck(): %s:%d VerifySignature failed: %s", ptxTo->GetHash().ToString(), nIn, ScriptErrorString(error));
+        }
+        return true;
+    }
     if (!VerifyScript(scriptSig, scriptPubKey, nFlags, CachingTransactionSignatureChecker(ptxTo, nIn, amount, cacheStore, *txdata), consensusBranchId, &error)) {
         return ::error("CScriptCheck(): %s:%d VerifySignature failed: %s", ptxTo->GetHash().ToString(), nIn, ScriptErrorString(error));
     }
@@ -2556,13 +2575,19 @@ bool ContextualCheckInputs(
     PrecomputedTransactionData& txdata,
     const Consensus::Params& consensusParams,
     uint32_t consensusBranchId,
-    std::vector<CScriptCheck> *pvChecks)
+    std::vector<CScriptCheck> *pvChecks,
+    std::shared_ptr<const vault::SetSnapshot> vaultSnapshot)
 {
     if (!tx.IsCoinBase())
     {
-        if (!Consensus::CheckTxInputs(tx, state, inputs, GetSpendHeight(inputs), consensusParams)) {
+        const int nSpendHeight = GetSpendHeight(inputs);
+        if (!Consensus::CheckTxInputs(tx, state, inputs, nSpendHeight, consensusParams)) {
             return false;
         }
+
+        // UPGRADE_VAULT: the set state after the inputs' best block, at the spending height (U-17).
+        if ((flags & SCRIPT_VERIFY_VAULT) && !vaultSnapshot)
+            vaultSnapshot = vault::TipSnapshot();
 
         if (pvChecks)
             pvChecks->reserve(tx.vin.size());
@@ -2582,6 +2607,7 @@ bool ContextualCheckInputs(
 
                 // Verify signature
                 CScriptCheck check(*coins, tx, i, flags, cacheStore, consensusBranchId, &txdata);
+                check.SetVault(vaultSnapshot, nSpendHeight);
                 if (pvChecks) {
                     pvChecks->push_back(CScriptCheck());
                     check.swap(pvChecks->back());
@@ -2595,6 +2621,7 @@ bool ContextualCheckInputs(
                     // upgrade occurs.
                     auto prevConsensusBranchId = PrevEpochBranchId(consensusBranchId, consensusParams);
                     CScriptCheck checkPrev(*coins, tx, i, flags, cacheStore, prevConsensusBranchId, &txdata);
+                    checkPrev.SetVault(vaultSnapshot, nSpendHeight);
                     if (checkPrev()) {
                         return state.DoS(
                             10, false, REJECT_INVALID, strprintf(
@@ -2611,6 +2638,7 @@ bool ContextualCheckInputs(
                         // non-upgraded nodes.
                         CScriptCheck check2(*coins, tx, i,
                                 flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheStore, consensusBranchId, &txdata);
+                        check2.SetVault(vaultSnapshot, nSpendHeight);
                         if (check2())
                             return state.Invalid(false, REJECT_NONSTANDARD, strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(check.GetScriptError())));
                     }
@@ -2688,6 +2716,13 @@ bool UndoReadFromDisk(CBlockUndo& blockundo, const CDiskBlockPos& pos, const uin
 }
 
 } // anon namespace
+
+bool ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex* pindex)
+{
+    CDiskBlockPos pos = pindex->GetUndoPos();
+    if (pos.IsNull() || !pindex->pprev) return false;
+    return UndoReadFromDisk(blockundo, pos, pindex->pprev->GetBlockHash());
+}
 
 /**
  * Apply the undo operation of a CTxInUndo to the given chain state.
@@ -2897,6 +2932,18 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
         }
     }
     if (updateIndices && yellowback::g_yellowback) yellowback::g_yellowback->UndoDisconnect(pindex);
+    // UPGRADE_VAULT (plan U-18): undo the block's set-state changes; the state before the
+    // activation block is empty, so disconnecting that block empties the database.
+    if (updateIndices && vault::g_vaultdb &&
+        chainparams.GetConsensus().NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_VAULT)) {
+        bool fVaultOk = IsActivationHeight(pindex->nHeight, chainparams.GetConsensus(), Consensus::UPGRADE_VAULT)
+            ? vault::g_vaultdb->Wipe()
+            : vault::g_vaultdb->DisconnectBlock(pindex->GetBlockHash(), pindex->pprev->GetBlockHash(), pindex->pprev->nHeight);
+        if (!fVaultOk) {
+            AbortNode(state, "Failed to disconnect the block from the vault database");
+            return DISCONNECT_FAILED;
+        }
+    }
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
 }
 
@@ -3038,6 +3085,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     const bool fVaultActive = chainparams.GetConsensus().NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_VAULT);
     flags |= GetVaultScriptFlags(pindex->nHeight, chainparams.GetConsensus());
 
+    // UPGRADE_VAULT (plan §15.6, U-17): scripts read the set state after the parent block; the
+    // block's acts and template rules apply after its script checks, in block order, over the
+    // spent coins recorded below. VerifyDB's reconnection of blocks already on the active chain
+    // (check level 4) cannot see the state at their parents, so it skips the vault rules.
+    const bool fVaultRules = fVaultActive && vault::g_vaultdb && !(!fJustCheck && chainActive.Contains(pindex));
+    if (fVaultRules && !vault::AtParentOf(pindex, chainparams.GetConsensus())) {
+        if (fJustCheck)
+            return state.Error(strprintf("vault database is not at the parent of block %s", pindex->GetBlockHash().ToString()));
+        return AbortNode(state, strprintf("The vault database is not at the parent of block %s", pindex->GetBlockHash().ToString()));
+    }
+    std::shared_ptr<const vault::SetSnapshot> vaultSnapshot = fVaultActive ? vault::TipSnapshot() : nullptr;
+    vault::MapCoinAccessor vaultCoins;
+
     // DERSIG (BIP66) is also always enforced, but does not have a flag.
 
     CBlockUndo blockundo;
@@ -3169,9 +3229,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
-            if (!ContextualCheckInputs(tx, state, view, fExpensiveChecks, flags, fCacheResults, txdata[i], chainparams.GetConsensus(), consensusBranchId, nScriptCheckThreads ? &vChecks : NULL))
+            if (!ContextualCheckInputs(tx, state, view, fExpensiveChecks, flags, fCacheResults, txdata[i], chainparams.GetConsensus(), consensusBranchId, nScriptCheckThreads ? &vChecks : NULL, vaultSnapshot))
                 return false;
             control.Add(vChecks);
+
+            if (fVaultRules) {
+                for (const CTxIn& txin : tx.vin) {
+                    const CCoins* coins = view.AccessCoins(txin.prevout.hash);
+                    vault::SpentCoin& c = vaultCoins.coins[txin.prevout];
+                    c.scriptPubKey = coins->vout[txin.prevout.n].scriptPubKey;
+                    c.value = coins->vout[txin.prevout.n].nValue;
+                    c.height = coins->nHeight;
+                }
+            }
         }
 
         // insightexplorer
@@ -3304,6 +3374,16 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime2 = GetTimeMicros(); nTimeVerify += nTime2 - nTimeStart;
     LogPrint("bench", "    - Verify %u txins: %.2fms (%.3fms/txin) [%.2fs]\n", nInputs - 1, 0.001 * (nTime2 - nTimeStart), nInputs <= 1 ? 0 : 0.001 * (nTime2 - nTimeStart) / (nInputs-1), nTimeVerify * 0.000001);
 
+    // UPGRADE_VAULT: the block's acts and template rules, sequentially, on a one-block overlay
+    // over the database (which nothing changes until the commit below).
+    std::unique_ptr<vault::VaultState> vaultState;
+    vault::BlockUndo vaultUndo;
+    if (fVaultRules) {
+        vaultState.reset(new vault::VaultState(*vault::g_vaultdb));
+        if (auto vaultBad = vaultState->ApplyBlock(block, pindex->nHeight, vaultCoins, vaultUndo, pindex))
+            return state.DoS(100, error("ConnectBlock(): vault: %s", vaultBad->c_str()), REJECT_INVALID, *vaultBad);
+    }
+
     if (yellowback::g_yellowback) {
         if (auto ybBad = yellowback::g_yellowback->CheckConnect(block, pindex, fJustCheck)) return state.DoS(0, error("ConnectBlock(): %s", ybBad->c_str()), REJECT_INVALID, "yellowback-vault-spend");
     }
@@ -3383,6 +3463,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // add this block to the view's block chain
     view.SetBestBlock(pindex->GetBlockHash());
     if (yellowback::g_yellowback) yellowback::g_yellowback->CommitConnect(block, pindex);
+    if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo))
+        return AbortNode(state, "Failed to write to the vault database");
 
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;
     LogPrint("bench", "    - Index writing: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeIndex * 0.000001);
@@ -3493,6 +3575,9 @@ bool static FlushStateToDisk(
         // Flush the chainstate (which may refer to block index entries).
         if (!pcoinsTip->Flush())
             return AbortNode(state, "Failed to write to coin database");
+        // The vault database commits each block as it connects; sync it with the chainstate.
+        if (vault::g_vaultdb && !vault::g_vaultdb->Flush())
+            return AbortNode(state, "Failed to write to the vault database");
         nLastFlush = nNow;
     }
     // Don't flush the wallet witness cache (SetBestChain()) here, see #4301
@@ -3694,6 +3779,8 @@ bool static DisconnectTip(CValidationState &state, const CChainParams& chainpara
 
     // Update chainActive and related variables.
     UpdateTip(pindexDelete->pprev, chainparams);
+    // UPGRADE_VAULT: set state, BIP68 and I-2 change with the tip (plan §15.6).
+    if (!fBare) vault::RecheckMempool(mempool, pindexDelete->nHeight, chainparams.GetConsensus());
 
     // Updates to connected wallets are triggered by ThreadNotifyWallets
 
@@ -3759,6 +3846,8 @@ bool static ConnectTip(CValidationState& state, const CChainParams& chainparams,
 
     // Update chainActive & related variables.
     UpdateTip(pindexNew, chainparams);
+    // UPGRADE_VAULT: set state, BIP68 and I-2 change with the tip (plan §15.6).
+    vault::RecheckMempool(mempool, pindexNew->nHeight + 1, chainparams.GetConsensus());
 
     // Cache the conflicted transactions for subsequent notification.
     // Updates to connected wallets are triggered by ThreadNotifyWallets

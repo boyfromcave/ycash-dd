@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -9,6 +10,7 @@
 #include "script/script.h"
 #include "util.h"
 #include "utilstrencodings.h"
+#include "vault/template.h"
 
 
 using namespace std;
@@ -30,6 +32,8 @@ const char* GetTxnOutputType(txnouttype t)
     case TX_SCRIPTHASH: return "scripthash";
     case TX_MULTISIG: return "multisig";
     case TX_NULL_DATA: return "nulldata";
+    case TX_VAULT: return "vault";
+    case TX_VAULT_INTENT: return "vaultintent";
     }
     return NULL;
 }
@@ -127,6 +131,20 @@ bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::v
         return true;
     }
 
+    // The vault primitive's templates (plan §15.3): exact shapes only, no solutions.
+    {
+        vault::VaultParams vp;
+        if (vault::ParseVault(scriptPubKey, vp)) {
+            typeRet = TX_VAULT;
+            return true;
+        }
+        vault::IntentParams ip;
+        if (vault::ParseIntent(scriptPubKey, ip)) {
+            typeRet = TX_VAULT_INTENT;
+            return true;
+        }
+    }
+
     vSolutionsRet.clear();
     typeRet = TX_NONSTANDARD;
     return false;
@@ -138,6 +156,8 @@ int ScriptSigArgsExpected(txnouttype t, const std::vector<std::vector<unsigned c
     {
     case TX_NONSTANDARD:
     case TX_NULL_DATA:
+    case TX_VAULT:        // variable: checked by the vault rules (S-1), see AreInputsStandard
+    case TX_VAULT_INTENT:
         return -1;
     case TX_PUBKEY:
         return 1;

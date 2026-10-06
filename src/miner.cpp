@@ -35,6 +35,7 @@
 #include "utilmoneystr.h"
 #include "validationinterface.h"
 #include "yellowback/policy.h"
+#include "vault/node.h"
 
 #include <librustzcash.h>
 
@@ -378,6 +379,12 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
         const int64_t nMedianTimePast = pindexPrev->GetMedianTimePast();
         CCoinsViewCache view(pcoinsTip);
 
+        // UPGRADE_VAULT (plan §15.6 "Miner"): acts and the rate limit apply against a running
+        // copy of the set state; a transaction that fails is skipped.
+        std::unique_ptr<vault::VaultState> vaultRunning;
+        if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb)
+            vaultRunning.reset(new vault::VaultState(*vault::g_vaultdb));
+
         SaplingMerkleTree sapling_tree;
         assert(view.GetSaplingAnchorAt(view.GetBestAnchor(SAPLING), sapling_tree));
 
@@ -593,6 +600,13 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
             }
 
             if (ybview && !yellowback::policy::FilterTemplate(*ybview, tx, nHeight)) continue;
+            if (vaultRunning) {
+                vault::ViewCoinAccessor vaultCoins(view, nHeight);
+                if (auto vaultBad = vaultRunning->ApplyTx(tx, nHeight, vaultCoins)) {
+                    LogPrint("vault", "CreateNewBlock(): skipping %s: %s\n", tx.GetHash().ToString(), vaultBad->c_str());
+                    continue;
+                }
+            }
             UpdateCoins(tx, view, nHeight);
 
             // Added
