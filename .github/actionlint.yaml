@@ -1,0 +1,13 @@
+# Copyright (c) 2026 The Ycash developers
+# actionlint configuration for this repository's workflows (`actionlint` reads it from .github/).
+paths:
+  .github/workflows/yellowback-tests.yml:
+    ignore:
+      # The functional lists (YELLOWBACK_SCRIPTS, STOCK_BASELINE, ...) are space-separated names that the
+      # scripts word-split on purpose; quoting them would pass one argument.
+      - 'SC2086:'
+      # `ls -d depends/.../clang/*/lib | head -1` reads a directory the depends build creates with a fixed
+      # name; there are no odd file names to mishandle.
+      - 'SC2012:'
+      # ycashd_LDFLAGS='$(RELDFLAGS) ...' is a make variable reference, single-quoted so the shell leaves it to make.
+      - 'SC2016:'
