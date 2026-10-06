@@ -37,12 +37,16 @@ SERIAL_SCRIPTS = [
 BASE_SCRIPTS= [
     # Yellowback overlay (fork-local; names must be listed here, the runner does not glob)
     'yellowback_index.py',
-    'yellowback_activation.py',
+    # YED on the vault primitive (upgrade plan §15.10, U-21..U-24): the attestor set, mint into the
+    # V template, owner redeem, claim into an intent, release, attestor cancel, an invalid mint
+    # refused by the mempool and its block by every node (DoS 100), a reorg across a claim.
+    # yellowback_activation, yellowback_enforcement and yellowback_attest_enforcement were removed
+    # with the enforcement machinery they tested (§6).
+    'yellowback_upgrade.py',
     'yellowback_mining.py',
     'yellowback_quote.py',
     'yellowback_rpc_contract.py',
     'yellowback_attest.py',
-    'yellowback_attest_enforcement.py',
     'yellowback_attest_wallet.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',
@@ -52,7 +56,6 @@ BASE_SCRIPTS= [
     'yellowback_claim.py',
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
-    'yellowback_enforcement.py',
     'yellowback_stock_node.py',
     # The v2 framework's own smoke test (six stock nodes, no yed_* call); registered 2026-10-01
     # (audit I-1: it existed and was allow-listed by CI but never registered, so never run).

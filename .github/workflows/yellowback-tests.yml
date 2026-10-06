@@ -60,7 +60,7 @@ env:
   # vault_upgrade (UPGRADE_VAULT activation, upgrade plan §15.9) joined on 2026-10-05; the audit
   # loop below covers qa/rpc-tests/vault_*.py as well. vault_rpc (the set_*/vault_* RPCs) joined the
   # same day.
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_activation yellowback_mining yellowback_enforcement yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_enforcement yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_primitive vault_slashing vault_bridge
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_primitive vault_slashing vault_bridge
   SANITIZER_SCRIPTS: yellowback_index
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.

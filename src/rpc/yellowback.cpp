@@ -127,6 +127,8 @@ std::string TypeLower(TxLogType t)
     case TxLogType::CLAIM_NOTICE: return "notice";
     case TxLogType::EQUIVOCATION: return "equivocation";
     case TxLogType::ATTESTOR_REVIVE: return "revive";
+    case TxLogType::CLAIM_RELEASE: return "claim_release";
+    case TxLogType::CLAIM_CANCEL: return "claim_cancel";
     case TxLogType::NONE: break;
     }
     return "none";
@@ -377,6 +379,7 @@ UniValue TxLogToJSON(const uint256& txid, const TxLogRecord& l, const Yellowback
     o.pushKV("assigned", AssignedToJSON(l.assigned));
     o.pushKV("spentTokens", OutPointsToJSON(l.spentTokens));
     o.pushKV("closedVaults", OutPointsToJSON(l.closedVaults));
+    o.pushKV("reopenedVaults", OutPointsToJSON(l.reopenedVaults));      // U-23: the vault a cancel re-created
     o.pushKV("expired", expired);
     PushTxLogV3(o, l, index, refHeight, tx);
     return o;
