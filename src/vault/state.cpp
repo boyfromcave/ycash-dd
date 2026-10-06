@@ -613,15 +613,18 @@ bool EjectAndFreeze(VaultState& st, const SetId& setId, const CPubKey& key)
 
 void VaultState::ApplyEjections(const CTransaction& tx, int64_t h)
 {
-    for (const auto& entry : Modules()) {
-        const std::optional<SetId> governed = entry.second->GovernedSet();
-        if (!governed || !GetSet(*this, *governed)) continue;
-        ModuleContext ctx;
-        ctx.height = h;
-        ctx.state = this;
-        ctx.blockHashAt = blockHashes;
-        for (const CPubKey& key : entry.second->Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
-    }
+    for (const auto& entry : Modules()) ApplyEjectionsOf(*entry.second, tx, h);
+}
+
+void VaultState::ApplyEjectionsOf(const Module& module, const CTransaction& tx, int64_t h)
+{
+    const std::optional<SetId> governed = module.GovernedSet();
+    if (!governed || !GetSet(*this, *governed)) return;
+    ModuleContext ctx;
+    ctx.height = h;
+    ctx.state = this;
+    ctx.blockHashAt = blockHashes;
+    for (const CPubKey& key : module.Ejections(tx, ctx)) EjectAndFreeze(*this, *governed, key);
 }
 
 std::optional<std::string> VaultState::ApplyAct(const CTransaction& tx, const Act& act, int64_t h)
