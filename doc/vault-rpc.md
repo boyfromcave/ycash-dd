@@ -135,15 +135,22 @@ when it is sent.
 Adds this wallet's current-member signatures over the set-signature message (plan §15.2 step 4)
 for the vault's `setid`, up to `unlockthreshold`. Result: `{"hex", "complete", "signatures",
 "required", "sighash", "setsigs": [{"key", "sig"}]}`. Signing two different spends of one
-outpoint is provable equivocation: sign only the transaction you mean.
+outpoint is provable equivocation: sign only the transaction you mean. **Sign once:** before
+handing out a signature the wallet records, in its wallet database, the role and sighash its
+members signed for `(setid, prevout)`, and refuses a different role or sighash for that pair with
+`set-sign-once: …` (`RPC_WALLET_ERROR`), across restarts; re-signing the identical transaction is
+idempotent. There is no override.
 
 ### `vault_buildcancel "intentoutpoint"`
 The CANCEL spend (selector 2) of an unmatured intent: its value back into the vault it was
 unlocked from (I-2). Result: `{"hex", "required", "cancelsetid", "deadline"}` (`deadline` = the
-last height a cancel can confirm at).
+last height a cancel can confirm at). Called again for the same intent it returns the same
+transaction while its fee inputs are unspent (remembered in memory until restart), so every
+member signs one sighash.
 
 ### `set_signcancel "hex"`
-As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`.
+As `set_signunlock`, for the intent's `cancelsetid` and `cancelthreshold`, under the same
+sign-once record.
 
 ### `vault_send "hex"`
 Signs this wallet's inputs of a built vault spend (the template input's scriptSig is kept) and

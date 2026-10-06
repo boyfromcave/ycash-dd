@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -228,6 +229,11 @@ public:
     bool ReadAtomicSwap(const std::string& swapId, CAtomicSwapInfo& swapInfo);
     bool EraseAtomicSwap(const std::string& swapId);
     bool ListAtomicSwaps(std::vector<CAtomicSwapInfo>& swaps);
+
+    // Vault set signatures this wallet made (sign-once guard, plan §15 SET_EQUIVOCATION): per
+    // (setId, prevout), the role and sighash the wallet's members signed. Read on demand, never loaded.
+    bool WriteVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t role, const uint256& sighash);
+    bool ReadVaultSetSig(const uint256& setId, const COutPoint& prevout, uint8_t& role, uint256& sighash);
 
     static void IncrementUpdateCounter();
     static unsigned int GetUpdateCounter();
