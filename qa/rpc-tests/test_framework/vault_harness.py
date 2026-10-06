@@ -166,12 +166,14 @@ class VaultTestBase(BitcoinTestFramework):
         if height > t:
             self.mine(height - t)
 
-    def mine_raw(self, hexes, label=''):
+    def mine_raw(self, hexes, label='', sync=True):
         """A Python-built block of exactly ``hexes`` (not the mempool) on node 0; must be
-        accepted.  Returns the block hash."""
+        accepted.  Returns the block hash.  ``sync=False`` for a fork block node 1 does not
+        switch to (yet)."""
         result, bh = mine_block_raw(self.node, hexes)
         assert result in (None, 'duplicate'), '%s: block refused (%s)' % (label, result)
-        sync_blocks(self.nodes)
+        if sync:
+            sync_blocks(self.nodes)
         self.sync_model()
         return bh
 
@@ -192,6 +194,20 @@ class VaultTestBase(BitcoinTestFramework):
         builder does not pick the same coins."""
         t = tx_from_hex(hex_)
         self.node.lockunspent(False, [{'txid': '%064x' % i.prevout.hash, 'vout': i.prevout.n} for i in t.vin])
+
+    def assert_evicted(self, txid, label):
+        """The mempool no longer holds ``txid`` (a re-check on ConnectTip / DisconnectTip
+        removed it, plan §15.6)."""
+        assert txid not in self.mempool(), label
+
+    def assert_connected(self, label, settle=6):
+        """After ``settle`` seconds (relay), node 1 still has both connections to node 0: a
+        transaction valid on node 0's tip but not on node 1's must not get node 0 disconnected
+        (a set-state-dependent script failure is not misbehaviour: the state differs by tip)."""
+        time.sleep(settle)
+        n = len(self.nodes[1].getpeerinfo())
+        assert n == 2, '%s: node 1 has %d connections to node 0, expected 2' % (label, n)
+        print('    ok   %s' % label)
 
     def wait_in_mempool(self, txid, i, label, timeout=30):
         deadline = time.time() + timeout

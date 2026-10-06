@@ -241,7 +241,9 @@ class VaultPrimitiveTest(VaultTestBase):
         self.reject(unl(m[:1]), SCRIPT_SETSIG, 'script-setsig', 'UNLOCK with 1 of 2 signatures')
         self.reject(unl([m[0], m[0]]), SCRIPT_SETSIG, 'script-setsig', 'UNLOCK with one member twice')
         self.reject(unl([m[0], OUTSIDER]), SCRIPT_SETSIG, 'script-setsig', 'UNLOCK with an outsider')
-        self.reject(unl(m[:2], branch_id=CANOPY_BRANCH_ID), SCRIPT_SETSIG, 'script-setsig',
+        # set signatures bind the ZIP-243 sighash, so the node diagnoses the previous epoch's branch
+        # id as it does for any signature (finding (15))
+        self.reject(unl(m[:2], branch_id=CANOPY_BRANCH_ID), 'old-consensus-branch-id', 'script-setsig',
                     'UNLOCK signed over the previous branch id')
         tx = self.unlock_tx(out, vp, val, recips, COIN)
         self.reject(self.setsig_hex(tx, spk, val, sid, v.ROLE_CANCEL, m[:2], v.SEL_UNLOCK), SCRIPT_SETSIG,
@@ -406,7 +408,7 @@ class VaultPrimitiveTest(VaultTestBase):
         hb = self.accept(hb_hex, 'HEARTBEAT of the dormant set (a current member may always heartbeat)')
         self.mine_raw([hb_hex], 'a block with the heartbeat only')
         assert not self.released(sid)
-        assert orel not in self.mempool(), 'the owner-released spend survived a heartbeat that made the set live'
+        self.assert_evicted(orel, 'the owner-released spend survived a heartbeat that made the set live')
         assert hb not in self.mempool()
         print('    ok   the owner-released spend was evicted when the heartbeat confirmed')
         self.reject(self.owner_hex(vout, spk, 2 * COIN, v.SEL_OWNER_RELEASED), SCRIPT_VERIFY, 'script-notreleased',
@@ -504,7 +506,7 @@ class VaultPrimitiveTest(VaultTestBase):
         sync_blocks(self.nodes)
         self.sync_model()
         assert_equal(self.node.getbestblockhash(), yb)
-        assert o not in self.mempool(), 'an unlock over the rate limit survived the reconnect'
+        self.assert_evicted(o, 'an unlock over the rate limit survived the reconnect')
         print('    ok   the 0.5 unlock was evicted on reconnect')
         self.reject(over, 'bad-txns-vault-rate', 'bad-vault-rate', 'UNLOCK 0.5 after the reconnect')
 
@@ -516,8 +518,8 @@ class VaultPrimitiveTest(VaultTestBase):
         part = cap * 6 // 10
         ya, yb2 = (y, 1), vb2
         ha = self.unlock_hex(ya, vpa, 15 * COIN // 10, [(rs, part)], [r], relock=15 * COIN // 10 - part)
-        hb = self.unlock_hex(yb2, vpb, 2 * COIN, [(rs, part)], [r], relock=2 * COIN - part)
         ta = self.accept(ha, 'UNLOCK 0.6 x cap from RA')
+        hb = self.unlock_hex(yb2, vpb, 2 * COIN, [(rs, part)], [r], relock=2 * COIN - part)
         assert self.model.check_tx(v.tx_from_hex(hb)) is None
         try:
             tb = self.node.sendrawtransaction(hb)
@@ -532,7 +534,7 @@ class VaultPrimitiveTest(VaultTestBase):
         assert_equal(len(got), 1)
         if tb is not None:
             other = tb if got[0] == ta else ta
-            assert other not in self.mempool(), 'the unlock the miner skipped stayed in the mempool'
+            self.assert_evicted(other, 'the unlock the miner skipped stayed in the mempool')
             print('    ok   the block took one, the other was evicted')
         self.R_set = sid
 
@@ -553,7 +555,7 @@ class VaultPrimitiveTest(VaultTestBase):
         self.mine_raw([], 'an empty block (c + delay - 2)')
         assert cancel in self.mempool(), 'the cancel left the mempool while still valid'
         self.mine_raw([], 'an empty block (c + delay - 1)')
-        assert cancel not in self.mempool(), 'a cancel past coinHeight + delay - 1 stayed in the mempool'
+        self.assert_evicted(cancel, 'a cancel past coinHeight + delay - 1 stayed in the mempool')
         print('    ok   the cancel aged out of the mempool')
         self.reject(self.cancel_hex((u, 0), ip, 2 * COIN, vp, [m[0]]), 'bad-txns-vault-cancel',
                     'bad-vault-cancel-late', 'CANCEL after it aged out')
@@ -562,7 +564,7 @@ class VaultPrimitiveTest(VaultTestBase):
         tip = self.node.getbestblockhash()
         self.node.invalidateblock(tip)
         self.sync_model()
-        assert rel not in self.mempool(), 'a release made early by a reorg stayed in the mempool'
+        self.assert_evicted(rel, 'a release made early by a reorg stayed in the mempool')
         print('    ok   the release was evicted when the reorg made it early')
         self.reject(rel_hex, MEMPOOL_BIP68, 'bad-txns-vault-timelock', 'RELEASE one block early after the reorg')
         self.node.reconsiderblock(tip)
@@ -587,10 +589,12 @@ class VaultPrimitiveTest(VaultTestBase):
         self.sync_model()
         assert self.model.get_set(sid).members[v.pubkey_of(m[2])].status == v.MEMBER_ACTIVE
         u = self.accept(with_m2, 'UNLOCK signed by m2 with the REMOVE disconnected')
+        # node 1 is still on X, where m2 is removed: the relayed unlock fails its script there
+        self.assert_connected('node 1 keeps node 0 connected after it relays an unlock valid only on its own tip')
         self.node.reconsiderblock(x)
         sync_blocks(self.nodes)
         self.sync_model()
-        assert u not in self.mempool(), 'an unlock signed by a member removed on reconnect stayed in the mempool'
+        self.assert_evicted(u, 'an unlock signed by a member removed on reconnect stayed in the mempool')
         print('    ok   the unlock was evicted when the REMOVE reconnected')
         self.reject(with_m2, SCRIPT_SETSIG, 'script-setsig', 'UNLOCK by m2 after the reconnect')
 
@@ -606,7 +610,7 @@ class VaultPrimitiveTest(VaultTestBase):
         self.reject(self.heartbeat_hex(sidu, u1), 'bad-vault-act-heartbeat', 'bad-vault-act-heartbeat',
                     'HEARTBEAT of the removed u1')
         self.node.invalidateblock(z)
-        self.mine_raw([], 'fork block 1')
+        self.mine_raw([], 'fork block 1 (as long as Z: node 1 stays on Z)', sync=False)
         self.mine_raw([], 'fork block 2')
         assert_equal(self.nodes[1].getbestblockhash(), self.node.getbestblockhash())
         assert self.model.get_set(sidu).members[v.pubkey_of(u1)].status == v.MEMBER_ACTIVE
@@ -622,7 +626,11 @@ class VaultPrimitiveTest(VaultTestBase):
         sid, m = self.S, self.Sm
         self.reject(self.act_hex(v.act_set_winddown(self.W), self.Wm[:2]), 'bad-vault-act-winddown',
                     'bad-vault-act-winddown', '%s: WINDDOWN of W again' % label)
-        self.reject(self.join_hex(sid, m[0], [m[0], m[1]])[0], 'bad-vault-act-join', 'bad-vault-act-join',
+        # m0 co-signs its own admission (only m0 and m1 are current): the C++ counts co-signers
+        # distinct among themselves and reaches the ACTIVE check; the model rejects the repeated
+        # key first (A-7). Same verdict, different code; it cannot change a verdict, since a
+        # current co-signer is ACTIVE and an ACTIVE key cannot join.
+        self.reject(self.join_hex(sid, m[0], [m[0], m[1]])[0], 'bad-vault-act-join', 'bad-vault-act-sig',
                     '%s: JOIN of the ACTIVE m0' % label)
         self.reject(self.unlock_hex(self.probe_v, self.probe_vp, COIN, [(self.change_spk(), COIN)], [m[2], m[0]]),
                     SCRIPT_SETSIG, 'script-setsig', '%s: UNLOCK by the removed m2' % label)
