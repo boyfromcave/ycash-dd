@@ -382,8 +382,10 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
         // UPGRADE_VAULT (plan §15.6 "Miner"): acts and the rate limit apply against a running
         // copy of the set state; a transaction that fails is skipped.
         std::unique_ptr<vault::VaultState> vaultRunning;
-        if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb)
+        if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
             vaultRunning.reset(new vault::VaultState(*vault::g_vaultdb));
+            vaultRunning->SetBlockHashes(vault::AncestorHashes(pindexPrev));
+        }
 
         SaplingMerkleTree sapling_tree;
         assert(view.GetSaplingAnchorAt(view.GetBestAnchor(SAPLING), sapling_tree));

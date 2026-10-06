@@ -33,6 +33,16 @@ std::shared_ptr<const SetSnapshot> TipSnapshot()
     return std::make_shared<const SetSnapshot>(*g_vaultdb);
 }
 
+BlockHashFn AncestorHashes(const CBlockIndex* prev)
+{
+    return [prev](int64_t h) -> std::optional<uint256> {
+        if (!prev || h < 0 || h > prev->nHeight) return std::nullopt;
+        const CBlockIndex* p = prev->GetAncestor((int)h);
+        if (!p) return std::nullopt;
+        return p->GetBlockHash();
+    };
+}
+
 bool AtParentOf(const CBlockIndex* pindex, const Consensus::Params& params)
 {
     if (!g_vaultdb || !pindex) return false;
@@ -204,7 +214,7 @@ void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& p
             continue;
         }
         if (!IsVaultRelevant(tx, view)) continue;
-        std::optional<std::string> why = CheckTx(tx, coins, nextHeight, *snapshot);
+        std::optional<std::string> why = CheckTx(tx, coins, nextHeight, *snapshot, AncestorHashes(chainActive.Tip()));
         if (!why) why = RecheckTemplateScripts(tx, view, nextHeight, snapshot, params);
         if (why) {
             LogPrint("vault", "vault: dropping %s from the mempool at height %d: %s\n", tx.GetHash().ToString(), nextHeight, *why);
@@ -283,6 +293,7 @@ bool Reconcile(const CChainParams& chainparams, std::string& err)
             return false;
         }
         VaultState state(*g_vaultdb);
+        state.SetBlockHashes(AncestorHashes(pindex->pprev));
         BlockUndo vundo;
         if (auto bad = state.ApplyBlock(block, h, coins, vundo, pindex)) {
             err = strprintf("vault: block %d on the active chain fails the vault rules on replay (%s)", h, *bad);
