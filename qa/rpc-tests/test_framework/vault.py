@@ -206,14 +206,49 @@ def _add(p, q):
     return (x, (lam * (p[0] - x) - p[1]) % _P)
 
 
+def _jdouble(p):
+    x, y, z = p
+    if y == 0:
+        return (0, 1, 0)
+    ysq = y * y % _P
+    s_ = 4 * x * ysq % _P
+    m = 3 * x * x % _P
+    nx = (m * m - 2 * s_) % _P
+    return (nx, (m * (s_ - nx) - 8 * ysq * ysq) % _P, 2 * y * z % _P)
+
+
+def _jadd(p, q):
+    if p[2] == 0:
+        return q
+    if q[2] == 0:
+        return p
+    z1s, z2s = p[2] * p[2] % _P, q[2] * q[2] % _P
+    u1, u2 = p[0] * z2s % _P, q[0] * z1s % _P
+    s1, s2 = p[1] * z2s * q[2] % _P, q[1] * z1s * p[2] % _P
+    if u1 == u2:
+        return _jdouble(p) if s1 == s2 else (0, 1, 0)
+    h = (u2 - u1) % _P
+    r = (s2 - s1) % _P
+    h2 = h * h % _P
+    h3 = h * h2 % _P
+    u1h2 = u1 * h2 % _P
+    nx = (r * r - h3 - 2 * u1h2) % _P
+    return (nx, (r * (u1h2 - nx) - s1 * h3) % _P, h * p[2] * q[2] % _P)
+
+
 def _mul(k, point):
-    r, a = None, point
-    while k:
-        if k & 1:
-            r = _add(r, a)
-        a = _add(a, a)
-        k >>= 1
-    return r
+    """Scalar multiplication (Jacobian internally; affine in and out, None = infinity)."""
+    if point is None or k % _N == 0:
+        return None
+    r, a = (0, 1, 0), (point[0], point[1], 1)
+    for bit in bin(k)[2:]:
+        r = _jdouble(r)
+        if bit == '1':
+            r = _jadd(r, a)
+    if r[2] == 0:
+        return None
+    zi = pow(r[2], _P - 2, _P)
+    return (r[0] * zi * zi % _P, r[1] * zi * zi * zi % _P)
 
 
 def _lift_x(x, odd):
