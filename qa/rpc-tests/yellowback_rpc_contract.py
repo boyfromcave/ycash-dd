@@ -601,7 +601,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal({int(x['seq']): x['status'] for x in user.yed_listattestors()}[wseq], 'ELIGIBLE')
-        assert_equal(user.yed_gettxinfo(revived['txid'])['type'], 'revive')
+        assert_equal(user.yed_gettxinfo(revived['txid'])['type'], 'set_act')        # P4-b: the revival is a SET_HEARTBEAT
 
 # Rule: NOT-1 RED-4 RED-5
         print('v3 wallet: the emergency claim of vault %s from the pool: notice, persistence, clause (b)' % vaults[0]['txid'][:8])
