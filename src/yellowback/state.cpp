@@ -885,7 +885,7 @@ bool ApplySetAct(EvalContext& ctx, const CTransaction& tx, const uint256& txid, 
     }
     if (!actSpk) return false;
     vault::Act act;
-    if (vault::DecodeAct(*actSpk, act)) return false;
+    if (vault::DecodeAct(*actSpk, act) || !vault::ActFieldsValid(act)) return false;   // the primitive refuses either
     if (act.type == vault::ACT_SET_CREATE) {
         if (txid != P.attestorSetId || ctx.st.GetAttestorSet().has_value()) return false;
         AttestorSetRecord z;

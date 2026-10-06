@@ -766,7 +766,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         assert recs[e_seq]['bondFrozen'] and not recs[w_seq]['bondFrozen']
         members = user.set_getinfo(user.yed_getinfo()['upgrade']['attestorSetId'])['memberlist']
         frozen = [m for m in members if m['key'] == recs[e_seq]['attestorPubKey']]
-        assert_equal((frozen[0]['status'], frozen[0]['bondfrozen']), ('EJECTED', True))
+        assert_equal((frozen[0]['status'], frozen[0]['bondfrozen']), ('ejected', True))
         rpc_error('bad-vault-bond-frozen', wallet.sendrawtransaction, withdraw_bond_raw(wallet, recs[e_seq], bond_secret_for(recs[e_seq])))
         rec = recs[w_seq]
         txid = wallet.sendrawtransaction(withdraw_bond_raw(wallet, rec, bond_secret_for(rec)))

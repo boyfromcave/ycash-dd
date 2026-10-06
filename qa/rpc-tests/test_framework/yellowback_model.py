@@ -2464,6 +2464,7 @@ class YellowbackModel(object):
                 return False
             self.attestor_set_rec = AttestorSetRecord(height, act['seats'], act['maturity'], act['livenessWindow'])
             rec.type = 'ATTESTOR_SET_ACT'
+            rec.attestor_seq = 0          # the C++ TxLog's attestorSeq default (yed_gettxinfo shows seq 0)
             return True
         if bytes.fromhex(act.get('setId', '')) != p.attestor_set_internal or self.attestor_set_rec is None:
             return False

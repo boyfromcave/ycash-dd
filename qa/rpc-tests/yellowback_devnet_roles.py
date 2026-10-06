@@ -183,7 +183,7 @@ class Preset:
         members = {m['key']: m for m in self.node(0).set_getinfo(set_id)['memberlist']}
         for rec in attestors:
             m = members.get(rec['attestorPubKey'])
-            check(m is not None and m['status'] == 'ACTIVE' and m['current'],
+            check(m is not None and m['status'] == 'active' and m['current'],
                   'seq %s is not a current member of the attestor set: %s' % (rec['seq'], m))
             check(m['lastact'] == rec['lastAct'], 'seq %s: lastAct %s, the set says %s' % (rec['seq'], rec['lastAct'], m['lastact']))
         # node 1 is stock: no yed_* at all
