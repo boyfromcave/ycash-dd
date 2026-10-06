@@ -26,6 +26,14 @@ first commit; until then a v3 node and a v2 wallet refuse each other (N27), whic
 Everything marked **v3** in this file is Phase A0's contract for Phases A2 (node context) and A3
 (wallet context); the v2 text is unchanged except where a field's meaning changed and is marked.
 
+**`rpcversion` 4 (hardening plan H-9.3, 2026-10-05), by decision as `3` was; superseded by `5` below.** The change is again
+an addition: optional client bounds (`yed_mint`'s `maxCollateralZat` and `yed_claim`'s
+`minOutZat`, both since the 2026-10-01 audit, and `yed_claim`'s new `maxBurnCents`). The bump
+makes a client that does not know the bounds (and so cannot cap what a malicious or mistaken
+server builds for it) refuse the node rather than run unprotected. Clients go to `4` with the
+hardening plan's H5 chunks (YecWallet, YEW through lightwalletd); until then they refuse each other,
+which is intended.
+
 **The vault upgrade (`rpcversion` 5; docs/plans/yellowback-upgrade-plan.md §15.10, U-21..U-24).**
 Ycash Yellowback (YED) is the rule module of the vault primitive: its rules are consensus at every
 height where `UPGRADE_VAULT` is active and the network's YED attestor set is known (regtest:
@@ -581,20 +589,20 @@ Result of `yed_getvault`:
   "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
   "ownerAddress": "yrExampleOwnerAddress111111111111111",
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
-  "collateralZat": 25125628141,
-  "collateral": 251.25628141,
+  "lockHeight": 377,
+  "claimHeight": 401,
+  "collateralZat": 251889169000,
+  "collateral": 2518.89169,
   "mintedCents": 100000,
   "mintHeight": 332,
   "refHeight": 329,
-  "feePaidZat": 62814071,
+  "feePaidZat": 629722922,
   "closeHeight": null,
   "closingTxid": "",
   "burnedCents": 0,
   "unbacked": false,
   "claimable": false,
-  "underwaterAt": 437800,
+  "underwaterAt": 436700,
   "voidReason": "",
   "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
   "noticed": false,
@@ -623,20 +631,20 @@ Result of `yed_listvaults`:
     "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
-    "lockHeight": 380,
-    "claimHeight": 404,
-    "collateralZat": 25125628141,
-    "collateral": 251.25628141,
+    "lockHeight": 377,
+    "claimHeight": 401,
+    "collateralZat": 251889169000,
+    "collateral": 2518.89169,
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 62814071,
+    "feePaidZat": 629722922,
     "closeHeight": null,
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
     "claimable": false,
-    "underwaterAt": 437800,
+    "underwaterAt": 436700,
     "voidReason": "",
     "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
     "noticed": false,
@@ -706,18 +714,18 @@ Result of `yed_listclaimable`:
   {
     "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
-    "collateralZat": 25125628141,
+    "collateralZat": 251889169000,
     "mintedCents": 100000,
-    "feeZat": 62814071,
-    "claimHeight": 404,
-    "underwaterAt": 437800,
+    "feeZat": 629722922,
+    "claimHeight": 401,
+    "underwaterAt": 436700,
     "pClaim": 400000,
     "claimPath": "a",
     "noticed": false,
     "noticeHeight": null,
     "emergencyOpenAt": null,
     "residualZat": 0,
-    "attestFeeZat": 15703517
+    "attestFeeZat": 157430730
   }
 ]
 ```
@@ -762,7 +770,7 @@ Result of `yed_gettxinfo`:
   "yedIn": 0,
   "yedOut": 100000,
   "burned": 0,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "assigned": [
     { "vout": 1, "cents": 100000 }
@@ -782,7 +790,7 @@ Result of `yed_gettxinfo`:
   "pMint": 1985000,
   "pClaim": 2000000,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0,
   "claimPath": "",
@@ -820,7 +828,7 @@ Result of `yed_decodepayload`:
   "reason": "",
   "termClass": "A",
   "cents": 100000,
-  "lockHeight": 380,
+  "lockHeight": 377,
   "refHeight": 329,
   "ownerPubKey": "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
   "feeVout": 3,
@@ -849,7 +857,7 @@ Result of `yed_validaterawtransaction`:
   "yedIn": 100000,
   "yedOut": 0,
   "burned": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "blockValid": true,
   "wouldBeRejected": false,
@@ -888,7 +896,7 @@ Result of `yed_getblockverdict`:
       "verdict": "vault-spend-short-burn",
       "yedIn": 50000,
       "yedOut": 0,
-      "feeZat": 62814071,
+      "feeZat": 629722922,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
       "closedVaults": [
         { "txid": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b", "vout": 0 }
@@ -926,10 +934,10 @@ Result of `yed_estimatecollateral`:
 
 ```json
 {
-  "requiredZat": 25125628141,
+  "requiredZat": 251889169000,
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
+  "lockHeight": 377,
+  "claimHeight": 401,
   "minRatioBps": 50000,
   "baseRatioBps": 50000,
   "sigmaMultBps": 10000,
@@ -940,7 +948,7 @@ Result of `yed_estimatecollateral`:
   "source": "a",
   "armed": true,
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "divergenceBps": 25
 }
 ```
@@ -1150,7 +1158,7 @@ Result of `yed_estimatefee`:
 
 ```json
 {
-  "feeZat": 62814071
+  "feeZat": 629722922
 }
 ```
 
@@ -1378,10 +1386,10 @@ Result of `yed_mint`:
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
   "termClass": "A",
-  "lockHeight": 380,
-  "claimHeight": 404,
-  "collateralZat": 25125628141,
-  "feeZat": 62814071,
+  "lockHeight": 377,
+  "claimHeight": 401,
+  "collateralZat": 251889169000,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
   "fundedFrom": "transparent",
   "warning": "",
@@ -1393,7 +1401,7 @@ Result of `yed_mint`:
   "pMint": 1985000,
   "source": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111"
 }
 ```
@@ -1534,25 +1542,29 @@ Result of `yed_redeem`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 25062804070,
+  "collateralOut": 251259436078,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0
 }
 ```
 
-### `yed_claim <vaultTxid> [to] [bundleHex] [wait] [minOutZat]`
+### `yed_claim <vaultTxid> [to] [bundleHex] [wait] [minOutZat] [maxBurnCents]`
 
 Arguments as `yed_redeem`, plus **v3** `bundleHex` and `wait` as `yed_mint` (`to` may be `""`
 for the default), and `minOutZat` (number, optional, default `0` = no bound: the claimant's floor
 on what reaches `to`; refused `claim-out-below-min` at preflight — the collateral less the
-enforcement fee, the attestor fee and the RED-5 residual — and again at build against the exact
-`collateralOut`, nothing signed either time). The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
+RED-5 residual, the claimant intent's value (U-23: the fees come from the claimant's YEC) — and again at build against the exact
+`collateralOut`, nothing signed either time), and `maxBurnCents` (number, optional, default `0` =
+no bound, hardening H-9.3: the claimant's cap on the YED the claim burns; refused
+`claim-burn-above-max` at preflight when the vault's `mintedCents` exceeds it and again at build
+against the exact burn — the debt plus any H4 sub-dollar remainder — nothing signed either time).
+The §3.5 CLAIM of somebody else's underwater vault (from `yed_listclaimable`):
 the V template's claim path (selector 4: scriptSig `OP_4`, U-23), `nLockTime = claimHeight`,
 burns `mintedCents` of the claimant's own YED and moves the collateral into a **claimant intent**
-(the primitive's I template, output 0: owner = `to`'s key, delay `CLAIM_DELAY`) of the
-collateral less the fees and the residual; the fees are paid from YEC the wallet selects (a claim
+(the primitive's I template, output 0, paying `to`, delay `CLAIM_DELAY`) of the
+collateral less the RED-5 residual; the fees are paid from YEC the wallet selects (a claim
 input carries no collateral to pay them from: `yed_claim` funds them), with its own change. `to`
 must be transparent (an intent pays a key; `bad-address` otherwise). The vault becomes
 `CLAIMING`; after `CLAIM_DELAY` blocks the primitive's **`vault_release <intentTxid> 0`** pays the
@@ -1564,7 +1576,7 @@ re-creates the vault as `ACTIVE` at the cancel's output 0 and does not refund th
 `vault-not-active`, `claim-not-yet` (tip below `claimHeight`), `claim-not-underwater` (RED-4
 would fail at the reference snapshot by both clauses), `insufficient-yed`, `change-floor`,
 `mempool-check-failed:<verdict>`, **v3** `bundle-insufficient`, `bundle-malformed`,
-`claim-out-below-min`, `carrier-wait-busy`.
+`claim-out-below-min`, `claim-burn-above-max`, `carrier-wait-busy`.
 
 **v3.** The carrier step first (selector = the vault outpoint), then the CLAIM with the carrier
 input (never `vin[0]`), the attestor fee output when armed and `A ≠ ∅`, and — when
@@ -1584,9 +1596,9 @@ Result of `yed_claim`:
 {
   "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
   "burnedCents": 100000,
-  "feeZat": 62814071,
+  "feeZat": 629722922,
   "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-  "collateralOut": 25062804070,
+  "collateralOut": 251889169000,
   "to": "smExampleTransparentTwin111111111111",
   "extraBurnCents": 0,
   "carrierTxid": "5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c",
@@ -1598,7 +1610,7 @@ Result of `yed_claim`:
   "pEmerg": null,
   "claimPath": "a",
   "bundleSeqs": [ 1, 2 ],
-  "attestFeeZat": 15703517,
+  "attestFeeZat": 157430730,
   "attestPayee": "smExampleBondAddress11111111111111111",
   "residualZat": 0
 }
@@ -1834,20 +1846,20 @@ Result of `yed_listpositions`:
     "ownerKeyId": "1f2e3d4c5b6a79880706050403020100f1e2d3c4",
     "ownerAddress": "yrExampleOwnerAddress111111111111111",
     "termClass": "A",
-    "lockHeight": 380,
-    "claimHeight": 404,
-    "collateralZat": 25125628141,
-    "collateral": 251.25628141,
+    "lockHeight": 377,
+    "claimHeight": 401,
+    "collateralZat": 251889169000,
+    "collateral": 2518.89169,
     "mintedCents": 100000,
     "mintHeight": 332,
     "refHeight": 329,
-    "feePaidZat": 62814071,
+    "feePaidZat": 629722922,
     "closeHeight": null,
     "closingTxid": "",
     "burnedCents": 0,
     "unbacked": false,
     "claimable": false,
-    "underwaterAt": 437800,
+    "underwaterAt": 436700,
     "voidReason": "",
     "scriptPubKey": "045945440020755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e5a6d75765187637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e51c0677652876375027c01b1752102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac67765387637520755e755e755e755e755e755e755e755e755e755e755e755e755e755e755e755ec1692102a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1ac675488029401b1686868",
     "noticed": false,
@@ -1890,7 +1902,7 @@ Result of `yed_listtransactions`:
     "yedOut": 100000,
     "burned": 0,
     "amountCents": 100000,
-    "feeZat": 62814071,
+    "feeZat": 629722922,
     "payee": "smQvTmAz2ExamplePayoutAddress1111111",
     "unbacked": false,
     "expired": false
@@ -1971,7 +1983,8 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `expiring-too-soon`, `index-below-start` | every builder | the index is far enough behind the chain that `R + REF_WINDOW` would expire the transaction at once, or the index has not reached `startHeight + REF_LAG` |
 | `vault-value-too-small` | `yed_redeem`, `yed_claim` | the vault does not cover the network fee plus the enforcement fee (cannot happen for a vault MINT-5 accepted) |
 | `collateral-above-max` | `yed_mint` | maxCollateralZat > 0 and the collateral vout[0] the mint needs exceeds it — at preflight (before the carrier) and again when the MINT is built on the confirmed carrier (RPC_WALLET_ERROR; nothing signed): pass maxCollateralZat = 1 |
-| `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the collateral less the enforcement fee, the attestor fee and the RED-5 residual; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
+| `claim-out-below-min` | `yed_claim` | minOutZat > 0 and what reaches the destination (the claimant intent: the collateral less the RED-5 residual, U-23; the exact collateralOut at build) is below it (RPC_WALLET_ERROR; nothing signed): pass minOutZat = collateralZat |
+| `claim-burn-above-max` | `yed_claim` | maxBurnCents > 0 and the YED the claim burns (the vault's mintedCents at preflight; the exact burn, the debt plus any H4 sub-dollar remainder, at build) exceeds it (hardening H-9.3; RPC_WALLET_ERROR; nothing signed): pass maxBurnCents = 1 |
 | `carrier-wait-busy` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true while half of -rpcthreads (at least one) wait=true calls are already waiting for a carrier (RPC_WALLET_ERROR, before any transaction): retry or pass wait = false |
 | `carrier-timeout` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | wait = true and the carrier did not confirm within -yellowbackcarriertimeout seconds (default 600, max 3600); the carrier stays outstanding and is swept once its window lapses |
 
@@ -1999,7 +2012,7 @@ passes a number as a string and the node answers `RPC_INVALID_PARAMETER` (N27).
 | `yed_estimatesend` | 0 (Phase 8; the recipients object or the plain cents number) |
 | `yed_unlockcoin` | 1 (Phase 8; the vout) |
 | `yed_gettag`, `yed_getvault`, `yed_gettxinfo`, `yed_decodepayload`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_validateaddress`, `yed_redeem`, `yed_listpositions` | none (all strings) |
-| `yed_claim` | 3, 4 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit) |
+| `yed_claim` | 3, 4, 5 (**v3**; `wait`; `minOutZat` since the 2026-10-01 audit; `maxBurnCents` since rpcversion 4) |
 | `yed_mint` | 0, 1, 4, 5 (**v3**: `wait` joins `cents`, `lockBlocks`; `maxCollateralZat` since the 2026-10-01 audit) |
 | `yed_listtokens` | 2, 3 (`count`, `skip`; 2026-10-01 audit) |
 | `yed_listclaimable` | 0, 1 (`count`, `skip`; 2026-10-01 audit) |
