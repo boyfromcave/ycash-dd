@@ -714,7 +714,7 @@ struct SpentIntent
  * the claimant intent's release closes the vault (CLAIMED); its cancel re-creates the byte-identical
  * vault, which becomes the same position again (ACTIVE at the new outpoint, its collateral the re-lock's
  * value), and the claim's burn is not refunded (U-24). The owner's residual intent may only be released.
- * Returns the verdict; OK on success.
+ * The re-created vault must be vout[0]. Returns the verdict; OK on success.
  */
 std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const SpentIntent& in,
                              const std::optional<FoundPayload>& fp, TxLogRecord& log, Totals& totals, std::set<unsigned int>& yedOutputs)
@@ -744,7 +744,9 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         if (relock >= 0) return verdict::INTENT_CANCEL_NO_VAULT;
         relock = (int)j;
     }
-    if (relock < 0) return verdict::INTENT_CANCEL_NO_VAULT;
+    // The re-created vault is vout[0] (vault_buildcancel's shape), so the position stays "txid:0" as every
+    // Yellowback position is (the wallet addresses vaults by txid).
+    if (relock != 0) return verdict::INTENT_CANCEL_NO_VAULT;
     const COutPoint reopened(txid, (uint32_t)relock);
     VaultRecord v = vault.value();
     v.status = (uint8_t)VaultStatus::ACTIVE;

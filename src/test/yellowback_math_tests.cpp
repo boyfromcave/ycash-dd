@@ -14,6 +14,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+/** The YED attestor set the regtest parameters of these cases name (U-22). */
+static inline uint256 TestSet() { return uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7"); }
+
 using namespace yellowback;
 
 namespace {
@@ -173,7 +176,7 @@ BOOST_AUTO_TEST_CASE(mint5_min_ratio_and_required_collateral_worked_example)
 BOOST_AUTO_TEST_CASE(mint5_required_collateral_overflow_at_max_mint_and_price_min)
 {
     const Params& m = MainParams();
-    const Cents bigMint = RegtestParams(1, 0, 0, 0).maxMint;
+    const Cents bigMint = RegtestParams(1, 0, 0, TestSet()).maxMint;
     BOOST_CHECK_EQUAL(bigMint, 1000000);
     const int worst = MinRatioBps(m.baseRatioBps[0], m.sigmaMultMaxBps);
     BOOST_CHECK_EQUAL(worst, 150000);
@@ -259,7 +262,7 @@ BOOST_AUTO_TEST_CASE(fee1_min_dominates_small_vault)
     // 6,000 YEC (the worked vault) pays 9 YEC.
     BOOST_CHECK_EQUAL(FeeZat(6000 * COIN, m.feeMin, m.feeBps), 9 * COIN);
     // The regtest column keeps 25 bps: 200 YEC is exactly FEE_MIN, 201 YEC pays 0.5025 YEC.
-    const Params r = RegtestParams(1, 0, 0, 0);
+    const Params r = RegtestParams(1, 0, 0, TestSet());
     BOOST_CHECK_EQUAL(FeeZat(200 * COIN, r.feeMin, r.feeBps), r.feeMin);
     BOOST_CHECK_EQUAL(FeeZat(201 * COIN, r.feeMin, r.feeBps), 50250000);
 }
@@ -317,7 +320,7 @@ BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
         BOOST_CHECK_EQUAL(m.baseRatioBps[1], 40000);
         BOOST_CHECK_EQUAL(m.baseRatioBps[2], 30000);
     }
-    Params r = RegtestParams(10, 0, 0, 0);
+    Params r = RegtestParams(10, 0, 0, TestSet());
     BOOST_CHECK(ClassesContiguousOrEmpty(r));
     for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(r.IsClassEnabled(i));
     for (int i = 1; i < NUM_CLASSES; i++) BOOST_CHECK_EQUAL(r.classMin[i], r.classMax[i - 1] + 1);
@@ -334,7 +337,7 @@ BOOST_AUTO_TEST_CASE(mint2_term_classes_are_contiguous_and_disjoint)
 // H-5: the params invariant is "contiguous or empty"; an empty range disables a class without a schema change.
 BOOST_AUTO_TEST_CASE(params_class_ranges_contiguous_or_empty)
 {
-    Params p = RegtestParams(10, 0, 0, 0);                  // A [48, 96], B [97, 144], C [145, 240]
+    Params p = RegtestParams(10, 0, 0, TestSet());                  // A [48, 96], B [97, 144], C [145, 240]
     BOOST_CHECK(ClassesContiguousOrEmpty(p));
     Params noB = p;                                         // B empty: C must then follow A directly
     noB.classMin[1] = 97; noB.classMax[1] = 96;
@@ -377,57 +380,24 @@ BOOST_AUTO_TEST_CASE(halt2_floor_below_every_enabled_class_ratio)
         }
         BOOST_CHECK(!(m.globalRatioHaltBps < m.baseRatioBps[2]));   // would fail were C enabled
     }
-    const Params r = RegtestParams(10, 0, 0, 0);
+    const Params r = RegtestParams(10, 0, 0, TestSet());
     BOOST_CHECK_EQUAL(r.recapRatioBps, 2 * r.globalRatioHaltBps);
     for (int i = 0; i < NUM_CLASSES; i++) BOOST_CHECK(r.globalRatioHaltBps < r.baseRatioBps[i]);
 }
 
-// Rule: ACT-5
-// Rule: ACT-5
-BOOST_AUTO_TEST_CASE(act5_param_set_start_admissible)
-{
-    // W19 over a synthetic run of snapshots: ENFORCEMENT is set on [1000, 1200) and nowhere else.
-    const int W = 64, sunset = 5000;
-    auto halted = [](int h) { return h >= 1000 && h < 1200; };
-    BOOST_CHECK(ParamSetStartAdmissible(5000, sunset, W, halted));          // L8: at the sunset
-    BOOST_CHECK(ParamSetStartAdmissible(6000, sunset, W, halted));          // and after it
-    BOOST_CHECK(!ParamSetStartAdmissible(4999, sunset, W, halted));         // before it, with no freeze
-    BOOST_CHECK(ParamSetStartAdmissible(1064, sunset, W, halted));          // [1000, 1063] all halted: the first admissible X
-    BOOST_CHECK(ParamSetStartAdmissible(1200, sunset, W, halted));          // [1136, 1199]: the last
-    BOOST_CHECK(!ParamSetStartAdmissible(1063, sunset, W, halted));         // 999 is not halted
-    BOOST_CHECK(!ParamSetStartAdmissible(1201, sunset, W, halted));         // 1200 is not halted
-    BOOST_CHECK(!ParamSetStartAdmissible(1100, sunset, 2 * W, halted));     // a wider window reaches 972
-    BOOST_CHECK(!ParamSetStartAdmissible(32, sunset, W, halted));           // the window would start below height 0
-    // No sunset (regtest 0): only the freeze clause can admit a start.
-    BOOST_CHECK(!ParamSetStartAdmissible(10, 0, W, halted));
-    BOOST_CHECK(ParamSetStartAdmissible(1100, 0, W, halted));
-    // The mainnet set: a change before its sunset with enforcement never halted is not admissible.
-    const Params& m = MainParams();
-    BOOST_CHECK(!ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
-    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight, m.enforceUntilHeight, m.signalWindow, [](int) { return false; }));
-    BOOST_CHECK(ParamSetStartAdmissible(m.enforceUntilHeight - 1, m.enforceUntilHeight, m.signalWindow, [](int) { return true; }));
-}
-
-// The §3.1 table, both columns; the four regtest flags land where the plan says.
+// The §3.1 table, both columns; the regtest flags land where the plan says.
 BOOST_AUTO_TEST_CASE(act5_params_tables)
 {
     const Params& m = MainParams();
     BOOST_CHECK_EQUAL(m.network, "main");
-    BOOST_CHECK(m.IsConfigured());    // set per release: with ycashd 6.21.0-rc1, as on the 6.20.0 line
-    BOOST_CHECK_EQUAL(m.startHeight, 3075000);
-    BOOST_CHECK_EQUAL(m.enforceUntilHeight, m.startHeight + 420480);   // L8: one year of blocks
+    // U-22: YED starts at the UPGRADE_VAULT height with the network's attestor set; neither is set on mainnet yet.
+    BOOST_CHECK(!m.IsConfigured());
+    BOOST_CHECK_EQUAL(m.startHeight, 0);
+    BOOST_CHECK(m.attestorSetId.IsNull());
+    BOOST_CHECK_EQUAL(m.claimDelay, 1152);                    // CLAIM_DELAY: one day (U-23)
     BOOST_CHECK_EQUAL(m.pFastWindow, 96);   BOOST_CHECK_EQUAL(m.pFastMinFill, 48);
     BOOST_CHECK_EQUAL(m.pMidWindow, 576);   BOOST_CHECK_EQUAL(m.pMidMinFill, 384);
     BOOST_CHECK_EQUAL(m.pSlowWindow, 2016); BOOST_CHECK_EQUAL(m.pSlowMinFill, 1344);
-    BOOST_CHECK_EQUAL(m.signalWindow, 2016);
-    BOOST_CHECK_EQUAL(m.activationThreshold, 1512);
-    BOOST_CHECK_EQUAL(m.participationFloor, 1210);
-    BOOST_CHECK_EQUAL(m.activationDelay, 2016);
-    BOOST_CHECK_EQUAL(m.enforcementFloor, 1008);
-    BOOST_CHECK_EQUAL(m.enforcementResume, 1210);
-    BOOST_CHECK_EQUAL(m.valveBlocks, 6);
-    BOOST_CHECK_EQUAL(m.abandonBlocks, m.grace);              // W21: = GRACE, 30 days
-    BOOST_CHECK(m.abandonBlocks >= m.grace);                   // W21 invariant, every network
     BOOST_CHECK_EQUAL(m.nReg, 576);
     BOOST_CHECK_EQUAL(m.nPenalty, 288);
     BOOST_CHECK_EQUAL(m.peerLag, 10);
@@ -459,28 +429,18 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(m.volWindow / m.volStep, 42);   // 43 samples, 42 returns
     BOOST_CHECK_EQUAL(TestParams().network, "test");
     BOOST_CHECK_EQUAL(TestParams().grace, 34560);
-    BOOST_CHECK_EQUAL(TestParams().abandonBlocks, TestParams().grace);
-    BOOST_CHECK(TestParams().abandonBlocks >= TestParams().grace);
 
-    Params r = RegtestParams(150, 12345, 700, 9000);
+    Params r = RegtestParams(150, 12345, 700, TestSet());
     BOOST_CHECK_EQUAL(r.network, "regtest");
     BOOST_CHECK(r.IsConfigured());
     BOOST_CHECK_EQUAL(r.startHeight, 150);
     BOOST_CHECK_EQUAL(r.sigmaRefBps, 12345);
     BOOST_CHECK_EQUAL(r.supplyCapBps, 700);
-    BOOST_CHECK_EQUAL(r.enforceUntilHeight, 9000);
+    BOOST_CHECK(r.attestorSetId == TestSet());
+    BOOST_CHECK_EQUAL(r.claimDelay, 10);
     BOOST_CHECK_EQUAL(r.pFastWindow, 8);   BOOST_CHECK_EQUAL(r.pFastMinFill, 4);
     BOOST_CHECK_EQUAL(r.pMidWindow, 24);   BOOST_CHECK_EQUAL(r.pMidMinFill, 16);
     BOOST_CHECK_EQUAL(r.pSlowWindow, 64);  BOOST_CHECK_EQUAL(r.pSlowMinFill, 43);
-    BOOST_CHECK_EQUAL(r.signalWindow, 64);
-    BOOST_CHECK_EQUAL(r.activationThreshold, 48);
-    BOOST_CHECK_EQUAL(r.participationFloor, 39);
-    BOOST_CHECK_EQUAL(r.activationDelay, 64);
-    BOOST_CHECK_EQUAL(r.enforcementFloor, 32);
-    BOOST_CHECK_EQUAL(r.enforcementResume, 39);
-    BOOST_CHECK_EQUAL(r.valveBlocks, 6);
-    BOOST_CHECK_EQUAL(r.abandonBlocks, 128);
-    BOOST_CHECK(r.abandonBlocks >= r.grace);                   // W21 invariant (regtest GRACE 24)
     BOOST_CHECK_EQUAL(r.nReg, 24);
     BOOST_CHECK_EQUAL(r.nPenalty, 12);
     BOOST_CHECK_EQUAL(r.peerLag, 4);
@@ -499,7 +459,8 @@ BOOST_AUTO_TEST_CASE(act5_params_tables)
     BOOST_CHECK_EQUAL(r.globalRatioHaltBps, 25000);
     BOOST_CHECK_EQUAL(r.recapRatioBps, 50000);
     BOOST_CHECK_EQUAL(r.maxMint, 1000000);
-    BOOST_CHECK(!RegtestParams(0, 0, 0, 0).IsConfigured());
+    BOOST_CHECK(!RegtestParams(0, 0, 0, TestSet()).IsConfigured());
+    BOOST_CHECK(!RegtestParams(150, 0, 0, uint256()).IsConfigured());   // U-22: no attestor set, no YED
     BOOST_CHECK(!ParamsForNetwork("regtest").IsConfigured());
     BOOST_CHECK_THROW(ParamsForNetwork("nope"), std::runtime_error);
 }
@@ -561,10 +522,10 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     off.attestRequired = false;
     BOOST_CHECK(!off.IsArmed(true));
 
-    Params r = RegtestParams(150, 0, 0, 0);   // the two v3 flags default to 3 / scriptsig, H-1's to off
+    Params r = RegtestParams(150, 0, 0, TestSet());   // the two v3 flags default to 3 / scriptsig, H-1's to off
     BOOST_CHECK_EQUAL(r.attestArmMin, 3);
     BOOST_CHECK_EQUAL(r.mintRequiresArmed, false);
-    BOOST_CHECK_EQUAL(RegtestParams(150, 0, 0, 0, 3, BundleCarrier::SCRIPTSIG, true).mintRequiresArmed, true);
+    BOOST_CHECK_EQUAL(RegtestParams(150, 0, 0, TestSet(), 3, BundleCarrier::SCRIPTSIG, true).mintRequiresArmed, true);
     BOOST_CHECK_EQUAL(Params().mintRequiresArmed, false);
     BOOST_CHECK(r.bundleCarrier == BundleCarrier::SCRIPTSIG);
     BOOST_CHECK_EQUAL(r.attestArmDelay, 8);
@@ -599,10 +560,10 @@ BOOST_AUTO_TEST_CASE(arm1_v3_params_tables)
     BOOST_CHECK_EQUAL(r.attestInterval, 4);
     BOOST_CHECK_EQUAL(r.walletConfirmations, 1);
     // The flags land: 0 = never arms; every carrier spelling parses.
-    Params never = RegtestParams(150, 0, 0, 0, 0, BundleCarrier::EITHER);
+    Params never = RegtestParams(150, 0, 0, TestSet(), 0, BundleCarrier::EITHER);
     BOOST_CHECK_EQUAL(never.attestArmMin, 0);
     BOOST_CHECK(never.bundleCarrier == BundleCarrier::EITHER);
-    BOOST_CHECK(RegtestParams(1, 0, 0, 0, 7, BundleCarrier::OP_RETURN).bundleCarrier == BundleCarrier::OP_RETURN);
+    BOOST_CHECK(RegtestParams(1, 0, 0, TestSet(), 7, BundleCarrier::OP_RETURN).bundleCarrier == BundleCarrier::OP_RETURN);
     BOOST_CHECK(ParseBundleCarrier("scriptsig").value() == BundleCarrier::SCRIPTSIG);
     BOOST_CHECK(ParseBundleCarrier("opreturn").value() == BundleCarrier::OP_RETURN);
     BOOST_CHECK(ParseBundleCarrier("either").value() == BundleCarrier::EITHER);
@@ -639,7 +600,7 @@ BOOST_AUTO_TEST_CASE(bundle1_bond_weight_clamps_age)
     BOOST_CHECK(BondWeight(-1, 10, m.ageCap) == arith_uint256(0));
     BOOST_CHECK(BondWeight(m.bondMin, 10, 0) == arith_uint256(0));
     // Regtest: 10 YEC, cap 64.
-    Params r = RegtestParams(1, 0, 0, 0);
+    Params r = RegtestParams(1, 0, 0, TestSet());
     BOOST_CHECK(BondWeight(r.bondMin, 100, r.ageCap) == arith_uint256(10 * COIN) * arith_uint256(64));
 }
 
@@ -788,8 +749,8 @@ BOOST_AUTO_TEST_CASE(afee1_attestor_fee_is_half_of_the_pool_fee)
     BOOST_CHECK_EQUAL(AttestFeeZat(3, m.attestFeeBps), 1);
     BOOST_CHECK_EQUAL(AttestFeeZat(7, m.attestFeeBps), 3);
     // The regtest column keeps D-3's quarter: 15 YEC => 3.75 YEC, 7 zat => 1.
-    BOOST_CHECK_EQUAL(AttestFeeZat(15 * COIN, RegtestParams(1, 0, 0, 0).attestFeeBps), 375000000);
-    BOOST_CHECK_EQUAL(AttestFeeZat(7, RegtestParams(1, 0, 0, 0).attestFeeBps), 1);
+    BOOST_CHECK_EQUAL(AttestFeeZat(15 * COIN, RegtestParams(1, 0, 0, TestSet()).attestFeeBps), 375000000);
+    BOOST_CHECK_EQUAL(AttestFeeZat(7, RegtestParams(1, 0, 0, TestSet()).attestFeeBps), 1);
     // Degenerate: zero or negative inputs give 0; 10^4 bps is the whole fee; MAX_MONEY does not overflow.
     BOOST_CHECK_EQUAL(AttestFeeZat(0, m.attestFeeBps), 0);
     BOOST_CHECK_EQUAL(AttestFeeZat(-1, m.attestFeeBps), 0);
