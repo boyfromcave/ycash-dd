@@ -28,15 +28,14 @@
 // plus BuildBondRedeem / ParseBondRedeem / BondScriptPubKey, ParseTemplateSpend,
 // SetCreateBody::Valid().
 //
-// ASSUMED, NOT IN THOSE HEADERS:
+// ASSUMED, NOT IN THOSE HEADERS (core agent adds it under this exact name, A-9 reconciled):
 //   bool vault::ActFieldsValid(const vault::Act&)   the context-free field rules of §15.5
 //       (SET_CREATE ranges/flags, bondLocktime < 500000000, burn in {0,1}, roles in {1,2},
 //       equivocation signature headers 31..34). Python rejects these at decode; if C++
 //       rejects them in DecodePayload the call below is never reached for them.
 //
-// KNOWN DIVERGENCE (D-1, VAULT_VECTORS.md): acts[] "set-create-bondmin-above-max-money" is
-// valid under §15.5 (bondMin >= 1 only); a SetCreateBody::Valid() that adds MoneyRange(bondMin)
-// fails it. Decide one reading, then fix the other side and regenerate the JSON.
+// D-1 reconciled 2026-10-05 (plan §15): 1 <= bondMin <= MAX_MONEY; the vector's
+// "bond-min-above-max-money" is a stage "field" rejection.
 //
 // A scratch replay of this JSON against up/up-core-dd a28aff063's objects (2026-10-05, 233
 // checks) agreed on every template, intent, bond, selector, act, message, signature

@@ -240,12 +240,13 @@ class ActTests(unittest.TestCase):
         for bad in (dict(seats=0), dict(seats=16), dict(unlockThreshold=0), dict(cancelThreshold=6),
                     dict(slashThreshold=6), dict(flags=2), dict(flags=0x81), dict(rateLimitBps=10001),
                     dict(rateWindow=0), dict(rateWindow=1048577), dict(livenessWindow=0),
-                    dict(livenessWindow=1048577), dict(bondMin=0), dict(bondMin=-5),
+                    dict(livenessWindow=1048577), dict(bondMin=0), dict(bondMin=-5), dict(bondMin=v.MAX_MONEY + 1),
                     dict(admitKey='04' + create['admitKey'][2:])):
             with self.assertRaises(v.VaultError, msg=str(bad)):
                 v.decode_act(v.encode_act(dict(create, **bad), check=False))
         for edge in (dict(seats=15, unlockThreshold=15, cancelThreshold=15, slashThreshold=15),
-                     dict(rateLimitBps=10000), dict(rateLimitBps=0), dict(rateWindow=1048576), dict(bondMin=1)):
+                     dict(rateLimitBps=10000), dict(rateLimitBps=0), dict(rateWindow=1048576), dict(bondMin=1),
+                     dict(bondMin=v.MAX_MONEY)):
             v.decode_act(v.encode_act(dict(create, **edge)))
         join = self._all()[1]
         with self.assertRaises(v.VaultError):

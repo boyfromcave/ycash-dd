@@ -699,32 +699,6 @@
    "script": "6a2459560106b97b8d54e00798efbcf1ef513d398554570042984498bffff3cd3b2b2a3bd7fd4120cf0ef46140b0627749e19c3b8ad1082612f7cc670e5c12119c3e24d5f2c94c5d3185104ccd86f79fb7a7f88c7651f7ff27e5c19fbc96743bdbff8fc82ff86a4f411fa6fd774451a2d06b4422f680c370d62ccfce3425d76e6de500d875a11a8b7f2031285d20f4e60644b2f8cc573addef8079c27b561cd26757e078e7b3128b8d1b4120b03b835df90935b11f23afa0f97fe6a6a4dd7a532930fd2aef9dce5b10171a8c58c4e1b70a4afeb58e8075a69b84e2a54c4a37433d05cc69755f1f7f95200a74"
   },
   {
-   "name": "set-create-bondmin-above-max-money",
-   "type": 1,
-   "fields": {
-    "type": 1,
-    "seats": 1,
-    "unlockThreshold": 1,
-    "cancelThreshold": 1,
-    "slashThreshold": 1,
-    "flags": 0,
-    "rateLimitBps": 0,
-    "rateWindow": 144,
-    "livenessWindow": 1440,
-    "bondMin": 2100000000000001,
-    "bondLockMin": 100,
-    "maturity": 10,
-    "admitKey": "03eca519f9711ff449df0cb37815ede9e8b0771186312e12e928ea1b8845996837"
-   },
-   "payload": "595601010101010100000090000000a00500000140075af0750700640000000a00000003eca519f9711ff449df0cb37815ede9e8b0771186312e12e928ea1b8845996837",
-   "prevout": "09adf86a4fcd819e8c75bc9c5c6a2edcb536edd930433fae89561742916c6ebd03000000",
-   "actMsg": "8f3ef21213bab0d1e463cfc450dc7e83c6ea5775036b1fdd70bdc35c353f4b82",
-   "signers": [],
-   "sigs": [],
-   "recovered": [],
-   "script": "6a44595601010101010100000090000000a00500000140075af0750700640000000a00000003eca519f9711ff449df0cb37815ede9e8b0771186312e12e928ea1b8845996837"
-  },
-  {
    "name": "set-create-admit-key-off-curve-accepted",
    "type": 1,
    "fields": {
@@ -899,6 +873,12 @@
   {
    "name": "bond-min-negative",
    "payload": "595601010705010500e803f0030000c00f0000ffffffffffffffff801f00009000000003eca519f9711ff449df0cb37815ede9e8b0771186312e12e928ea1b8845996837",
+   "reason": "bondMin",
+   "stage": "field"
+  },
+  {
+   "name": "bond-min-above-max-money",
+   "payload": "595601010705010500e803f0030000c00f00000140075af0750700801f00009000000003eca519f9711ff449df0cb37815ede9e8b0771186312e12e928ea1b8845996837",
    "reason": "bondMin",
    "stage": "field"
   },

@@ -224,8 +224,6 @@ def build():
         ('set-remove-burn', v.act_set_remove(set_a, P['member-4'], 1), ['member-0', 'member-1']),
         ('set-equivocation', eqv, []),
         ('set-winddown', v.act_set_winddown(set_a), ['member-0', 'member-1', 'member-2']),
-        ('set-create-bondmin-above-max-money', v.act_set_create(1, 1, 1, 1, P['admit'], bond_min=21000000 * v.COIN + 1),
-         []),   # D-1: 15.5 says only bondMin >= 1
         ('set-create-admit-key-off-curve-accepted', v.act_set_create(1, 1, 1, 1, off_curve), []),   # A-2
         ('set-join-member-key-off-curve-accepted', v.act_set_join(set_a, off_curve, 2000, 0), []),   # A-2
     ]
@@ -279,6 +277,7 @@ def build():
         ('liveness-window-1048577', bad_create(livenessWindow=1048577), 'window'),
         ('bond-min-0', bad_create(bondMin=0), 'bondMin'),
         ('bond-min-negative', bad_create(bondMin=-1), 'bondMin'),
+        ('bond-min-above-max-money', bad_create(bondMin=v.MAX_MONEY + 1), 'bondMin'),   # D-1
         ('admit-key-04', bad_create(admitKey='04' + create['admitKey'][2:]), 'key'),
         ('join-locktime-500000000', v.encode_act(dict(join, bondLocktime=500000000), check=False), 'locktime'),
         ('remove-burn-2', v.encode_act(dict(rem, burn=2), check=False), 'burn'),

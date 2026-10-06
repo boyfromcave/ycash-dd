@@ -54,7 +54,7 @@ Where §15 left a choice, the Python took the reading below; the vector makes an
 - **A-2 "compressed".** 33 bytes with prefix 02/03, **no curve check** (the C++ library's reading,
   the smaller one). Off-curve keys parse (`owner-key-off-curve-accepted`,
   `*-off-curve-accepted` acts); they can never sign or recover.
-- **A-3 BIP68 height test.** §15.2's prose says "coin height + n ≤ spending height − 1", but it
+- **A-3 BIP68 height test** (reconciled: Bitcoin's test exactly). §15.2's prose says "coin height + n ≤ spending height − 1", but it
   also says "Bitcoin's CalculateSequenceLocks/EvaluateSequenceLocks", which give coin height + n
   − 1 < height, i.e. coin height + n ≤ height. The model follows Bitcoin: RELEASE is valid from
   `coinHeight + delay` and CANCEL (I-2, `h − coinHeight < delay`) until `coinHeight + delay − 1`,
@@ -75,7 +75,7 @@ Where §15 left a choice, the Python took the reading below; the vector makes an
   `S_1` only); REMOVE and WINDDOWN exactly `slashThreshold`.
 - **A-8 act carrier.** After OP_RETURN every element is a canonical data push; an OP_RETURN
   whose first push begins "YV" is an act and must parse; each `S_i` is 65 bytes.
-- **A-9 context-free field rules** (CREATE ranges and flags, `bondLocktime < 500000000`,
+- **A-9 context-free field rules** (reconciled: C++ rejects them at rule time via `vault::ActFieldsValid`) (CREATE ranges and flags, `bondLocktime < 500000000`,
   `burn ∈ {0,1}`, roles `∈ {1,2}`, equivocation signature headers 31..34) are rejected by the
   Python decoder; `stage: "field"` marks them so a C++ that checks them later still passes.
 - **A-10 selectors.** An I takes only OP_1..OP_3; OP_4 on an I fails S-1.
@@ -85,8 +85,8 @@ Where §15 left a choice, the Python took the reading below; the vector makes an
   WITHDRAWN), the template input's rules, V outputs (V-1), then the act.
 - **A-13 frozen bonds** are frozen by outpoint: a burned or ejected member who rejoins with a new
   bond leaves the old one frozen.
-- **D-1 (open) `bondMin` upper bound.** §15.5 says only `bondMin ≥ 1`; the C++ library adds
-  `MoneyRange(bondMin)`. `set-create-bondmin-above-max-money` pins the spec's reading and fails
-  against that C++ until one side changes (then regenerate).
+- **D-1 `bondMin` range** (reconciled 2026-10-05, plan §15): `1 ≤ bondMin ≤ MAX_MONEY`
+  (`MoneyRange`). `bond-min-above-max-money` is a stage `field` rejection; `set-create-open-max`
+  uses `bondMin = MAX_MONEY`.
 - Recoverable headers 33/34 (recid 2/3, R.x ≥ n) cannot be produced from real keys; the vectors
   cover 31 and 32 only.

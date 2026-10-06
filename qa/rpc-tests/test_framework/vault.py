@@ -133,6 +133,7 @@ MEMBER_WITHDRAWN = 'WITHDRAWN'
 
 VAULT_FEE = 10000                        # zat; the conventional fee the builders leave
 COIN = 100000000
+MAX_MONEY = 21000000 * COIN
 
 
 class VaultError(Exception):
@@ -953,7 +954,7 @@ def decode_act(p):
             raise VaultError('bad-vault-act-rate')
         if not 1 <= rw <= MAX_WINDOW or not 1 <= lw <= MAX_WINDOW:
             raise VaultError('bad-vault-act-window')
-        if bond_min < 1:
+        if not 1 <= bond_min <= MAX_MONEY:          # D-1 (reconciled 2026-10-05): MoneyRange
             raise VaultError('bad-vault-act-bondmin')
     elif t == ACT_SET_JOIN:
         lt, vout = struct.unpack('<IB', body[65:70])
