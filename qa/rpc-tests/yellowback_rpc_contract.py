@@ -375,7 +375,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         assert_equal(user.yed_listclaimable(100, len(claimable)), [])
         # audit F-1: minOutZat floors what reaches the claimant; refused at preflight, before any carrier
         collateral_a = user.yed_getvault(mint_a['txid'])['collateralZat']
-        assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a)
+        assert_rpc_error('claim-out-below-min', claimant.yed_claim, mint_a['txid'], '', '', False, collateral_a + 1)   # U-23: the intent carries the whole collateral here
         assert_equal(claimant.yed_sweepcarriers()['outstanding'], 0)
         claimed = c.check('yed_claim', wallet_claim(self, claimant, mint_a['txid'], min_out_zat=collateral_a // 2))   # 100 + 10000 in, 1 YED change
         assert_greater_than(claimed['collateralOut'], collateral_a // 2)
