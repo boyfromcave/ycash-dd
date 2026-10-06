@@ -98,6 +98,7 @@ struct BuiltTx
     CAmount vaultValue;
     CPubKey ownerPubKey;
     std::vector<std::pair<CScript, CAmount>> yedPrevs;     //!< scriptPubKey/value of vin[1..] (YED inputs)
+    std::vector<std::pair<CScript, CAmount>> fundPrevs;    //!< CLAIM (U-23): the YEC inputs after the YED ones that pay the fees (the vault's value goes to intents)
 
     // v3 (plan §3.5, §4.5): the carrier and what the bundle decided
     std::optional<CarrierRecord> carrier;   //!< the carrier this transaction spends (MINT / CLAIM / NOTICE / EQUIVOCATION); CARRIER: the record to persist
@@ -152,12 +153,13 @@ struct MintShape
     CAmount feeZat;                         //!< FeeZat(collateralZat)
     std::optional<CKeyID> attestPayee;      //!< v3 AFEE-1: P2PKH(bondPubKey(s)) of attestFeeZat after the pool fee; nullopt under AFEE-0
     CAmount attestFeeZat;
+    CScript vaultScript;                    //!< U-23: the V template (YedVaultScript) vout[0] carries
 
     MintShape() : cents(0), termClass(0), lockHeight(0), claimHeight(0), refHeight(0), collateralZat(0), feeZat(0), attestFeeZat(0) {}
 };
 
 /**
- * vout[0] P2SH(vaultScript), vout[1] P2PKH(owner) TOKEN_VALUE, vout[2] OP_RETURN MINT
+ * vout[0] the V template (shape.vaultScript, U-23), vout[1] P2PKH(owner) TOKEN_VALUE, vout[2] OP_RETURN MINT
  * payload (feeVout = 3 or 0xFF), vout[3] P2PKH(payee) feeZat when there is a payee, then
  * (v3) P2PKH(attestPayee) attestFeeZat when there is one (vout[4] with both fees, vout[3]
  * under FEE-0). `feeVout` / `attestFeeVout` receive the index or -1. Throws on an unencodable shape.
@@ -188,6 +190,12 @@ struct VaultSpendShape
     CAmount residualZat;                    //!< RED-5: > 0 => an output P2PKH(ownerPubKey) of residualZat
     CPubKey ownerPubKey;                    //!< the residual's payee
     CAmount carrierValue;                   //!< CARRIER_VALUE when a carrier input is present (its value joins the inputs), else 0
+    // U-23: a claim (ownerPath false, withPayload) moves the whole vault into intents built from vaultParams:
+    // the claimant's (paying collateralScript) and, when residualZat > 0, the owner's (paying P2PKH(ownerPubKey));
+    // the fees come from `funding` (YEC inputs after the YED ones), the rest of which goes to fundingChange.
+    vault::VaultParams vaultParams;
+    std::vector<std::pair<COutPoint, CAmount>> funding;
+    CScript fundingChange;
 
     VaultSpendShape() : vaultValue(0), lockHeight(0), claimHeight(0), ownerPath(true), withPayload(true), refHeight(0), feeZat(0),
                         changeCents(0), networkFee(0), attestFeeZat(0), residualZat(0), carrierValue(0) {}
@@ -204,13 +212,19 @@ struct VaultSpendPlan
     int changeVout;                         //!< -1 if none
     int64_t burnCents;                      //!< yedIn - changeCents
     int attestFeeVout;                      //!< v3: -1 if none
-    int residualVout;                       //!< v3: -1 if none
+    int residualVout;                       //!< v3: -1 if none (U-23: the owner's residual intent)
+    int fundingChangeVout;                  //!< U-23 claim: the YEC change of the fee inputs, -1 if none
 
-    VaultSpendPlan() : collateralOut(0), nLockTime(0), feeVout(-1), changeVout(-1), burnCents(0), attestFeeVout(-1), residualVout(-1) {}
+    VaultSpendPlan() : collateralOut(0), nLockTime(0), feeVout(-1), changeVout(-1), burnCents(0), attestFeeVout(-1), residualVout(-1), fundingChangeVout(-1) {}
 };
 
 /**
- * Transparent destination: vout[0] collateral, [fee], [YED change], [attestor fee], [residual],
+ * U-23 claim (transparent destination only): vout[0] the claimant's intent of vaultValue - residualZat,
+ * [fee], [YED change], [attestor fee], [the owner's residual intent], payload, [the fee inputs' YEC change];
+ * nLockTime = claimHeight (the V's appHeight). The fee outputs and the network fee come from the carrier,
+ * YED and funding inputs; throws `insufficient-yec` when they do not cover them.
+ *
+ * Owner path, transparent destination: vout[0] collateral, [fee], [YED change], [attestor fee], [residual],
  * payload — v2's order with the v3 outputs before the payload; when the attestor fee would land at
  * index 1 (no pool fee, no change) the payload moves before it, since AFEE-1 excludes vout[1].
  * Sapling destination: [YED change] at vout[0], [payload], [fee], [attestor fee], [residual] (S11) —
@@ -222,9 +236,9 @@ struct VaultSpendPlan
 VaultSpendPlan PlanVaultSpend(const VaultSpendShape& shape);
 
 /**
- * Owner path: sign vin[0] with the vault owner's key over the vault script, the vault's nValue and
- * `branchId` (ZIP-243 binds both, mapping §13.1) and set `<sig> OP_1 <script>`; claim path: set
- * `OP_0 <script>`. Then SignSignature every YED input (out.yedPrevs) with the same branch id. The
+ * Owner path: sign vin[0] with the vault owner's key over the V script (bare, so it is the scriptCode),
+ * the vault's nValue and `branchId` (ZIP-243 binds both, mapping §13.1) and set `<sig> OP_2` (the V's owner
+ * selector, U-23); claim path: set `OP_4` (the APP selector). Then the claim's fee inputs (out.fundPrevs). Then SignSignature every YED input (out.yedPrevs) with the same branch id. The
  * keystore must hold the owner key (owner path) and the YED keys. Sapling shape: FinishSapling()
  * first. Fills out.ownYedOutputs with the change output. A CWallet is a CKeyStore.
  */
@@ -408,8 +422,6 @@ void SignBuiltInputs(BuiltTx& out, const CKeyStore& keystore, uint32_t branchId)
 /** The dry run of a built transaction against the live index (an overlay); throws `<verdict>: …` on refusal. cs_yellowback held. */
 void DryRunBuilt(YellowbackWallet& yw, const BuiltTx& out);
 
-/** The §3.5 SWEEP of an own ACTIVE vault (L10): owner path, no burn, no fee, no payload. The caller checks IsAbandoned(). Unsigned. */
-BuiltTx BuildSweep(YellowbackWallet& yw, const uint256& vaultTxid, const std::string& to = "");
 
 /** Sapling shape: run TransactionBuilder::Build() (proofs, binding signature). No lock may be held. */
 void FinishSapling(BuiltTx& out);

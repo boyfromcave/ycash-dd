@@ -1,5 +1,4 @@
 // Copyright (c) 2020 The Zcash developers
-// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -16,7 +15,6 @@ extern bool fExperimentalPaymentDisclosure;
 extern bool fExperimentalInsightExplorer;
 extern bool fExperimentalLightWalletd;
 extern bool fExperimentalAtomicSwaps;
-extern bool fExperimentalYellowback;
 
 std::optional<std::string> InitExperimentalMode();
 std::vector<std::string> GetExperimentalFeatures();
