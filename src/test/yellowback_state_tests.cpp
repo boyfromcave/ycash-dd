@@ -1252,6 +1252,58 @@ BOOST_AUTO_TEST_CASE(mint4_divergence_and_global_ratio)
     BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
 }
 
+// Rule: MINT-4
+// H-1: with MINT_REQUIRES_ARMED an unarmed R halts the mint (VOID, mint-halted-unarmed) after every
+// halt bit; once ARMED the mint is judged exactly as before (MINT-9 needs its bundle).
+BOOST_AUTO_TEST_CASE(mint4_requires_armed)
+{
+    Fixture f;
+    f.P.mintRequiresArmed = true;
+    f.MineQuotesTo(100);                                    // LOCKED_IN: mint-not-active precedes the new clause
+    { MintOpts o; o.collateral = 1000000000000LL; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "mint-not-active"); }
+    f.Activate();
+    BOOST_REQUIRE(!f.Armed());
+    bool invalid = true;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1), &invalid), verdict::MINT_HALTED_UNARMED);
+    BOOST_CHECK(!invalid);                                  // VOID like any halted mint, never an invalid block
+    BOOST_CHECK_EQUAL(std::string(verdict::MINT_HALTED_UNARMED), "mint-halted-unarmed");
+    Fixture g;                                              // the same chain without the parameter mints (v2 path)
+    g.Activate();
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, g.tip - 1)), "");
+    // ARMED: the clause is vacuous; MINT-9 judges the bundle as before
+    Fixture a;
+    a.P.mintRequiresArmed = true;
+    a.Arm();
+    BOOST_REQUIRE(a.Armed());
+    BOOST_CHECK_EQUAL(MintVerdictOf(a, a.MintTx(10000, 48, a.tip - 1)), verdict::MINT9_NO_BUNDLE);
+    BOOST_CHECK_EQUAL(MintVerdictOf(a, a.MintV3(10000, 50000)), "");
+    // ATTEST_REQUIRED false means never ARMED (W15): with the parameter nothing mints
+    Fixture off;
+    off.P.mintRequiresArmed = true;
+    off.P.attestRequired = false;
+    off.Arm();
+    BOOST_CHECK(!off.Armed());
+    BOOST_CHECK_EQUAL(MintVerdictOf(off, off.MintTx(10000, 48, off.tip - 1)), verdict::MINT_HALTED_UNARMED);
+}
+
+// Rule: MINT-2
+// H-5: a class disabled by an empty term range refuses every lock length with the existing verdict.
+BOOST_AUTO_TEST_CASE(mint2_disabled_class_refused)
+{
+    Fixture f;
+    f.P.classMin[1] = 97; f.P.classMax[1] = 96;             // B empty
+    f.P.classMin[2] = 97; f.P.classMax[2] = 96;             // C empty (the mainnet shape)
+    f.Activate();
+    MintOpts a; a.collateral = 10000000000000LL;
+    MintOpts b = a; b.termClass = 1;
+    MintOpts c = a; c.termClass = 2;
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 100, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 97, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 96, f.tip - 1, b)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 145, f.tip - 1, c)), "bad-mint-lock-height");
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
+}
+
 // Rule: HALT-2
 BOOST_AUTO_TEST_CASE(recap_floor_is_the_class_minimum_with_sigma)
 {
@@ -1294,8 +1346,8 @@ BOOST_AUTO_TEST_CASE(mint6_supply_cap)
 // Rule: MINT-6
 BOOST_AUTO_TEST_CASE(mint6_cap_is_soft_above_the_recap_floor)
 {
-    // W20: a mint that would take supply over the cap is refused only when the ratio it locks is
-    // below RECAP_RATIO_BPS (500 %): class C (300 %) and class B (400 %) at a multiplier of 1x are
+    // W20 / H-10: a mint that would take supply over the cap is refused unless it is class A and the
+    // ratio it locks reaches RECAP_RATIO_BPS (500 %): class C (300 %) and class B (400 %) are
     // mint-supply-cap, class A (500 %) goes through and takes supply above the cap.
     Fixture f(1, 0, 100000, 0);                             // cap = 10x market cap: ~ $409 on a young regtest chain at $0.05 (a test knob; the rule's arithmetic has no range)
     f.Activate();                                           // $0.05/YEC, the price MintVerdictOf's blocks quote
@@ -1333,7 +1385,10 @@ BOOST_AUTO_TEST_CASE(mint6_cap_is_soft_above_the_recap_floor)
     ref = g.tip - 1;
     BOOST_REQUIRE(g.GetTotals().supplyCents + g.P.minMint > capAt(g, ref));
     BOOST_REQUIRE(g.Snap(ref).sigmaMultBps >= 12500);
-    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 100, ref, b)), "");
+    // H-10: class B reaches the floor at this multiplier, but above the cap only class A mints
+    BOOST_CHECK(MinRatioBps(g.P.baseRatioBps[1], g.Snap(ref).sigmaMultBps) >= g.P.recapRatioBps);
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 100, ref, b)), "mint-supply-cap");
+    BOOST_CHECK_EQUAL(MintVerdictOf(g, g.MintTx(10000, 48, ref, a)), "");
 }
 
 // Rule: MINT-7

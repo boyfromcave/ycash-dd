@@ -571,7 +571,8 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
             "Never refuses while the index is unhealthy.\n"
             "supplyCapReached (W20): true when the next mint of any class would exceed the supply cap at the tip\n"
             "snapshot (supplyCents + MIN_MINT > supplyCapCents); false when the cap is undefined. Above the cap\n"
-            "only a term class whose minimum ratio reaches params.recapRatioBps mints (yed_getstats.mintableClasses).\n"
+            "only class A, when its minimum ratio reaches params.recapRatioBps, mints (H-10; yed_getstats.mintableClasses).\n"
+            "mintRequiresArmed (H-1): true when a mint whose reference height is not ARMED is VOID (mint-halted-unarmed).\n"
             "\nExamples:\n" + HelpExampleCli("yed_getinfo", "") + HelpExampleRpc("yed_getinfo", ""));
 
     YellowbackIndex& index = EnsureIndex();
@@ -615,6 +616,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         std::optional<Cents> cap = SupplyCapCents(s.issuedZat, s.PMint(), p.supplyCapBps);
         o.pushKV("supplyCapReached", cap.has_value() && st.GetTotals().supplyCents + p.minMint > cap.value());
     }
+    o.pushKV("mintRequiresArmed", p.mintRequiresArmed);     // H-1: MINT-4 refuses a mint whose R is not ARMED (hashed on regtest, M13)
 #ifdef ENABLE_WALLET
     // H10: what the Yellowback wallet layer holds locked, and that it is there at all. The GUI
     // reads a mismatch between lockedOutputs and yed_listunspent as the trigger for yed_lockcoins.
@@ -779,9 +781,10 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
         throw std::runtime_error(
             "yed_getstats\n"
             "\nTotals plus the tip snapshot: supply, collateral, vault counts, prices, sigma, global ratio, cap, halts.\n"
-            "mintableClasses: the term classes a mint can use now -- every class when nothing halts and the cap has room;\n"
-            "under a GLOBAL_RATIO halt alone (W16) or once the cap is reached (W20), those whose minimum ratio reaches\n"
-            "params.recapRatioBps; none under any other halt.\n");
+            "mintableClasses: the term classes a mint can use now -- every enabled class when nothing halts and the cap has room;\n"
+            "under a GLOBAL_RATIO halt alone (W16), those whose minimum ratio reaches params.recapRatioBps; once the cap is\n"
+            "reached (W20, H-10), class A alone if its minimum ratio reaches it; none under any other halt, and none while\n"
+            "mintRequiresArmed and the tip is not ARMED (H-1). A class with an empty term range is never listed (H-5).\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
@@ -814,14 +817,18 @@ UniValue yed_getstats(const UniValue& params, bool fHelp)
     const auto& P = index.GetParams();
     // W20: the cap is reached when the next mint of any class would exceed it (yed_getinfo.supplyCapReached)
     const bool capReached = cap.has_value() && t.supplyCents + P.minMint > cap.value();
-    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && !capReached);
-    // W16/W20: the classes a mint can use now. Every class when nothing halts and the cap has room;
-    // under a global-ratio halt alone, or once the cap is reached, those whose minimum ratio reaches
-    // the recapitalisation floor; none under any other halt.
+    // H-1: with MINT_REQUIRES_ARMED nothing mints while the tip is not ARMED (MINT-4, mint-halted-unarmed)
+    const bool unarmedHalt = P.mintRequiresArmed && !P.IsArmed(s.attest.IsArmed());
+    o.pushKV("mintingAllowed", s.activation.IsActive() && s.haltMask == 0 && !capReached && !unarmedHalt);
+    // W16/W20: the classes a mint can use now. Every enabled class when nothing halts and the cap has
+    // room; under a global-ratio halt alone those whose minimum ratio reaches the recapitalisation
+    // floor; once the cap is reached class A alone, at that floor (H-10); none under any other halt.
     UniValue mintable(UniValue::VARR);
-    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0) {
+    if (s.activation.IsActive() && (s.haltMask & ~HALT_GLOBAL_RATIO) == 0 && !unarmedHalt) {
         for (int i = 0; i < NUM_CLASSES; i++) {
-            if ((!(s.haltMask & HALT_GLOBAL_RATIO) && !capReached) || MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps) mintable.push_back(ClassLetter((uint8_t)i));
+            if (!P.IsClassEnabled(i)) continue;                                    // H-5
+            const bool atFloor = MinRatioBps(P.baseRatioBps[i], s.sigmaMultBps) >= P.recapRatioBps;
+            if (capReached ? (i == 0 && atFloor) : (!(s.haltMask & HALT_GLOBAL_RATIO) || atFloor)) mintable.push_back(ClassLetter((uint8_t)i));
         }
     }
     o.pushKV("mintableClasses", mintable);
