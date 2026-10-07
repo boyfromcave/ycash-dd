@@ -57,6 +57,7 @@ LOCK = 48
 class YellowbackStockNodeTest(YellowbackTestFramework):
     initial_blocks = 101
     legacy_done = False       # the reference half (a REF_YCASHD binary on node 1) has run and node 1 is the fork binary
+    reference_binary_opt_in = True     # node 1 runs $REF_YCASHD below VAULT_ACTIVATION (node_args strips the vault -nuparams)
 
     def legacy(self):
         """A reference binary on node 1 that has not yet been swapped for the fork binary."""
