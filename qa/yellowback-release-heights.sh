@@ -36,7 +36,7 @@ elif [ -z "$setid" ] || [ -z "$(printf '%s' "$setid" | tr -d '0')" ]; then
 fi
 if [ -n "$problem" ]; then
   if [ "$warn" = 1 ]; then echo "warning: $problem (not a release: continuing)"; exit 0; fi
-  echo "refusing to release: $problem (doc/yellowback-release.md, Network parameters)"
+  echo "refusing to release: $problem (the release line is ycash6: its doc/yellowback-release.md, Network parameters)"
   exit 1
 fi
 echo "release heights: ok"
