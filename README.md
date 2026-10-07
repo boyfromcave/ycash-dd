@@ -1,75 +1,142 @@
-# Ycash v4.5.0 with Yellowback (YED)
+# Ycash v4.5.0 with the vault upgrade and Yellowback (YED)
 
-This is the Ycash node, **plus Ycash Yellowback (YED)**: a decentralized digital dollar on Ycash,
-built the way DigiByte's DigiDollar is built but adapted to what Ycash actually has. This branch
-(`feature/yellowback-price-attest`, Yellowback v3: price attestation) is a fork of upstream Ycash
-`v4.5.0` (the pristine baseline is the `ycash-legacy` branch;
-`git diff ycash-legacy...feature/yellowback-price-attest` is the entire delta, and the frozen-file
-zero-delta check measures against the tag `yellowback-v3-baseline`). The superseded v2 branch
-`feature/yellowback-sf` and the earlier federation prototype on `feature/digidollar` are kept as
-records only, never as comparison bases.
+This is the Ycash node, **plus a network upgrade** that adds a generic vault primitive to Ycash
+consensus, and two applications built on it: a bridge template for wrapped YEC (wYEC) and
+**Ycash Yellowback (YED)**, a decentralized, over-collateralised US-dollar stablecoin
+(`1 YED = $1`). This branch (`upgrade/vault`) is a fork of upstream Ycash `v4.5.0`; the pristine
+baseline is the `ycash-legacy` branch, and `git diff ycash-legacy...upgrade/vault` is the entire
+delta. The ycashd 6.20.0 line (`boyfromcave/ycash6`, branch `upgrade/vault`) carries the same upgrade
+with the same vault and YED rules, checked by golden test vectors shared by both lines. The branch `harden/yellowback` is the
+no-upgrade fallback line, where Yellowback is a miner-enforced soft fork instead; everything below
+describes `upgrade/vault` only.
 
-**Yellowback is experimental and off by default.** A node that does not enable it runs upstream
-Ycash v4.5.0's code paths: same consensus, same policy, same P2P, same RPC surface.
+**This is a hard fork.** The upgrade is `Consensus::UPGRADE_VAULT` with the new consensus branch ID
+`0x6d5b7a31` ("Vault"). From its activation height, a node that has not upgraded (a stock
+v4.5.0 node, say) can no longer follow the chain. **No public network has an activation height:**
+mainnet and testnet leave `UPGRADE_VAULT` unset and name no YED attestor set, so today the upgrade
+runs only on regtest and the one-laptop devnet.
 
-## What Yellowback is
+## What the upgrade adds
 
-Yellowback v2 is a miner-enforced, over-collateralised US-dollar stablecoin **overlay** — a soft
-fork in the P2SH/CLTV sense, enforced by the mining pools that run the module. YED is the unit
-(`1 YED = $1`). The design, the protocol and what it costs are in the workspace plan; the node
-guide is [doc/yellowback.md](doc/yellowback.md).
+**The vault primitive** (application-agnostic; `src/vault/`, workspace
+`docs/plans/yellowback-upgrade-plan.md` §3 and §15):
+
+- BIP68 relative lock-times (height-based only) and `OP_CHECKSEQUENCEVERIFY` (`0xb2`), plus two
+  new opcodes: `OP_CHECKSETSIG` (`0xc0`) and `OP_CHECKSETDORMANT` (`0xc1`). Before the activation
+  height they behave exactly as in v4.5.0.
+- **Signer sets** as a consensus object: bonded members, unlock / cancel / slash thresholds, a
+  per-epoch rate limit on unlocks, slashing on equivocation, and member and set liveness
+  (dormancy). Set acts (`SET_CREATE`, `SET_JOIN`, `SET_HEARTBEAT`, …) travel in a `YV`
+  `OP_RETURN`; the set state lives in its own database (`<datadir>/vaults/`) with per-block undo.
+- **Templates:** the vault output **V** and the intent output **I**, both bare scripts. A set
+  unlocks a vault into an intent; the intent is released to its recipient after a delay and can
+  be cancelled during it; the owner has an owner branch, and recovers vault and intent alike once
+  the set is dormant or wound down. A registered module may add rules on top (an `APP` branch).
+- 21 RPCs (`set_*`, `vault_*`), present on every node with no flag:
+  [doc/vault-rpc.md](doc/vault-rpc.md).
+
+**The wYEC bridge template** (the Ycash side only): lock into a `WYEC`-tagged vault, an intent
+posted by the bridge's signer set, release after the delay, cancel during it, owner recovery if the
+set goes silent. Both signer shapes (one relayer with an open challenger set, or a 9-seat guardian
+set) are configurations of the same primitive. The bridge needs no rule module: nothing about it
+is in consensus beyond the primitive itself. The Ethereum side is not in this repository.
+
+**Yellowback as the one registered rule module** (tag `YED\0`): from the activation height, YED's
+block verdict is a **consensus** rule on every upgraded node, not a policy that miners choose to
+enforce.
 
 - A YED balance is an ordinary transparent output whose dollar value is declared in the
-  transaction's single `OP_RETURN` payload.
-- Collateral (YEC) sits in a P2SH vault with an owner path (the minter's key, after the lock
-  height) and an anyone-can-claim path (after the grace period); enforcing miners reject a block
-  that releases collateral without the matching YED burn.
-- The YEC/USD price is the median of quotes that pools publish as a tag in their own coinbase.
-- Every node started with `-yellowback` computes the same Yellowback state from the same chain
-  in a self-contained, rebuildable index under `<datadir>/yellowback/`, and exposes it through
-  the `yed_*` RPCs.
+  transaction's `OP_RETURN` payload; every node keeps the same ledger in a rebuildable index under
+  `<datadir>/yellowback/` and serves it through the `yed_*` RPCs (`rpcversion` 5).
+- Collateral (YEC) sits in a V vault. The owner redeems with the owner branch by burning the debt.
+  An underwater vault is claimed by moving its collateral into a claimant intent, which the YED
+  attestor set may cancel during `CLAIM_DELAY` and anyone may release after it. If the attestor
+  set goes dormant, the owner recovers the collateral without a burn.
+- Prices come from two populations: pool quotes in coinbase tags, and bonded attestors who sign
+  YEC/USD off-chain (v3 price attestation). Attestors register by joining the YED attestor set
+  (`SET_JOIN`) and stay live with `SET_HEARTBEAT`s.
+- Launch parameters on mainnet and testnet: class A (30–90 day) locks only, minting requires an
+  armed attestation layer (`MINT_REQUIRES_ARMED`), $2,500 maximum mint, a 15 bps pool fee plus
+  50 % again for the attestor, a 300 % global-ratio halt and a 600 % recapitalisation floor.
+  Regtest keeps the v3 values.
 
-**This tree is in transition:** the code on this branch is still the federation prototype, being
-replaced phase by phase (see the status table in [doc/yellowback.md](doc/yellowback.md)). The
-trust statement there is the v2 one.
+**Retired on this line:** pool signalling and lock-in, the work valve, the kill switch, the sunset,
+abandonment, `yed_sweep`, and the `-experimentalfeatures -yellowback` gate.
+`-yellowbackenforce`, `-yellowbacksignal`, `-yellowbacktemplatepolicy` and
+`-yellowbackrequirehealthy` are logged and ignored; `-yellowbackstartheight` and
+`-yellowbackenforceuntil` are init errors. Because the YED rules are consensus, a node whose
+Yellowback index is unhealthy stops rather than validate without it (restart with
+`-reindex-yellowback`).
 
-## Enabling Yellowback
+## Running it (regtest and devnet)
+
+YED is live wherever `UPGRADE_VAULT` has a height and the YED attestor set is known. On regtest
+that is two options, on top of the `-nuparams` the regtest harness already passes for Ycash's own
+upgrades (`qa/rpc-tests/test_framework/yellowback_util.py`, `yellowback_node_args`):
 
 ```
-experimentalfeatures=1
-yellowback=1
+-nuparams=6d5b7a31:<height>        # the vault upgrade
+-yellowbackattestorset=<setid>     # the YED attestor set: the txid of its SET_CREATE
 ```
 
-`-yellowback` refuses to start with `-prune`. See [doc/yellowback.md](doc/yellowback.md) for the
-other options, the `ycash-cli` walkthrough (mint, send, redeem), index rebuilds and backups.
+The set can only be created once the upgrade is active, so a node starts with the first option,
+creates the set with `set_create` after the activation height, and restarts with both. A datadir
+that holds a Yellowback index refuses to start with a wallet when YED is not live (pass
+`-yellowback=0` to acknowledge that its YED outputs are spendable as plain YEC). YED refuses
+`-prune`.
 
-## Yellowback documentation
+The quickest way to see all of it is the devnet, which does those steps for you:
+
+```
+contrib/yellowback/devnet/yellowback-devnet up     # 8 regtest nodes: vault upgrade active, attestor set created, YED armed
+contrib/yellowback/devnet/upgrade-walk             # on an `up --role attestor --no-heartbeat --no-walk --no-sim` devnet: the whole ecosystem, end to end
+contrib/yellowback/devnet/yellowback-devnet bridge up --shape guardians|relayer   # the wYEC bridge persona
+```
+
+See [contrib/yellowback/devnet/README.md](contrib/yellowback/devnet/README.md) (sections 0 and 6)
+for the venv the scripts need and what each step does.
+
+## Status
+
+Implemented and tested on regtest and the devnet on both node lines. **Not adopted by the Ycash
+Foundation, not audited, and not activated on any public network.** The launch gates (G-1 to G-10
+of the workspace's hardening plan) and the parameter calibration are open; the release that passes
+them is the one that sets the mainnet activation height and attestor set. A parameter change after
+that is another network upgrade.
+
+## Documentation
 
 | Document | For whom |
 |---|---|
-| [doc/yellowback.md](doc/yellowback.md) | Users and node operators: enabling, `ycash-cli` usage, trust statement, backups, build and test baseline |
-| [doc/yellowback-rpc.md](doc/yellowback-rpc.md) | Wallet and tool developers: the `yed_*` RPC contract |
-| `doc/yellowback-spec.md` | The v2 protocol (§3 of the plan) and the trust statement (§8.1), published verbatim by the workspace's `make spec` |
+| [doc/yellowback.md](doc/yellowback.md) | Users and node operators: `ycash-cli` usage, *Activation and enforcement since the vault upgrade*, backups, build and test baseline |
+| [doc/vault-rpc.md](doc/vault-rpc.md) | Wallet, bridge and tool developers: the `set_*` / `vault_*` RPC contract (machine-readable: `doc/vault-rpc-contract.json`) |
+| [doc/yellowback-rpc.md](doc/yellowback-rpc.md) | Wallet and tool developers: the `yed_*` RPC contract, `rpcversion` 5 |
+| [doc/yellowback-attestor.md](doc/yellowback-attestor.md), [doc/yellowback-mining.md](doc/yellowback-mining.md) | Attestors and mining pools |
+| [doc/yellowback-devnet.md](doc/yellowback-devnet.md) | A local devnet or a regtest node in a few minutes |
+| `doc/yellowback-spec.md` | The YED protocol and trust statement, published from the workspace's plans by `make spec` |
 | [doc/yellowback-review.md](doc/yellowback-review.md) | Reviewers: the review package for the fork delta |
-| [contrib/yellowback/](contrib/yellowback/README.md) | The price-feed layer of the prototype's coordinator (Phase 7 turns it into the quote agent) and the one-laptop devnet |
 
-The normative protocol, the decision record and the file-by-file crosswalk against DigiByte's
-DigiDollar live in the workspace that develops this fork (`yellowback-workspace`:
-`docs/plans/yellowback-v1-development-plan.md`, `docs/mapping.md`), not in this repository.
+Several of these still carry v2/v3 text about signalling, enforcement and the sweep; where they do,
+`doc/yellowback.md`'s note at the top applies: that text is the history of the design, not this
+node's behaviour. The design record (`docs/plans/yellowback-upgrade-plan.md`) and the
+file-by-file crosswalk against DigiByte's DigiDollar (`docs/mapping.md` §22 for the upgrade) live in
+the workspace that develops this fork (`yellowback-workspace`), not in this repository.
 
-## Where the Yellowback code is
+## Where the code is
 
 | Path | Contents |
 |---|---|
-| `src/yellowback/` | Protocol library and state machine: params, payload, scripts, address, index, state, policy checks, transaction builder |
-| `src/rpc/yellowback.cpp`, `src/rpc/yellowbackwallet.cpp` | Node and wallet `yed_*` RPCs |
-| `src/test/yellowback_*_tests.cpp` | Unit tests (`src/test/test_bitcoin --run_test='yellowback_*'`) |
-| `qa/rpc-tests/yellowback_*.py` | Functional tests on regtest |
-| `contrib/yellowback/` | Coordinator, redemption client, source-layer unit tests, and `devnet/yellowback-devnet` (a private Yellowback network on one machine for trying the wallet) |
+| `src/vault/` | The primitive: act codec (`act`), set-signature checker (`checker`), set-state database with undo (`db`), set state (`state`), V / I / bond templates (`template`), the module table (`module`), block and mempool glue (`node`) |
+| `src/consensus/params.h`, `src/consensus/upgrades.cpp`, `src/chainparams.cpp` | `UPGRADE_VAULT`, branch ID `0x6d5b7a31`; no height on mainnet and testnet, `-nuparams` on regtest |
+| `src/script/` (`interpreter`, `script`, `standard`, `sign`, `ismine`, `script_error`) | `OP_CHECKSEQUENCEVERIFY`, `OP_CHECKSETSIG`, `OP_CHECKSETDORMANT`; the V and I standard templates |
+| `src/primitives/transaction.h`, `src/main.cpp`, `src/txmempool.cpp` | BIP68 sequence locks; block connect / disconnect of acts, template rules and the YED verdict; mempool acceptance |
+| `src/miner.cpp`, `src/rpc/mining.cpp`, `src/policy/` | Block templates that apply acts and the YED module against a running copy of the set state; the `YV` act size limit |
+| `src/yellowback/` | YED: params, payload, scripts, address, attestation, index, state, the rule module (`module`), policy checks, transaction builder, wallet glue |
+| `src/rpc/vault.cpp`, `src/rpc/yellowback.cpp`, `src/rpc/yellowbackwallet.cpp` | `set_*` / `vault_*` RPCs; node and wallet `yed_*` RPCs |
+| `src/test/vault_*_tests.cpp`, `src/test/yellowback_*_tests.cpp` | Unit, vector and fuzz tests |
+| `qa/rpc-tests/vault_*.py`, `qa/rpc-tests/yellowback_*.py` | Functional tests on regtest (`qa/rpc-tests/test_framework/vault.py` is an independent Python implementation of the primitive) |
+| `contrib/yellowback/` | The pool quote agent and kit, the attestor agent (`attest/`, Rust), and `devnet/`: `yellowback-devnet`, `upgrade-walk`, `bridge-sim`, `yellowback-sim` |
 | `.github/workflows/yellowback-tests.yml` | CI for all of the above |
-
-Nothing under `src/consensus/`, `src/script/`, `src/main.cpp`, `src/pow/` or
-`src/primitives/` is changed by this fork.
 
 ## Getting Started
 
@@ -106,13 +173,14 @@ For any Ycash-specific build instructions, see the release notes. Host-specific 
 building this fork on macOS (Apple Silicon) are recorded in
 [doc/yellowback.md](doc/yellowback.md) under "Build and test baseline".
 
-Tests for the Yellowback code:
+Tests for the vault and Yellowback code:
 
 ```
+src/test/test_bitcoin --run_test='vault_*'
 src/test/test_bitcoin --run_test='yellowback_*'
-qa/pull-tester/rpc-tests.py -j4 --nozmq yellowback_index yellowback_lifecycle yellowback_void_mint \
-    yellowback_wallet_restore yellowback_sapling
-python3 -m unittest contrib/yellowback/test_yellowback_fed.py
+qa/pull-tester/rpc-tests.py -j4 --nozmq vault_upgrade vault_primitive vault_bridge yellowback_upgrade \
+    yellowback_lifecycle yellowback_claim yellowback_void_mint yellowback_wallet_restore yellowback_sapling
+python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
 ```
 
 ## Deprecation Policy
