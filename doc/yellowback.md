@@ -374,14 +374,13 @@ v2's paragraph "price honesty rests on the honest-majority-hashpower assumption"
 > depth of the markets it is read from.
 ## Build and test baseline
 
-Everything below runs from `ycash-dd/` on the branch of record, `feature/yellowback-price-attest`
-(plan §6.0 item 0). The frozen-file zero-delta check measures against the tag
-`yellowback-v3-baseline` (re-tagged 2026-10-02 at the security-audit merge, superseding `9da72131e`,
-to carry the two reviewed frozen-file changes: A-1, the MP-1 hook after script verification; A-7, the
-template tag decoded from the served coinbase), line budgets against `ycash-legacy`.
-`feature/yellowback-sf` is the superseded v2 fork, kept as a record and never a comparison base;
-the recorded numbers further down were measured on it. Python is always the workspace
-venv (`../.venv/bin/python`), never the system interpreter.
+This is the v4.5.0 node line, branch `upgrade/vault` (the vault upgrade). The same overlay on the
+ycashd 6.20.0 line is the `ycash6` repository, with its own copy of this section. CI is the record
+of what passes: `.github/workflows/yellowback-tests.yml` builds once and runs the unit tests, the
+Yellowback functional scripts (`YELLOWBACK_SCRIPTS`), the inherited stock baseline
+(`STOCK_BASELINE`, against the fork binary with no attestor set), the nightly and weekly fuzz and
+devnet jobs, and `qa/yellowback-audit.sh`, which reads its script lists from that workflow. Python
+is always the workspace venv (`../.venv/bin/python`), never the system interpreter.
 
 ```
 # host conditions (macOS, Apple Silicon; Linux CI needs none of the three exports)
@@ -390,187 +389,27 @@ export CARGO_TARGET_DIR="$PWD/target"          # the Makefile links target/<trip
 LIBTOOLIZE=glibtoolize BUILD_STAGE=depends ./zcutil/build.sh -j8    # once (~25 min): the depends tree
 ./zcutil/build.sh -j8                                              # ycashd, ycash-cli, ycash-tx, src/test/test_bitcoin
 ./zcutil/fetch-params.sh                                           # needs GNU sha256sum
-# after a path change (workspace rename): configure bakes absolute depends paths, so reconfigure, then incremental
-CONFIG_SITE="$PWD/depends/$(ls depends | grep -m1 darwin)/share/config.site" ./configure && make -C src -j8 test/test_bitcoin ycashd ycash-cli
-make -C src -j8 ycash-cli                                          # after EVERY src/rpc/client.cpp change (conversions live in the CLI)
+make -C src -j8 ycashd ycash-cli test/test_bitcoin                 # incremental; ycash-cli after EVERY src/rpc/client.cpp change
 
-# unit tests
-src/test/test_bitcoin --run_test='yellowback_*'
-# one functional script (distinct --portseed per concurrent run; --nocleanup --noshutdown keeps the playground)
-BITCOIND="$PWD/src/ycashd" ../.venv/bin/python -u qa/rpc-tests/yellowback_index.py --srcdir="$PWD/src" --tmpdir=/tmp/yb-index --portseed=11
-# the suite by name (the runner does not glob; scripts are registered in BASE_SCRIPTS / EXTENDED_SCRIPTS)
-qa/pull-tester/rpc-tests.py -j4 --nozmq yellowback_index yellowback_activation
-# the Python owner-path signer (build_vault_spend_raw) loads libcrypto through ctypes; on macOS it aborts (exit 134) without:
-export DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"
-# devnet (§5)
+# unit tests (Yellowback and the vault primitive)
+src/test/test_bitcoin --run_test='yellowback_*,vault_*'
+# one functional script (distinct --portseed per concurrent run)
+BITCOIND="$PWD/src/ycashd" ../.venv/bin/python -u qa/rpc-tests/yellowback_upgrade.py --srcdir="$PWD/src" --tmpdir=/tmp/yb-upgrade --portseed=11
+# the audit gates: mode upgrade (frozen files and line budgets report-only; the consensus-diff report)
+qa/yellowback-audit.sh --mode upgrade
+# devnet (doc/yellowback-devnet.md)
 ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet up && ../.venv/bin/python contrib/yellowback/devnet/yellowback-devnet check
-
-# fuzz (Ycash's own harness: --enable-fuzz-main replaces main(); zcutil/clean.sh removes src/fuzz.cpp, confirming the layout)
-# fuzzer-no-link at configure time: -fsanitize=fuzzer links libFuzzer's main(), and configure's own "C++ compiler works" program has one ("cannot create executables")
-CONFIG_SITE="$PWD/depends/<triple>/share/config.site" ./configure --enable-fuzz-main CC=clang CXX=clang++ CXXFLAGS='-fsanitize=fuzzer-no-link,address' LDFLAGS='-fsanitize=address'
-ln -sf fuzzing/YellowbackEvaluate/fuzz.cpp src/fuzz.cpp && make -C src -j8 ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
-src/ycashd src/fuzzing/YellowbackEvaluate/output src/fuzzing/YellowbackEvaluate/input -max_len=4096   # libFuzzer; corpus in, findings out
-../.venv/bin/python src/test/gen_yellowback_corpus.py --check                                          # embedded C++ corpus == input/ files
 ```
 
 A failed `make` leaves the old `test_bitcoin` in place, so "tests pass" after a failed build means
-nothing: check the make exit code. The `build_vault_spend_raw`, `yellowback_activation`, devnet
-`check` and fuzz lines name Phase 1–5 artefacts; on the Phase 0 tree the Python signer that needs
-`DYLD_LIBRARY_PATH` is `cosign_and_submit`, and the fuzz targets are the prototype's
-`src/fuzzing/Yellowback{Payload,Script}/`.
-
-### Host notes (macOS, Apple Silicon)
-
-Host: macOS 26 (Darwin 25.0.0), Apple clang 17, GNU make 3.81; depends toolchain
-`aarch64-apple-darwin` (clang 18.1.8, rust, boost, libevent, zeromq, libsodium, utfcpp,
-googletest, bdb) builds from `depends/` unchanged. `zcutil/build.sh` needs three host-side
-conditions that are not fork changes: Homebrew `automake` and GNU `libtool` on the PATH
-(`LIBTOOLIZE=glibtoolize`; libevent's `autoreconf` needs them), GNU coreutils' `sha256sum` for
-`zcutil/fetch-params.sh` (macOS ships a BSD `sha256sum` whose flags differ), and
+nothing: check the make exit code. Host notes: `zcutil/build.sh` needs Homebrew `automake` and GNU
+`libtool` (`LIBTOOLIZE=glibtoolize`), GNU coreutils' `sha256sum` for `zcutil/fetch-params.sh`, and
 `CARGO_TARGET_DIR` pointed at `<repo>/target` when the shell sets a global cargo target directory.
-Python 3.12+: the inherited `test_framework/mininode.py` imports `asyncore` (removed in 3.12) and
-`pyblake2` (unmaintained); the workspace venv carries `pyasyncore` and a one-line `pyblake2` shim
-over `hashlib.blake2b`; no framework file is changed. `grep` on this host is ugrep.
-
-### Recorded baseline (Phase 0, 2026-09-10, node side)
-
-Recorded from this tree (commits `6f4380028`, `e394ce7a7`, `bbb132630` on `feature/yellowback-sf`),
-incremental `make -C src -j8 test/test_bitcoin ycashd ycash-cli` on the host above.
-
-- `src/test/test_bitcoin --run_test='yellowback_*'`: **31 cases, all green** (33 before Phase 0;
-  `genesis_and_prices` and `rotation_and_custody` are behind `#if 0` in
-  `yellowback_state_tests.cpp` until Phase 2).
-- The whole `src/test/test_bitcoin`: **453 cases, 2 failures, both pre-existing at the pin** in
-  files the fork does not touch — `main_tests/subsidy_limit_test` (`nSum` off by one halving:
-  `2099999981520000 != 2099999990760000`) and `rpc_wallet_tests/rpc_z_sendmany_internals`
-  (two change outputs hash to the same address). 121 s. The CI `main` job runs the whole suite;
-  these two must be looked at (or excluded by name) before `main` can be green there.
-- Yellowback functional scripts (run one process each, `--portseed` 11–15, `BITCOIND` set,
-  `DYLD_LIBRARY_PATH` for the Python co-signer): `yellowback_index`, `yellowback_lifecycle`,
-  `yellowback_void_mint`, `yellowback_wallet_restore`, `yellowback_sapling` — **all five green**.
-  `yellowback_reorg_stress` was still the v1 federation script and was never run by CI; it was
-  deleted on 2026-10-01 (audit I-1; the ycash6 plan's P-7 retired it there first). Reorgs are
-  exercised by index, lifecycle, enforcement, mining, void_mint, activation, stock_node and the
-  three attest scripts.
-- `DEBUG_LOCKORDER` (`--enable-debug`) aborts Ycash v4.5.0 itself on the first peer connection:
-  `getpeerinfo` takes `cs_main` > `cs_vNodes` > `cs_vSend` (`rpc/net.cpp:117,68`, `net.cpp:687`)
-  while `SendMessages` takes `TRY cs_vSend` > `cs_main` (`net.cpp:1741`), and `sync.cpp:132`
-  asserts. All four files are byte-identical to `ycash-legacy` at those sites; every functional
-  script with a peer fails the same way (only `reindex.py` passes). Reproduced locally
-  2026-09-23. So the CI `lockorder` job builds with `CPPFLAGS=-DDEBUG_LOCKORDER_LOGONLY`
-  (owner decision, 2026-09-23): `sync.cpp` still detects and logs every inversion, the process
-  no longer aborts, and the job fails on any report that names `cs_yellowback`, a `yellowback/`
-  site or a `yed_` RPC. The switch is dead code in every other build.
-- What the armed detector then found (2026-09-23), all fixed in the same commit: (1) two
-  fork-side inversions of the order the fork documents (N25: `cs_main` > `cs_wallet` >
-  `mempool.cs` > `cs_yellowback`) — `YellowbackWallet::Reconcile` and the raw-transaction burn
-  check took `cs_wallet` under `cs_yellowback`, and the wallet RPCs held `cs_yellowback` while
-  building or committing, which reaches `mempool.cs` through `FetchInputs`,
-  `CommitTransaction` and `AcceptToMemoryPool`; every RPC site now takes `mempool.cs` first, the
-  two wallet sites take `cs_wallet` first, and `Bonds`/`HotKeys` (no callers) demand both from
-  the caller. (2) An **inherited missing lock**: `AsyncRPCOperation_sendmany::find_utxos`
-  (`src/wallet/asyncrpcoperation_sendmany.cpp`, not frozen) calls `CWallet::AvailableCoins`,
-  which asserts `cs_wallet`, on the async worker thread with no lock at all — a wallet-map data
-  race in every Ycash v4.5.0 `z_sendmany`, and under `DEBUG_LOCKORDER` a segfault (the worker's
-  lock stack is NULL; `AssertLockHeldInternal` dereferenced it). `find_utxos` now takes
-  `LOCK2(cs_main, cs_wallet)` as later Zcash releases do, and `sync.cpp`'s assertion helpers
-  treat a NULL stack as "nothing held". Surfaced by the Sapling-funded mint in
-  `yellowback_attest_wallet`, which is a `z_sendmany` underneath. (3) With those gone, two more
-  pairs surfaced: `yed_getinfo` read the wallet's locked-output count (`cs_wallet`) under
-  `cs_yellowback` — it now reads it under `cs_main` alone, first; and the miner's `TemplateView`
-  holds `cs_yellowback` across `TestBlockValidity` (script-check queue `ControlMutex`) while
-  `ConnectTip` takes `ControlMutex` before `CheckConnect`'s `cs_yellowback`. Both paths hold
-  `cs_main` from their first line, so that pair cannot deadlock; `qa/yellowback-lockorder-check.py`
-  allow-lists exactly it with the proof, and the structural fix (drop the view before
-  `TestBlockValidity`, one line in the frozen `miner.cpp`) is an open item. The CI job runs the
-  checker over every node's `debug.log`.
-- Variant builds and `config.site`: the depends `config.site` assigns `CC`/`CXX` *after*
-  autoconf has read the command line and nothing restores them, so `./configure CC=clang` under
-  `CONFIG_SITE` silently builds with depends' clang 18 (`-target x86_64-pc-linux-gnu`,
-  `-stdlib=libc++`). That clang keeps its compiler-rt runtimes under the LLVM tarball's
-  `x86_64-unknown-linux-gnu` per-target directory (the mismatch `native_clang.mk` already patches
-  for libc++'s `__config_site`), so `-fsanitize=…`, `--coverage` and `-fsanitize=fuzzer` link
-  tests fail in configure ("linker did not accept requested flags", "Cannot enable RELRO",
-  "cannot create executables"). CI links the host-triple directory to it before configuring.
-- Inherited stock baseline, `qa/pull-tester/rpc-tests.py -j4 --nozmq` over the eleven scripts of
-  plan §6.0 item 6, against the fork binary without `-yellowback`: **7 pass** — `mempool_reorg`,
-  `mempool_tx_expiry`, `reorg_limit`, `reindex`, `wallet`, `rawtransactions`, `txn_doublespend`
-  (these are the CI `STOCK_BASELINE`); **4 fail at the pin**: `getblocktemplate_proposals`,
-  `getblocktemplate_longpoll` and `invalidateblock` crash `ycashd` with `SIGABRT` in
-  `CChainParams::GetFoundersRewardAddressAtHeight` under `getblocktemplate`/`generate` (a stock
-  regtest node activates no Ycash upgrade; every Yellowback script passes the six `-nuparams` at
-  height 1 and never hits it), and `p2p-acceptblock` fails "Unrequested block from whitelisted
-  peer not accepted" (Bitcoin behaviour Zcash/Ycash does not have). The four scripts, the test
-  framework and `main.cpp`/`net.cpp`/`miner.cpp`/`rpc/mining.cpp`/`chainparams.cpp` are
-  byte-identical to `ycash-legacy`, and the failure reproduces with the one framework fix of this
-  phase reverted, so they are the pin's, not the fork's.
-- `make check` cannot pass at the pin (found by the CI nightly, 2026-09-22): the inherited
-  `src/test/bitcoin-util-test.py` executes `./zcash-tx`, which Ycash v4.5.0 renamed to `ycash-tx`
-  (`src/Makefile.am`) without touching `src/test/data/bitcoin-util-test.json`, and with the name
-  linked ten of its 22 cases still expect Zcash `t1…` addresses where Ycash prints `s1…`
-  (`chainparams.cpp` `PUBKEY_ADDRESS` = 0x1C,0x28). Both files are byte-identical to
-  `ycash-legacy`. CI runs the rest of `make check` by hand: `make -C src check-TESTS`
-  (`test_bitcoin`, `ycash-gtest`), then `secp256k1` and `univalue` `check`.
-- `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py`: 52 tests OK (Phase 7 replaced `test_yellowback_fed.py`). `pyflakes` over
-  `qa/rpc-tests/yellowback_*.py` and `yellowback_util.py`: clean.
-- Consensus set (`src/consensus`, `src/script`, `src/primitives`, `src/pow`, `chainparams.cpp`,
-  `wallet/wallet.{h,cpp}`, `txdb.*`, `configure.ac`): zero lines changed vs `ycash-legacy`;
-  `main.cpp`, `miner.cpp`, `rpc/mining.cpp`: 0 of 40/35/35.
-- The runner (`rpc-tests.py`) execs each script through `#!/usr/bin/env python3`: put the
-  workspace venv's `bin` first on `PATH` or the scripts start under the system interpreter and
-  fail on `import simplejson`.
-- The same exec through `/usr/bin/env` (a SIP-protected binary) **drops `DYLD_LIBRARY_PATH`**, so
-  under the runner the Python signer (`build_vault_spend_raw`'s `CECKey`) loads the system
-  libcrypto and macOS aborts the script ("is loading libcrypto in an unsafe way"). On this host run
-  a script that signs vault spends directly (`../.venv/bin/python -u qa/rpc-tests/<script>.py
-  --srcdir=... --tmpdir=... --portseed=...`, as the Phase 4 record below does); the Linux CI runner
-  is unaffected. Verified: `/usr/bin/env python3 -c 'import os; print(os.environ.get("DYLD_LIBRARY_PATH"))'`
-  prints `None` with the variable exported.
-
-### Recorded baseline (Phase 2, 2026-09-10, node side)
-
-Recorded from this tree on `feature/yellowback-sf` after the Phase 2 commits (state machine v2,
-view schema 2, fuzz targets), same host and build recipe as above.
-
-- **The four wallet-flow scripts left the CI `main` job's list at Phase 2's first commit**
-  (`yellowback_lifecycle`, `yellowback_void_mint`, `yellowback_wallet_restore`,
-  `yellowback_sapling`; plan §6 preamble, N26): the payload is now version 2 and the state
-  machine follows the v2 rules while `yed_mint`/`yed_redeem` still build v1 transactions
-  (`BuildMint`/`BuildRedeem` throw "lands in Phase 6" until then), so they cannot pass. They
-  return at Phase 6. `YELLOWBACK_SCRIPTS` is `yellowback_index` alone until Phases 3–5 add
-  `yellowback_activation`, `yellowback_mining` and `yellowback_enforcement`.
-- `src/test/test_bitcoin --run_test='yellowback_*'`: all green — `yellowback_state_tests` was
-  rewritten (53 cases, every rule of plan §3.7–3.9 tagged `// Rule:`), including
-  `statehash_golden_vector`, which replays the Python model's 224-block vector
-  (`src/test/data/yellowback_golden.json`, a copy of `qa/rpc-tests/test_framework/
-  yellowback_golden.json` that `gen_yellowback_corpus.py --check` keeps equal) and reproduces the
-  pinned hash `6eb05394…8682`; `yellowback_fuzz_tests` gained `evaluate_corpus_replay` and
-  `payee_corpus_replay` over the two new targets' corpora.
-- Fuzz targets: `src/fuzzing/YellowbackEvaluate` (the prefix grammar of
-  `src/test/yellowback_fuzz_harness.h`, four properties: apply/undo identity, overlay
-  equivalence, `blockInvalid ⇒ enforcementOn` computed at `H`, `supplyCents == Σ Tokens`) and
-  `src/fuzzing/YellowbackPayee` (the FEE-W pick is in `E(R)`, nullopt iff `E(R)` is empty).
-  Corpora 30 + 24 seeds; the CI `nightly` job runs every target 10 minutes under libFuzzer and
-  `weekly-fuzz` two hours with corpus minimisation. **The 8 CPU-hour `YellowbackEvaluate` run of
-  Phase 2's exit was not run on this host** (Apple clang ships no libFuzzer runtime,
-  `docs/mapping.md` §13.1); it runs on the Linux jobs.
-- Removed with the prototype (§4.2, N20, N21): the v1 payload codec (version 1 is non-Yellowback,
-  V23), `Payload::Price`, the tier tables, `Health`/`DcaBps`/`ErrBps`/`RequiredBurn`/
-  `VolatilityBreach`, the genesis anchor and roster parameters and their regtest flags
-  (`-yellowbackgenesisanchor`, `-yellowbackgenesisroster`, `-yellowbacksupplycap`; the four v2
-  flags are `-yellowbackstartheight`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps`,
-  `-yellowbackenforceuntil`), `yed_getprice` and `yed_getprotectionstatus`. The node RPCs render
-  the v2 records in a transitional shape; Phase 3 rewrites them per plan §4.5.
-
-### Open items carried over from the prototype's Phase 0
-
-- The `YCASH_WR=1` build (the Ycash-specific build variant) has still not been run on this host.
-- The inherited `qa/pull-tester/rpc-tests.py` baseline: the eleven scripts of plan §6.0 item 6
-  are recorded above (7 pass, 4 fail at the pin); the rest of `BASE_SCRIPTS` is still unrun. The
-  four that fail need the six `-nuparams` on every node (the Phase 3 `qa/yellowback-wrapped-ycashd.sh`
-  wrapper, or a `regtest`-wide default) before they can join the CI list.
-- The two pre-existing `test_bitcoin` failures (`subsidy_limit_test`, `rpc_z_sendmany_internals`)
-  make the whole-suite step of the CI `main` job red until they are fixed or excluded by name.
+On macOS a script that signs vault spends in Python needs
+`DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"` and must be run directly, not through
+`rpc-tests.py` (`/usr/bin/env` drops the variable). The inherited `make check` step
+`bitcoin-util-test.py` cannot pass at the v4.5.0 pin itself (it runs `zcash-tx`, which Ycash
+renamed), so CI runs the rest of `make check` by hand.
 
 ## Releases and continuity
 
