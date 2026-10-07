@@ -104,6 +104,7 @@ BITCOIN_TESTS =\
   test/streams_tests.cpp \
   test/test_bitcoin.cpp \
   test/test_bitcoin.h \
+  test/yellowback_bench.h \
   test/test_random.h \
   test/test_util.cpp \
   test/test_util.h \
