@@ -352,8 +352,14 @@ for e in ["attest-unknown-seq", "attest-not-eligible", "attest-stale", "attest-b
     if e not in d["errors"]: missing.append("errors." + e)
 if missing: print("contract missing:", missing); sys.exit(1)
 PY
-  # The spec copy carries the v3 delta (make spec appends the v3 plan's section 3).
-  grep -q '^## v3 delta' doc/yellowback-spec.md
+  # The spec copy is this line's: on harden the v3 delta (make spec appends the v3 plan's section 3);
+  # on upgrade the vault specification (make spec-upgrade: the upgrade plan's section 10 trust
+  # statement as 8.1 and its section 15), which carries no v3 delta.
+  if [ "$mode" = upgrade ]; then
+    grep -q '^## Vault upgrade specification' doc/yellowback-spec.md
+  else
+    grep -q '^## v3 delta' doc/yellowback-spec.md
+  fi
   [ -f doc/yellowback-attestor.md ] && [ -f qa/yellowback-frozen-files.txt ]
   # Every inserted main.cpp statement is inside `if (g_yellowback)` (§8.4 item 2): the residual is
   # printed for the reviewer, never gating.
