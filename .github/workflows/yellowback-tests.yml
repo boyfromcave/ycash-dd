@@ -99,7 +99,7 @@ env:
   # The workspace repository at a commit: the audit runs its contract generator (scripts/extract_spec.py,
   # the upgrade line's mode) against this tree's committed contract. Bump by PR with the generator.
   WORKSPACE_REPO: boyfromcave/yellowback
-  WORKSPACE_COMMIT: 7ad7862e275a612b94a82263765803be14114461
+  WORKSPACE_COMMIT: 567fa8ab0f38a74041a92222c5ef0af2fd99a8fb
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.
