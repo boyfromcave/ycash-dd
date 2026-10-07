@@ -813,7 +813,9 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done)
+          # An unmatched glob (no Vault* on harden/yellowback) leaves the literal pattern, whose test fails as the
+          # loop's last command; under `set -e` that status would end the step, so the subshell ends with true.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
           echo "fuzz targets:" $targets
           for t in $targets; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime make
@@ -1189,7 +1191,9 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done)
+          # An unmatched glob (no Vault* on harden/yellowback) leaves the literal pattern, whose test fails as the
+          # loop's last command; under `set -e` that status would end the step, so the subshell ends with true.
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
           echo "fuzz targets:" $targets
           for t in $targets; do
             # Retargeting the symlink does not rebuild; remove every product of bitcoind.cpp (see nightly).
