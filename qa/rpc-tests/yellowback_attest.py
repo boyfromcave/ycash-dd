@@ -636,10 +636,10 @@ class YellowbackAttestTest(YellowbackTestFramework):
         live = user.yed_getvault(v3['txid'])
         assert_greater_than(user.getblockcount(), int(live['claimHeight']) - 1)
         emerg = {seq: EMERG_A for seq in seqs}
-        assert_equal(user.yed_listclaimable(), [])
+        assert_equal([r for r in user.yed_listclaimable() if r['claimable']], [])      # IT-7: open vaults are listed, claimable false
         ref_probe = user.getblockcount() - REF_LAG
         feed_all(user, emerg, cited=ref_probe)
-        assert_equal([r['vault'] for r in user.yed_listclaimable()], [])            # under EMERGENCY_RATIO, not claimable yet
+        assert_equal([r['vault'] for r in [r for r in user.yed_listclaimable() if r['claimable']]], [])            # under EMERGENCY_RATIO, not claimable yet
         notice_txid, r1, built = self.notice_raw(USER, v3['txid'], emerg, POOLS[0])
         n = user.yed_getnotice(v3['txid'])
         assert_equal((n['found'], n['txid'], n['refHeight'], n['pEmerg'], n['emergencyOpenAt']),
@@ -664,7 +664,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         while user.getblockcount() - REF_LAG < r1 + EMERGENCY_PERSIST:
             self.pools_step(1, 'persist')
         print('the emergency claim by node 0: clause (b), the residual to the owner (node 6)')
-        rows = user.yed_listclaimable()
+        rows = [r for r in user.yed_listclaimable() if r['claimable']]
         assert_equal([(r['vault'], r['claimPath']) for r in rows], [(v3['txid'] + ':0', 'b')])
         # yed_getvault / yed_listvaults / yed_listpositions.claimable read RED-4 by either clause, as
         # yed_listclaimable does (they read clause (a) under the tip snapshot alone before the fix).
