@@ -345,7 +345,8 @@ class Liquidator(Persona):
         """The pClaim (muUSD per YEC) below which collateralZat x pClaim < mintedCents x theta x COIN."""
         if not row.get("collateralZat") or not row.get("mintedCents"):
             return None
-        return row["mintedCents"] * self.rules["theta"] * 100_000_000 // row["collateralZat"]
+        rhs = row["mintedCents"] * self.rules["theta"] * 100_000_000
+        return (rhs + row["collateralZat"] - 1) // row["collateralZat"]          # ceil, as the node's UnderwaterAt
 
     @staticmethod
     def usd(micro):
