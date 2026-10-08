@@ -416,6 +416,14 @@ leg_rule_tags_v3() {
   # The v3 rules of plan §3.8 (Phase A1 on).
   require_tags ARM-1 ARM-2 REG-A1 BUNDLE-1 MINT-9 MINT-10 NOT-1 EQV-1 REV-1 PIN-1 PIN-2 AFEE-0 AFEE-1 RED-5
 }
+leg_rule_tags_interm() {
+  # The in-term claims rules (in-term plan section 4): IT-1..IT-7 and IT-9 are each carried by a tagged test.
+  # IT-8 is the disclosure text, not node behaviour: it is the spec copy's 8.1 collateral bullet, which the
+  # in-term contract-generator leg proves byte-identical to the plan; here the copy must carry its opening.
+  require_tags IT-1 IT-2 IT-3 IT-4 IT-5 IT-6 IT-7 IT-9 || return 1
+  grep -q '^- Your YEC is locked for the term you choose\.' doc/yellowback-spec.md || { echo "IT-8: doc/yellowback-spec.md carries no in-term promise"; return 1; }
+  echo "IT-8: the in-term promise is the spec copy's collateral bullet"
+}
 
 # ── attribution and naming ────────────────────────────────────────────────────────────────────
 
@@ -522,6 +530,7 @@ leg block "attribution: The Ycash developers on every fork file, no upstream not
 leg block "naming: no ycash6 / DigiDollar / ydollar in src/ (AGENTS.md rule 6)" leg_naming
 leg block "rule -> test tags (v2 plan §7)" leg_rule_tags
 leg block "rule -> test tags, v3 identifiers (v3 plan §7)" leg_rule_tags_v3
+[ "$interm" = 0 ] || leg block "rule -> test tags, in-term identifiers (in-term plan section 4)" leg_rule_tags_interm
 if [ "$mode" = upgrade ]; then
   if [ "$interm" = 1 ]; then
     leg block "RPC contract = the workspace generator's in-term-line output (rpcversion 6)" leg_contract_generator

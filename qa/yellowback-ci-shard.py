@@ -32,6 +32,7 @@ import sys
 WEIGHTS = {
     "yellowback_index": 440,            # m
     "yellowback_claim": 325,            # m
+    "yellowback_interm": 300,           # in-term line (in-term claims plan T6); estimate, re-measure
     "yellowback_mining": 290,           # m
     "yellowback_lifecycle": 265,        # m
     "yellowback_void_mint": 260,        # m
