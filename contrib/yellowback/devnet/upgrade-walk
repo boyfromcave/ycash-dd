@@ -673,6 +673,12 @@ class Walk:
         res, f = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
         res, g = self.two_step(USER, "yed_mint", MINT_CENTS, IN_TERM_LOCK, "", "")
         self.mine(1)
+        # the claimant burned its 200 YED on C and D (a cancelled claim's burn is not refunded, U-24): fund it for the claim of F
+        bal = self.call(CLAIMANT, "yed_getbalance", keys=["confirmedCents"])
+        if bal["confirmedCents"] < MINT_CENTS + 100:
+            fund = self.call(USER, "yed_send", self.node(CLAIMANT).yed_getnewaddress(), 2 * MINT_CENTS, keys=["txid"])
+            self.wait_mempool(fund["txid"]); self.mine(1)
+            self.note("the claimant (node 10) now holds %s YED for the in-term claim" % (Decimal(self.node(CLAIMANT).yed_getbalance()["confirmedCents"]) / 100))
         self.vaults["F"], self.vaults["G"] = f, g
         vf = self.call(USER, "yed_getvault", f, keys=["status", "termClass", "mintedCents", "collateralZat", "lockHeight", "claimHeight", "refHeight", "claimable", "underwaterAt"])
         self.ok(vf["status"] == "ACTIVE" and vf["termClass"] == "A" and self.tip() < vf["lockHeight"], "vault F is ACTIVE, class A, in term (lockHeight %d, tip %d)" % (vf["lockHeight"], self.tip()))
