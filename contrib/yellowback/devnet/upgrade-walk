@@ -516,9 +516,9 @@ class Walk:
         self.ok(dec["type"] == "vault" and dec["tag"] == "59454400" and dec["setid"] == self.set_id and dec["cancelsetid"] == self.set_id,
                 "vault A's output is the primitive's V: tag YED\\0, set = cancel set = the attestor set")
         if self.in_term_claims():
-            self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["refHeight"] + 1,
-                    "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = refHeight + 1 (%d): the APP branch is open from the mint (IT-1)"
-                    % (CLAIM_DELAY, va["lockHeight"], va["refHeight"] + 1))
+            self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["refHeight"] + 1 and dec["appheight"] == va["refHeight"] + 1,
+                    "delay = CLAIM_DELAY (%d), ownerHeight = appHeight = refHeight + 1 (%d): the owner and APP branches are open from the mint (IT-1, D-IT-15)"
+                    % (CLAIM_DELAY, va["refHeight"] + 1))
         else:
             self.ok(dec["delay"] == CLAIM_DELAY and dec["ownerheight"] == va["lockHeight"] and dec["appheight"] == va["claimHeight"],
                     "delay = CLAIM_DELAY (%d), ownerHeight = lockHeight (%d), appHeight = claimHeight (%d) (U-23)" % (CLAIM_DELAY, va["lockHeight"], va["claimHeight"]))
