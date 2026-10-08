@@ -713,7 +713,13 @@ class Walk:
         price = self.call(USER, "yed_getprice", keys=["pClaim", "pMid", "pSlow", "aClaim", "xClaim"])
         self.ok(price["pClaim"] is not None and price["pClaim"] < at, "pClaim $%s is under F's threshold price $%s" % (Decimal(price["pClaim"] or 0) / 1_000_000, Decimal(at) / 1_000_000))
         self.ok(self.tip() < vf["lockHeight"], "still in term: tip %d < lockHeight %d (claimHeight would have been %d)" % (self.tip(), vf["lockHeight"], vf["claimHeight"]))
-        rows = [r for r in self.call(USER, "yed_listclaimable", show=False) if r["vault"] == f + ":0"]
+        rows = []
+        for attempt in range(8):
+            # after a burst of blocks the agents lag and the row carries claimPath "" (no bundle yet): wait for fresh attestations
+            self.fresh(USER)
+            rows = [r for r in self.call(USER, "yed_listclaimable", show=False, quiet=attempt > 0) if r["vault"] == f + ":0"]
+            if rows and rows[0].get("claimPath"): break
+            time.sleep(1.5); self.mine(1, quiet=True)
         self.out("    = yed_listclaimable row for F: %s" % jdump(rows and pick(rows[0], ["claimable", "claimPath", "pClaim", "underwaterAt", "residualZat", "mintedCents", "collateralZat"])))
         self.ok(rows and rows[0].get("claimable", True) is True and rows[0].get("claimPath") == "a", "F is claimable in term by clause (a)")
         min_out = (rows[0]["collateralZat"] - int(rows[0].get("residualZat") or 0)) * 95 // 100
