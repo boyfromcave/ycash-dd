@@ -385,7 +385,8 @@ class Walk:
         self.ok(info["active"] and info["branchid"] == "6d5b7a31" and info["activationheight"] == VAULT_ACTIVATION,
                 "UPGRADE_VAULT (branch 6d5b7a31) active since %d" % VAULT_ACTIVATION)
         up = self.call(USER, "yed_getinfo", keys=["rpcversion", "upgrade", "attest"])
-        self.ok(up["rpcversion"] == 5 and up["upgrade"]["attestorSetId"] == self.set_id, "Yellowback rpcversion 5 on the attestor set %s" % self.set_id[:16])
+        want = 6 if self.node(USER).yed_getinfo()["params"].get("inTermClaims") is True else 5      # 6: in-term claims (IT-7)
+        self.ok(up["rpcversion"] == want and up["upgrade"]["attestorSetId"] == self.set_id, "Yellowback rpcversion %d on the attestor set %s" % (want, self.set_id[:16]))
         self.fails(STOCK, "yed_getinfo", expect="Method not found")
         self.note("node 1 runs without -yellowbackattestorset: no yed_* there, but the primitive (set_*/vault_*) runs on every node")
         self.call(STOCK, "vault_getinfo", keys=["active", "sets", "statehash"])
