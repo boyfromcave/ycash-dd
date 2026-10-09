@@ -13,9 +13,10 @@ name: yellowback tests
 #                         lockorder, sanitizers, coverage                     -- never block; open an issue
 #   weekly Sunday 04:00   weekly-fuzz (30 min per fuzz target, corpus PR)    -- never blocks
 #   (dispatch weekly)
-#   schedule              schedule-fanout: GitHub runs `schedule` on the default branch only, so the
-#                         scheduled run there dispatches the same tier on every other SCHEDULE_REFS
-#                         branch (workflow_dispatch with the branch's own copy of this file).
+#   schedule              GitHub runs `schedule` on the default branch only (upgrade/vault), which runs
+#                         its own nightly/weekly tier. schedule-fanout dispatches the same tier on the
+#                         FANOUT_REFS branches; that list is empty (owner, 2026-10-09: scheduled runs on
+#                         upgrade/vault only). Dispatch another branch's nightly by hand when needed.
 #
 # EXPECTED WALL CLOCK of the push tier (GitHub-hosted ubuntu-22.04, 4 vCPU; measured 2026-10-04 on the
 # old single job: depends cold 13 min, build 16.6 min without ccache, unit 4.6 min, functional 36.4 min
@@ -67,6 +68,9 @@ env:
   # starts its nightly only once upgrade/vault lists it too; on this branch it also names the in-term
   # line as a node-line branch for the audit's cross-line fetch.
   SCHEDULE_REFS: harden/yellowback upgrade/vault upgrade/vault-in-term
+  # The branches the scheduled run dispatches its tier to, besides upgrade/vault itself: none (owner,
+  # 2026-10-09). SCHEDULE_REFS above still names the node-line branches for the audit's cross-line fetch.
+  FANOUT_REFS: ""
   # History of this list: plan section 6.0 item 6 plus yellowback_hardening (2026-09-11: mining,
   # enforcement, stock_node and hardening had been registered but never run); the three
   # yellowback_attest* scripts (2026-09-20, same omission); yellowback_quote (2026-09-22, needs 3.11's
@@ -644,7 +648,8 @@ jobs:
           TIER: ${{ github.event.schedule == '0 4 * * 0' && 'weekly' || 'nightly' }}
           THIS_REF: ${{ github.ref_name }}
         run: |
-          for r in $SCHEDULE_REFS; do
+          [ -n "$FANOUT_REFS" ] || echo "no FANOUT_REFS: the scheduled tier runs on $THIS_REF only"
+          for r in $FANOUT_REFS; do
             [ "$r" = "$THIS_REF" ] && continue
             if gh workflow run yellowback-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$r" -f tier="$TIER"; then
               echo "dispatched $TIER on $r"
