@@ -79,7 +79,7 @@ env:
   # vault_bridge, yellowback_upgrade, vault_rpc_contract (2026-10-06, live answers against
   # doc/vault-rpc-contract.json); yellowback_activation, yellowback_enforcement and
   # yellowback_attest_enforcement left with the enforcement machinery (upgrade plan §6); yellowback_interm
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_interm yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge vault_pq_wallet
+  # (2026-10-07, in-term claims IT-1..IT-6). On upgrade/quantum-vaults: vault_pq, vault_pq_wallet (2026-10-10, Q3, Q5).
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_interm yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_rpc_contract vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet
   # The functional scripts the nightly job runs by name, each in its own step (they need the Rust
   # attest agent, the devnet, or a ycash-legacy build). The audit counts them as run by CI.
