@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -1211,6 +1212,9 @@ public:
     std::map<CKeyID, CKeyMetadata> mapKeyMetadata;
     std::map<libzcash::SproutPaymentAddress, CKeyMetadata> mapSproutZKeyMetadata;
     std::map<libzcash::SaplingIncomingViewingKey, CKeyMetadata> mapSaplingZKeyMetadata;
+    //! Post-quantum keys (quantum plan §4.6): creation time per key, next HD index per scheme.
+    std::map<CPQKeyID, int64_t> mapPQKeyCreateTime;
+    std::map<uint8_t, uint32_t> mapPQNextIndex;
 
     typedef std::map<unsigned int, CMasterKey> MasterKeyMap;
     MasterKeyMap mapMasterKeys;
@@ -1403,6 +1407,25 @@ public:
     bool LoadCryptedKey(const CPubKey &vchPubKey, const std::vector<unsigned char> &vchCryptedSecret);
     bool AddCScript(const CScript& redeemScript);
     bool LoadCScript(const CScript& redeemScript);
+
+    /**
+     * Post-quantum keys (quantum plan §4.6, quantum spec §2.4, ruling A-12).
+     * GetNewPQKey derives the wallet's next key of scheme from its HD seed (DerivePQSeed: HKDF-SHA256,
+     * info "Ycash PQ key" || scheme || index_be32, 48 bytes), stores it (walletdb "pqkey", or
+     * "cpqkey" when the wallet is encrypted) and returns its id. False when the wallet is locked,
+     * has no HD seed or the scheme is unknown. The index is the lowest at or above every stored
+     * key's index + 1 whose key the wallet does not hold yet.
+     */
+    bool GetNewPQKey(uint8_t scheme, CPQKeyID& idOut);
+    //! Adds a PQ key to the store and saves it to disk.
+    bool AddPQKey(const CPQKey& key);
+    //! As AddPQKey, with an explicit creation time (importwallet).
+    bool AddPQKeyWithTime(const CPQKey& key, int64_t nCreateTime);
+    //! Adds an encrypted PQ key to the store and saves it to disk.
+    bool AddCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted);
+    //! LoadWallet: add without writing.
+    bool LoadPQKey(const CPQKey& key, int64_t nCreateTime);
+    bool LoadCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& crypted, int64_t nCreateTime);
 
     //! Adds a destination data tuple to the store, and saves it to disk
     bool AddDestData(const CTxDestination &dest, const std::string &key, const std::string &value);
