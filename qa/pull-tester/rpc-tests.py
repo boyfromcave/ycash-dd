@@ -74,6 +74,8 @@ BASE_SCRIPTS= [
     'vault_primitive.py',
     'vault_slashing.py',
     'vault_bridge.py',
+    # A reorg below Falcon's height evicts Falcon (OP_CHECKPQSIG scheme 0x02) spends (quantum review F-1).
+    'vault_pq_reorg.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
