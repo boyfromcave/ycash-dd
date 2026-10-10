@@ -1255,7 +1255,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (chainparams.NetworkIDString() != "regtest") {
             return InitError("-pqfalcon and -pqfalconheight may only be used on regtest.");
         }
-        if (mapArgs.count("-pqfalconheight") && GetArg("-pqfalconheight", 0) < 0) {
+        if (mapArgs.count("-pqfalconheight") &&
+            (GetArg("-pqfalconheight", 0) < 0 || GetArg("-pqfalconheight", 0) > std::numeric_limits<int>::max())) {
             return InitError("-pqfalconheight must be a block height (>= 0).");
         }
     }
