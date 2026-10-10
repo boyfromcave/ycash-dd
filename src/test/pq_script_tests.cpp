@@ -193,7 +193,7 @@ BOOST_AUTO_TEST_CASE(pq_constants)
     BOOST_CHECK_EQUAL(Chunks(Sig(FALCON)).back().size(), 147U);
     // The flag is its own bit.
     BOOST_CHECK_EQUAL(SCRIPT_VERIFY_PQ_FALCON & (STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT), 0U);
-    for (ScriptError e : {SCRIPT_ERR_PQ_SCHEME, SCRIPT_ERR_PQ_CHUNK, SCRIPT_ERR_PQ_SIZE})
+    for (ScriptError e : {SCRIPT_ERR_PQ_SCHEME, SCRIPT_ERR_PQ_CHUNK, SCRIPT_ERR_PQ_SIZE, SCRIPT_ERR_PQ_COUNT})
         BOOST_CHECK(std::string(ScriptErrorString(e)) != "unknown error");
     // SHA256(scheme || pk): the scheme byte is bound into the hash.
     const valtype pk = PubKey(SLH);
@@ -867,6 +867,109 @@ BOOST_AUTO_TEST_CASE(pq_golden_spends)
         BOOST_CHECK(!VerifyScript(ss, spk, flags, checker, VAULT_BRANCH_ID, &err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
     }
+}
+
+namespace {
+
+/** The argument items of one OP_CHECKPQSIG (sig chunks, s, pk chunks, p, keyHash, scheme) as a script. */
+CScript ArgItems(uint8_t scheme)
+{
+    const valtype pk = PubKey(scheme);
+    return Cat(ScriptSig(Chunks(Sig(scheme)), Chunks(pk)), CScript() << KeyHashBytes(scheme, pk) << (int64_t)scheme);
+}
+
+/** `copies` x (<n-1> OP_PICK x n, OP_CHECKPQSIG, OP_DROP): re-checks the n items on top `copies` times. */
+CScript Amplify(int n, int copies)
+{
+    CScript s;
+    for (int c = 0; c < copies; c++) {
+        for (int j = 0; j < n; j++) s << (int64_t)(n - 1) << OP_PICK;
+        s << OP_CHECKPQSIG << OP_DROP;
+    }
+    return s;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_one_per_evaluation)
+{
+    // Quantum spec R-B1: at most one executed OP_CHECKPQSIG per EvalScript under SCRIPT_VERIFY_VAULT,
+    // else SCRIPT_ERR_PQ_COUNT (the OP_CHECKSETSIG precedent). It bounds PQ verifications to three
+    // per input (scriptSig, scriptPubKey, P2SH redeem script).
+    MockPQChecker checker;
+    const unsigned int flags = PQ_FALCON_FLAGS;
+
+    // Reviewer B's amplification: the scriptSig pushes the 21 items of an SLH-DSA check, then
+    // re-picks and re-checks them; the scriptPubKey repeats it and ends OP_CHECKPQSIG OP_NOT.
+    const CScript items = ArgItems(SLH);
+    {
+        int n = 0;
+        std::vector<valtype> st;
+        BOOST_CHECK_EQUAL(Eval(items, flags, checker, &st), SCRIPT_ERR_OK);
+        n = st.size();
+        BOOST_REQUIRE_EQUAL(n, 21);
+        const CScript scriptSig = Cat(items, Amplify(21, 3));
+        BOOST_CHECK_EQUAL(Eval(scriptSig, flags, checker), SCRIPT_ERR_PQ_COUNT);
+        const CScript spk = Cat(Amplify(21, 3), CScript() << OP_CHECKPQSIG << OP_NOT);
+        ScriptError err;
+        BOOST_CHECK(!VerifyScript(scriptSig, spk, flags, checker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PQ_COUNT);
+        // a push-only scriptSig moves the loop into the scriptPubKey: the same error there
+        BOOST_CHECK(!VerifyScript(items, spk, flags, checker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PQ_COUNT);
+        // exactly one copy is fine
+        BOOST_CHECK_EQUAL(Eval(Cat(items, Amplify(21, 1)), flags, checker), SCRIPT_ERR_OK);
+    }
+    // Reviewer A's: 16 items (8 filler + a Falcon check's 8), 16 x OP_PICK per copy, 11 copies
+    // (198 ops, under the 201 limit).
+    {
+        CScript s;
+        for (int j = 0; j < 8; j++) s << valtype(1, (unsigned char)(0x40 + j));
+        s = Cat(s, ArgItems(FALCON));
+        std::vector<valtype> st;
+        BOOST_CHECK_EQUAL(Eval(s, flags, checker, &st), SCRIPT_ERR_OK);
+        BOOST_REQUIRE_EQUAL(st.size(), 16U);
+        const int callsBefore = checker.calls;
+        BOOST_CHECK_EQUAL(Eval(Cat(s, Amplify(16, 11)), flags, checker), SCRIPT_ERR_PQ_COUNT);
+        BOOST_CHECK_EQUAL(checker.calls, callsBefore + 1);   // the second never reaches the verifier
+    }
+    // Without SCRIPT_VERIFY_VAULT the opcode is BAD_OPCODE before any count.
+    BOOST_CHECK_EQUAL(Eval(Cat(items, Amplify(21, 2)), SCRIPT_VERIFY_P2SH, checker), SCRIPT_ERR_BAD_OPCODE);
+    // Unexecuted branches do not count.
+    {
+        const CScript s = Cat(items, CScript() << OP_0 << OP_IF << OP_CHECKPQSIG << OP_CHECKPQSIG << OP_ENDIF
+                                               << OP_CHECKPQSIG << OP_0 << OP_IF << OP_CHECKPQSIG << OP_ENDIF);
+        std::vector<valtype> st;
+        BOOST_CHECK_EQUAL(Eval(s, flags, checker, &st), SCRIPT_ERR_OK);
+        BOOST_CHECK(IsTrue(st));
+    }
+    // One in the scriptSig and one in the scriptPubKey are two evaluations: both run (documented
+    // behaviour; the scriptSig is not push-only, so this is non-standard under SIGPUSHONLY policy).
+    {
+        MockPQChecker c2;
+        const CScript scriptSig = Cat(items, CScript() << OP_CHECKPQSIG);
+        const CScript spk = Cat(items, CScript() << OP_CHECKPQSIG << OP_BOOLAND);
+        ScriptError err;
+        BOOST_CHECK(VerifyScript(scriptSig, spk, flags, c2, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(c2.calls, 2);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_p2sh_wrapped_real_signature)
+{
+    // A PQPKH script as a P2SH redeem script with a real SLH-DSA signature: one OP_CHECKPQSIG in the
+    // redeem evaluation, so R-B1 lets it pass (consensus; R-B2 makes it non-standard).
+    const CAmount amount = 5000;
+    const PQKey key = MakeKey(SLH, 0x51);
+    const CScript redeem = PQPKH(KeyHashBytes(SLH, key.pk), SLH);
+    const CScript p2sh = GetScriptForDestination(CScriptID(redeem));
+    const CTransaction tx(SaplingTx());
+    const valtype sig = SignPQ(key, redeem, tx, SIGHASH_ALL, amount, VAULT_BRANCH_ID);
+    CScript ss = ScriptSig(Chunks(sig), Chunks(key.pk));
+    ss << ToByteVector(redeem);
+    BOOST_CHECK_EQUAL(VerifyPQ(ss, p2sh, tx, amount, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS), SCRIPT_ERR_OK);
+    BOOST_CHECK_EQUAL(VerifyPQ(ss, p2sh, tx, amount + 1, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS), SCRIPT_ERR_EVAL_FALSE);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
