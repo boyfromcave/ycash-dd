@@ -157,6 +157,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "set_buildact", 1 },
     { "set_equivocation", 0 },
     { "vault_lock", 0 },
+    { "vault_getnewowner", 0 },
     { "vault_buildunlock", 1 },
     { "vault_app", 1 },
     { "yed_getstatehash", 0 },
