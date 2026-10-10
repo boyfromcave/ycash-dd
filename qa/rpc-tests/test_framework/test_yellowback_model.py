@@ -42,12 +42,16 @@ GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowba
 
 # The pinned state hash of the golden sequence (regtest params {1, 0, 0, the golden attestor set, 3, scriptsig, mintRequiresArmed false}; SCHEMA_VERSION 8, in-term claims).  The C++ unit test
 # ``statehash_golden_vector`` replays yellowback_golden.json and must produce this hex.
-GOLDEN_STATE_HASH = 'b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87'
+GOLDEN_STATE_HASH = '17926ca6311ab27d92ea3ecb10eda2924eae72c133b9668b060b141dd13924a1'
 
 # secp256k1 generator, compressed: a valid owner key that needs no library
 G_PUBKEY = bytes.fromhex('0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798')
 G2_PUBKEY = bytes.fromhex('02C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5')  # 2G
 BAD_PUBKEY = b'\x02' + b'\x00' * 32   # x = 0: 7 is not a square mod p
+# Post-quantum owner ids (quantum spec section 3.1): scheme 0x01 (SLH-DSA) || a 32-byte key hash; the model checks no signature
+G_OWNER = bytes([0x01]) + ym.sha256(b'yellowback-golden-owner-1')
+G2_OWNER = bytes([0x01]) + ym.sha256(b'yellowback-golden-owner-2')
+BAD_OWNER = bytes([0x03]) + bytes(32)  # an unregistered scheme
 
 KEY1 = ym.hash160(b'yellowback-golden-miner-1')
 KEY2 = ym.hash160(b'yellowback-golden-miner-2')
@@ -156,8 +160,8 @@ class Chain(object):
         return (t, n, ya.carrier_scriptsig(bundle, SIG71, redeem), seq)
 
     def mint_tx(self, cents, lock_blocks, ref_height, collateral, fee_key=None, fee_value=None,
-                owner=G_PUBKEY, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
-                opret_at=2, lock_height=None, carrier=None, attest_fee=None):
+                owner=G_OWNER, term_class=0, yed_inputs=(), fee_vout=None, vout0_script=None,
+                opret_at=2, lock_height=None, carrier=None, attest_fee=None, token_script=None):
         """``carrier`` = a bundle (bytes) carried by an extra input; ``attest_fee`` = (bond key hash, zat)
         paid at vout 4 (after the pool fee) and named by attestFeeVout."""
         lock = ref_height + lock_blocks if lock_height is None else lock_height
@@ -171,7 +175,7 @@ class Chain(object):
         if vout0_script is None:                                   # U-23: the V template (a P2PKH placeholder if it cannot be built)
             vout0_script = ym.yed_vault_script(self.params, owner, ref_height) or ym.p2pkh_script(OWNER_KEYHASH)
         vout0 = vout0_script
-        vouts = [(collateral, vout0), (self.params.token_value, ym.p2pkh_script(OWNER_KEYHASH))]
+        vouts = [(collateral, vout0), (self.params.token_value, token_script or ym.p2pkh_script(OWNER_KEYHASH))]
         opret = (0, bytes([ym.OP_RETURN]) + ym.push(payload))
         if opret_at == 2:
             vouts.append(opret)
@@ -238,7 +242,7 @@ class Chain(object):
         if attest_fee is not None:
             vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         if residual is not None:
-            spk = ym.p2pkh_script(residual[0])
+            spk = ym.p2pkh_script(residual[0]) if len(residual[0]) == 20 else residual[0]   # a key hash or a script (PQPKH, F-3)
             if claim and v is not None:
                 spk = ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, spk)
             vouts.append((residual[1], spk))
@@ -413,12 +417,25 @@ class PayloadTests(unittest.TestCase):
 
     # Rule: MINT-1
     def test_mint_roundtrip(self):
-        b = ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3, 4)
+        b = ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3, 4)
         self.assertEqual(len(b), 52)
         p = ym.decode_payload(b)
         self.assertEqual((p.type, p.term_class, p.cents, p.lock_height, p.ref_height, p.owner_pubkey, p.fee_vout, p.attest_fee_vout),
-                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_PUBKEY, 3, 4))
-        self.assertEqual(ym.decode_payload(ym.encode_mint(1, 12_345, 500, 460, G_PUBKEY, 3)).attest_fee_vout, 0xFF)
+                         (ym.PAYLOAD_MINT, 1, 12_345, 500, 460, G_OWNER, 3, 4))
+        self.assertEqual(ym.decode_payload(ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3)).attest_fee_vout, 0xFF)
+
+    # Rule: MINT-1
+    def test_mint_is_version_4_other_types_version_3(self):
+        # quantum spec header C-1: the MINT alone is payload version 4; a v3 MINT and a v4 TRANSFER are non-Yellowback
+        b = ym.encode_mint(1, 12_345, 500, 460, G_OWNER, 3, 4)
+        self.assertEqual(b[2], 4)
+        self.assertEqual(b[17], 0x01)
+        self.assertEqual(b[18:50], G_OWNER[1:])
+        self.assertIsNone(ym.decode_payload(b[:2] + b'\x03' + b[3:]))
+        t = ym.encode_transfer([(0, 100)])
+        self.assertEqual(t[2], 3)
+        self.assertIsNone(ym.decode_payload(t[:2] + b'\x04' + t[3:]))
+        self.assertEqual(ym.encode_redeem(1, 1, [])[2], 3)
 
     # Rule: XFER-1
     def test_transfer_and_redeem_roundtrip(self):
@@ -449,13 +466,14 @@ class PayloadTests(unittest.TestCase):
 
     # Rule: MINT-1
     def test_malformed(self):
-        good = ym.encode_mint(0, 10_000, 100, 50, G_PUBKEY, 0xFF)
+        good = ym.encode_mint(0, 10_000, 100, 50, G_OWNER, 0xFF)
         self.assertIsNone(ym.decode_payload(good[:-1]))                 # short
         self.assertIsNone(ym.decode_payload(good + b'\x00'))            # trailing
         self.assertIsNone(ym.decode_payload(b'YA' + good[2:]))          # magic
         self.assertIsNone(ym.decode_payload(b'YB\x01' + good[3:]))      # version 1 ignored (V23)
         self.assertIsNone(ym.decode_payload(b'YB\x02' + good[3:]))      # version 2 ignored (V23)
-        self.assertIsNone(ym.decode_payload(b'YB\x04' + good[3:]))      # later version ignored
+        self.assertIsNone(ym.decode_payload(b'YB\x05' + good[3:]))      # later version ignored
+        self.assertIsNone(ym.decode_payload(b'YB\x03' + good[3:]))      # a v3 MINT ignored (quantum spec C-1)
         self.assertIsNone(ym.decode_payload(b'YB\x03\x10' + good[4:]))  # retired type
         self.assertIsNone(ym.decode_payload(b'YB\x03\x20'))             # other family, short
         self.assertIsNone(ym.decode_payload(b'YB\x03'))                 # < 4 bytes
@@ -828,17 +846,46 @@ class MintTests(unittest.TestCase):
         self.assertEqual(c.void_reason(txid_of(raw)), 'bad-mint-ref-height')
 
     # Rule: MINT-3
+    # Rule: TOK-PQ
+    def test_mint3_falcon_owner_and_tokpq(self):
+        # quantum spec R-A2, A-5, F-7: a Falcon owner and the holder rule bind from the Falcon height only
+        c = self.c
+        falcon_owner = bytes([ym.PQ_SCHEME_FALCON]) + ym.sha256(b'falcon-owner')
+        falcon_holder = ym.pqpkh_script(bytes([ym.PQ_SCHEME_FALCON]) + ym.sha256(b'falcon-holder'))
+        self.assertEqual(len(falcon_holder), 35)
+        self.assertEqual(ym.pqpkh_owner(falcon_holder)[0], 2)
+        c.params.pq_falcon_height = c.height + 3
+        self.assertVoid(self.mint(owner=falcon_owner), 'bad-mint-owner-key')          # below the height
+        ok = self.mint(token_script=ym.pqpkh_script(G_OWNER))                            # any holder below it
+        self.assertIn((ok, 0), c.model.vaults)
+        while c.height + 1 < c.params.pq_falcon_height:
+            c.mine((1, 50_000, 0, KEY2), [])
+        bad = self.mint()                                                                # P2PKH token at the height
+        self.assertEqual(c.refused.get(bad), 'bad-yed-holder')
+        good = self.mint(owner=falcon_owner, token_script=falcon_holder)
+        self.assertIn((good, 0), c.model.vaults)
+        self.assertIn((good, 1), c.model.tokens)
+        # D-Q-19: a hybrid channel token holds from the Falcon height iff its client is a Falcon key
+        ch = ym.pqchannel_script(bytes([2]) + ym.sha256(b'channel-client'), G2_PUBKEY, 1000)
+        self.assertEqual(ym.pqchannel_client(ch)[0], 2)
+        self.assertEqual(len(ch), 114)
+        self.assertIn((self.mint(token_script=ch), 0), c.model.vaults)
+        slh_ch = ym.pqchannel_script(G_OWNER, G2_PUBKEY, 1000)
+        self.assertEqual(c.refused.get(self.mint(token_script=slh_ch)), 'bad-yed-holder')
+        self.assertIsNone(ym.pqchannel_client(slh_ch[:-1]))
+
+    # Rule: MINT-3
     def test_mint3_verdicts(self):
         c = self.c
         ref = c.height - 1
         # fewer than three outputs: the V at vout[0] and the OP_RETURN only
         lock = ref + 48
-        pl = ym.encode_mint(0, 10_000, lock, ref, G_PUBKEY, 0xFF)
-        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_PUBKEY, ref)),
+        pl = ym.encode_mint(0, 10_000, lock, ref, G_OWNER, 0xFF)
+        raw = ym.serialize_tx_v4([c.fund_input()], [(10 ** 12, ym.yed_vault_script(c.params, G_OWNER, ref)),
                                                     (0, bytes([ym.OP_RETURN]) + ym.push(pl))]).hex()
         c.mine((1, 50_000, 0, KEY2), [raw])
         self.assertVoid(txid_of(raw), 'bad-mint-outputs')
-        self.assertVoid(self.mint(owner=BAD_PUBKEY), 'bad-mint-owner-key')
+        self.assertVoid(self.mint(owner=BAD_OWNER), 'bad-mint-owner-key')
         self.assertVoid(self.mint(vout0_script=ym.p2sh_script(b'\x51')), 'bad-mint-vault-script')
         # U-23: v2's P2SH vault is refused for new mints, and so is a P2PKH vout[0]
         self.assertVoid(self.mint(vout0_script=ym.p2sh_script(ym.vault_script(c.height - 1 + 48, G_PUBKEY, c.height - 1 + 72))),
@@ -846,9 +893,9 @@ class MintTests(unittest.TestCase):
         self.assertVoid(self.mint(vout0_script=ym.p2pkh_script(KEY1)), 'bad-mint-vault-script')
         # a V under another set is not the YED vault
         other = ym.Params.regtest(1, attestor_set='77' * 32)
-        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_PUBKEY, c.height - 1)), 'bad-mint-vault-script')
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script(other, G_OWNER, c.height - 1)), 'bad-mint-vault-script')
         # IT-1: the pre-plan shape (ownerHeight = lockHeight, appHeight = lockHeight + GRACE) is refused for a new mint
-        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script_at(c.params, G_PUBKEY, c.height - 1 + 48, c.height - 1 + 48 + c.params.grace)),
+        self.assertVoid(self.mint(vout0_script=ym.yed_vault_script_at(c.params, G_OWNER, c.height - 1 + 48, c.height - 1 + 48 + c.params.grace)),
                         'bad-mint-vault-script')
 
     # Rule: MINT-4
@@ -1143,7 +1190,7 @@ class RedeemTests(unittest.TestCase):
     def test_m3_mint_payload_on_vault_spend(self):
         c = self.c
         lock = c.height - 1 + 48
-        pl = ym.encode_mint(0, 10_000, lock, c.height - 1, G2_PUBKEY, 0xFF)
+        pl = ym.encode_mint(0, 10_000, lock, c.height - 1, G2_OWNER, 0xFF)
         txid, verdict = self.spend(payload=pl)
         self.assertFails((txid, verdict), 'vault-spend-malformed')
         self.assertNotIn((txid, 0), c.model.vaults)             # no MINT rule ran
@@ -1363,7 +1410,7 @@ def build_golden():
                 txs_at['claim5'] = c.spend_tx(vault, script, 'claim', [(txid_of(txs_at['mint5']), 1)], ref, KEY3, fee,
                                               carrier=bundle, collateral_out=v.collateral_zat - residual - fee - 10 ** 8,
                                               attest_fee=(ym.hash160(BONDS[payee][1]), ym.attest_fee_zat(fee, params.attest_fee_bps)),
-                                              residual=(ym.hash160(G_PUBKEY), residual))
+                                              residual=(ym.pqpkh_script(G_OWNER), residual))
                 txs.append(txs_at['claim5'])
                 v3['claim_height'] = h
                 v3['residual'] = residual
@@ -1376,7 +1423,7 @@ def build_golden():
         elif 'claim_height' in v3 and h == v3['claim_height'] + 11:     # the owner's residual intent released after CLAIM_DELAY
             claim5 = txid_of(txs_at['claim5'])
             res = [op for op, r in c.model.intents.items() if op[0] == claim5 and r.role == ym.I_RESIDUAL]
-            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.p2pkh_script(ym.hash160(G_PUBKEY)))
+            txs_at['release5r'] = c.release_tx(res[0], v3['residual'], ym.pqpkh_script(G_OWNER))
             txs.append(txs_at['release5r'])
             v3['residual_vout'] = res[0][1]
         elif 'claim_height' in v3 and h == v3['dormancy_height'] + 2:   # EQV-1: two prices for one block hash
@@ -1425,7 +1472,7 @@ def golden_document(c):
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
                        'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false}; '
-                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3; '
+                       'SCHEMA_VERSION 8 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
                        '(a claim into an intent and its release), then the attestor set (SET_CREATE), four SET_JOINs, arming, '
                        'a mint with a bundle, a notice, an emergency claim into a claimant and a residual intent, an attestor '
@@ -1637,6 +1684,193 @@ class JsonFeedTests(unittest.TestCase):
         self.assertEqual(p.p_slow_window, 64)
 
 
+# ---------------------------------------------------------------------------
+# The post-quantum cross-implementation vectors (reviews A m-2, B M-1 of Q4): yellowback_pq_vectors.json, replayed
+# by the C++ unit tests (pq_channel_tests: the scripts; yellowback_state_tests: the chain) and by this model, and
+# later by ycash6.  Regenerate with --write-pq-vectors.
+
+PQ_VECTORS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yellowback_pq_vectors.json')
+PQ_FALCON_HEIGHT = 150
+_P_SECP = 2 ** 256 - 2 ** 32 - 977
+_SERVER_PK = bytes.fromhex('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798')   # G
+
+
+def _push_num_raw(n):
+    """A script-number push as a channel's refundHeight is written (OP_n for 1..16)."""
+    if 1 <= n <= 16:
+        return bytes([0x50 + n])
+    out = bytearray()
+    v = n
+    while v:
+        out.append(v & 0xff)
+        v >>= 8
+    if out[-1] & 0x80:
+        out.append(0)
+    return bytes([len(out)]) + bytes(out)
+
+
+def _raw_channel(scheme_byte, h, pk, refund_push):
+    return (bytes([ym.OP_IF, 0x20]) + h + bytes([scheme_byte, ym.OP_CHECKPQSIG, ym.OP_VERIFY, 0x21]) + pk
+            + bytes([ym.OP_CHECKSIG, ym.OP_ELSE]) + refund_push + bytes([ym.OP_CHECKLOCKTIMEVERIFY, ym.OP_DROP, 0x20]) + h
+            + bytes([scheme_byte, ym.OP_CHECKPQSIG, ym.OP_ENDIF]))
+
+
+def pq_script_cases():
+    """The channel / PQPKH matcher cases of reviewer B's differential (wt/scratch/q45-review-b, 364 cases): every
+    refund encoding and scheme byte, non-minimal refunds, slot mismatches, server keys off the curve, 240 seeded
+    single-byte mutations, truncation and extension, PQPKH near misses."""
+    import random
+    rnd = random.Random(4545)
+    hh = ym.sha256(b'client')
+    cases = []
+    for sch in (0, 1, 2, 3, 16):
+        for refund in (1, 2, 16, 17, 127, 128, 255, 256, 32767, 32768, 8388607, 8388608, 499999999, 500000000, 2 ** 31 - 1, 2 ** 31):
+            cases.append(('chan sch=%d refund=%d' % (sch, refund), _raw_channel(0x50 + sch if sch else 0, hh, _SERVER_PK, _push_num_raw(refund))))
+    base = _raw_channel(0x52, hh, _SERVER_PK, _push_num_raw(1000))
+    for enc in (b'\x01\x05', b'\x03\xe8\x03\x00', b'\x02\x10\x00', b'\x01\x81', b'\x01\x00', b'\x00', b'\x4f',
+                b'\x4c\x02\xe8\x03', b'\x05\x00\x65\xcd\x1d\x00', b'\x04\xff\xff\xff\x7f', b'\x04\x00\x65\xcd\x1d', b'\x04\xff\x64\xcd\x1d'):
+        cases.append(('chan refund-enc %s' % enc.hex(), base[:73] + enc + base[76:]))
+    cases.append(('chan slot hash differs', base[:-35] + bytes([0x20]) + ym.sha256(b'other') + base[-3:]))
+    cases.append(('chan slot scheme differs', base[:-3] + bytes([0x51]) + base[-2:]))
+    for name, pk in (('pk 04', b'\x04' + _SERVER_PK[1:]), ('pk x>=p', b'\x02' + (_P_SECP + 1).to_bytes(32, 'big')),
+                     ('pk off-curve', b'\x02' + (5).to_bytes(32, 'big')), ('pk 03 G', b'\x03' + _SERVER_PK[1:]),
+                     ('pk x=p', b'\x02' + _P_SECP.to_bytes(32, 'big'))):
+        cases.append(('chan ' + name, base[:38] + pk + base[71:]))
+    for i in rnd.sample(range(len(base)), 40):
+        for b in (0x00, 0x51, 0x52, 0xb2, 0x61, 0xff):
+            if base[i] != b:
+                cases.append(('chan mut[%d]=%02x' % (i, b), base[:i] + bytes([b]) + base[i + 1:]))
+    cases.append(('chan +byte', base + b'\x61'))
+    cases.append(('chan -byte', base[:-1]))
+    cases.append(('chan OP_NOTIF', bytes([0x64]) + base[1:]))
+    for n in range(1, 17):
+        cases.append(('chan off-curve-x=%d' % n, base[:38] + b'\x02' + n.to_bytes(32, 'big') + base[71:]))
+    for sb in (0x00, 0x50, 0x51, 0x52, 0x53, 0x60):
+        cases.append(('pqpkh scheme %02x' % sb, bytes([0x20]) + hh + bytes([sb, 0xc2])))
+    cases.append(('pqpkh pushdata1', bytes([0x4c, 0x20]) + hh + bytes([0x52, 0xc2])))
+    cases.append(('pqpkh 01 02 scheme', bytes([0x20]) + hh + bytes([0x01, 0x02, 0xc2])))
+    rows = []
+    for name, spk in cases:
+        ch = ym.pqchannel_client(spk)
+        pk = ym.pqpkh_owner(spk)
+        kind = 'pqchannel' if ch is not None else 'pqpubkeyhash' if pk is not None else 'other'
+        holder = (ch or pk or b'').hex()
+        rows.append({'name': name, 'hex': spk.hex(), 'type': kind, 'holder': holder})
+    return rows
+
+
+def build_pq_chain():
+    """A chain across PQ_FALCON_HEIGHT: Falcon owner mints, P2PKH / SLH / Falcon / channel holders on both sides
+    of F, an off-curve server key, the yedIn = 0 TRANSFER and an over-assignment (both unaffected by TOK-PQ)."""
+    params = ym.Params.regtest(1)
+    params.pq_falcon_height = PQ_FALCON_HEIGHT
+    c = activated_chain(params)
+    expected = []
+    falcon_owner = bytes([2]) + ym.sha256(b'pq-vectors-falcon-owner')
+    falcon_h = ym.pqpkh_script(bytes([2]) + ym.sha256(b'pq-vectors-falcon-holder'))
+    slh_h = ym.pqpkh_script(bytes([1]) + ym.sha256(b'pq-vectors-slh-holder'))
+    p2pkh = ym.p2pkh_script(OWNER_KEYHASH)
+    chan_falcon = ym.pqchannel_script(bytes([2]) + ym.sha256(b'pq-vectors-chan-falcon'), _SERVER_PK, 1000)
+    chan_slh = ym.pqchannel_script(bytes([1]) + ym.sha256(b'pq-vectors-chan-slh'), _SERVER_PK, 1000)
+    off_curve = _raw_channel(0x52, ym.sha256(b'pq-vectors-off-curve'), b'\x02' + (5).to_bytes(32, 'big'), _push_num_raw(1000))
+    assert ym.pqchannel_client(off_curve) is None
+
+    def step(raws, want=None):
+        """Mine ``raws`` in the next block; ``want`` = the verdict that must refuse the (single) transaction."""
+        h = c.height + 1
+        before = dict(c.refused)
+        c.mine((1, 50_000, 0, KEY2), raws)
+        new = {k: v for k, v in c.refused.items() if k not in before}
+        if want is None:
+            assert not new, new
+        else:
+            assert list(new.values()) == [want], (h, new, want)
+            expected.append({'height': h, 'verdict': want})
+        return [txid_of(x) for x in raws]
+
+    def mint(owner=G_OWNER, token=None, want=None):
+        ref = c.height - 1
+        raw = c.mint_tx(10_000, 48, ref, collateral_for(c, 10_000, ref), fee_key=KEY1, owner=owner, token_script=token)
+        return step([raw], want)[0]
+
+    def transfer(inputs, outs, want=None):
+        vin = [(t, n, b'', 0xFFFFFFFF) for t, n in inputs] + [c.fund_input()]
+        vouts = [(c.params.token_value, spk) for spk, _ in outs]
+        vouts.append((0, bytes([ym.OP_RETURN]) + ym.push(ym.encode_transfer([(i, cents) for i, (_, cents) in enumerate(outs)]))))
+        return step([ym.serialize_tx_v4(vin, vouts).hex()], want)[0]
+
+    # below F
+    a = mint(token=p2pkh)
+    mint(owner=falcon_owner, token=falcon_h, want='bad-mint-owner-key')
+    b = mint(token=slh_h)
+    mint(token=chan_slh)
+    mint(token=chan_falcon)
+    mint(token=off_curve)                                   # no shape rule below F: any script holds YED
+    e = transfer([(a, 1)], [(p2pkh, 3000), (falcon_h, 3000), (chan_falcon, 4000)])
+    while c.height + 1 < PQ_FALCON_HEIGHT:
+        c.mine_n(1, price_fn=lambda h: 50_000)
+    # from F
+    mint(token=p2pkh, want='bad-yed-holder')
+    g = mint(owner=falcon_owner, token=falcon_h)
+    mint(token=slh_h, want='bad-yed-holder')
+    mint(token=chan_slh, want='bad-yed-holder')
+    mint(token=chan_falcon)
+    mint(token=off_curve, want='bad-yed-holder')
+    transfer([(b, 1)], [(falcon_h, 10_000)])                 # a pre-F SLH token spent to a Falcon holder
+    transfer([], [(p2pkh, 1_000)])                          # yedIn = 0: no YED moves, TOK-PQ unaffected
+    transfer([(e, 0)], [(p2pkh, 5_000)])                    # over-assigned: XFER-2 burns, TOK-PQ unaffected
+    transfer([(g, 1)], [(p2pkh, 10_000)], want='bad-yed-holder')
+    transfer([(g, 1)], [(chan_falcon, 6_000), (falcon_h, 4_000)])
+    c.mine_n(2, price_fn=lambda h: 50_000)
+    return c, expected
+
+
+def pq_vectors_document():
+    c, expected = build_pq_chain()
+    return {
+        'description': 'Post-quantum cross-implementation vectors (quantum spec D-Q-19, F-7, R-A2; Q4 reviews A m-2, B M-1). '
+                       '"scripts": TX_PQCHANNEL / TX_PQPKH matcher cases (reviewer B\'s differential): type pqchannel | '
+                       'pqpubkeyhash | other and the YED holder (scheme || hash, HolderKey) or "". "chain": regtest params '
+                       '{startHeight 1, the TEST_SET attestor set, pqFalconHeight %d}; synthetic blocks as yellowback_golden.json '
+                       '(txs[0] the coinbase; "invalid" blocks are rejected with the listed verdict and mined again without the '
+                       'transaction): Falcon owners and P2PKH / SLH / Falcon / channel / off-curve-server holders on both sides of '
+                       'the Falcon height, a pre-F token spent after it, the yedIn = 0 TRANSFER and an over-assignment (unaffected '
+                       'by TOK-PQ). Regenerate: test_yellowback_model.py --write-pq-vectors.' % PQ_FALCON_HEIGHT,
+        'scripts': pq_script_cases(),
+        'chain': {
+            'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': c.params.attestor_set,
+                       'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False,
+                       'pqFalconHeight': PQ_FALCON_HEIGHT},
+            'invalid': expected,
+            'stateHash': c.model.state_hash(),
+            'tip': {'height': c.height, 'hash': c.block_hash(c.height)},
+            'totals': c.model.totals.as_dict(),
+            'blocks': c.blocks,
+        },
+    }
+
+
+def write_pq_vectors():
+    doc = pq_vectors_document()
+    with open(PQ_VECTORS_PATH, 'w') as f:
+        json.dump(doc, f, indent=1)
+        f.write('\n')
+    print('wrote %s: %d scripts, %d blocks, stateHash %s' % (PQ_VECTORS_PATH, len(doc['scripts']), len(doc['chain']['blocks']),
+                                                            doc['chain']['stateHash']))
+
+
+class PQVectorTests(unittest.TestCase):
+
+    # Rule: TOK-PQ
+    # Rule: MINT-3
+    def test_pq_vectors_pinned(self):
+        """The model regenerates yellowback_pq_vectors.json byte for byte (the C++ suites replay the same file)."""
+        with open(PQ_VECTORS_PATH) as f:
+            pinned = json.load(f)
+        self.assertEqual(pq_vectors_document(), pinned)
+        self.assertEqual(len(pinned['scripts']), 364)
+
+
 def write_golden():
     c, _ = build_golden()
     doc = golden_document(c)
@@ -1649,5 +1883,7 @@ def write_golden():
 if __name__ == '__main__':
     if '--write-golden' in sys.argv:
         write_golden()
+    elif '--write-pq-vectors' in sys.argv:
+        write_pq_vectors()
     else:
         unittest.main()

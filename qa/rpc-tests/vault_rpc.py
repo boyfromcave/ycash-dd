@@ -18,7 +18,9 @@ The vault primitive's set_* / vault_* RPCs end to end, on three nodes, through t
   value back in a byte-identical vault; the cancel is built and signed while the intent is still in
   the mempool (finding (50)) and broadcast after it confirms;
 - a third unlock whose cancel is accepted as the intent's mempool child, both confirming in one block;
-- vault_ownerspend after ownerHeight (selector 2);
+- vault_ownerspend after ownerHeight (selector 2): the owner is a post-quantum (SLH-DSA) key of
+  node 0's wallet (quantum plan §4.3, §4.6), vault_lock's default; a vault with an external owner
+  (a pqkeyid) is listed under that owner and not as the wallet's;
 - a reorg across a set act (invalidateblock / reconsiderblock on every node): the state hash and
   set_getinfo return to the earlier state and back again, identically on every node;
 - restarts: one node restarted as it is, one with its vaults/ directory deleted (rebuilt by the
@@ -188,7 +190,10 @@ class VaultRpcTest(BitcoinTestFramework):
 
         # ---- vault_lock ----
         owner_height = n0.getblockcount() + 40
+        assert_raises_rpc('ownerkey-removed', n0.vault_lock, {'tag': 'TEST', 'setid': setid, 'delay': DELAY,
+                          'ownerheight': owner_height, 'amount': 10, 'ownerkey': '02' + '11' * 32})
         lk = n0.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': owner_height, 'amount': 10})
+        assert lk['owner'].startswith('01') and len(lk['owner']) == 66, lk['owner']      # a new wallet SLH-DSA owner
         self.mine(1)
         vaults = n1.vault_list({'kind': 'vault'})
         assert_equal(len(vaults), 1)
@@ -196,6 +201,10 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(v['outpoint'], lk['outpoint'])
         assert_equal(v['tagtext'], 'TEST')
         assert_equal(v['value'], Decimal('10'))
+        assert_equal(v['owner'], lk['owner'])
+        assert_equal(v['ownerscheme'], 1)
+        assert_equal(n0.vault_list({'owner': lk['owner']})[0]['outpoint'], lk['outpoint'])
+        assert_equal(n1.vault_list({'owner': '01' + '00' * 32}), [])
         assert_equal(n0.vault_list({'mine': True})[0]['outpoint'], lk['outpoint'])
         assert_equal(n1.vault_list({'mine': True}), [])
         assert_equal(n2.set_getinfo(setid)['lockedvalue'], Decimal('10'))
@@ -289,8 +298,10 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_raises_rpc('owner branch opens', n0.vault_ownerspend, vaults[0]['outpoint'], n0.getnewaddress())
         self.mine(owner_height - n0.getblockcount())
         dest = n0.getnewaddress()
+        assert_raises_rpc('not a post-quantum key of this wallet', n1.vault_ownerspend, vaults[0]['outpoint'], dest)
         os_ = n0.vault_ownerspend(vaults[0]['outpoint'], dest)
         assert_equal(os_['selector'], 2)
+        assert_equal(len(n0.getrawtransaction(os_['txid'], 1)['vin'][0]['scriptSig']['hex']) // 2, 7939)
         self.mine(1)
         assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal('0.0001'))
         assert_equal(len(n0.vault_list({'kind': 'vault'})), 1)

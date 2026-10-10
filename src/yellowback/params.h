@@ -49,6 +49,12 @@ static const unsigned char PAYLOAD_MAGIC_1 = 0x42;
 static const unsigned char PAYLOAD_VERSION = 0x03;
 /** The payload version this release emits and accepts (v3 plan W14); versions 1 and 2 are non-Yellowback (V23). */
 inline uint8_t PayloadVersion() { return PAYLOAD_VERSION; }
+/**
+ * The MINT's payload version on the post-quantum line (quantum spec header C-1, §3.1): its owner field
+ * is ownerScheme u8 || ownerHash 32 (same 33 bytes, same offsets). Only MINT moves; every other type
+ * stays PAYLOAD_VERSION, and a MINT at PAYLOAD_VERSION is non-Yellowback.
+ */
+static const unsigned char MINT_PAYLOAD_VERSION = 0x04;
 /** Largest payload: Ycash nMaxDatacarrierBytes (83) minus OP_RETURN and the push opcode. */
 static const size_t MAX_PAYLOAD = 80;
 static const size_t MIN_PAYLOAD = 4;
@@ -117,6 +123,7 @@ struct Params
 
     int startHeight;                     //!< first height whose tags count = the UPGRADE_VAULT activation height (U-22); 0 = YED off
     std::vector<unsigned char> addressVersion; //!< Base58Check version bytes of Yellowback addresses (D10)
+    std::vector<unsigned char> pqAddressVersion; //!< the same for a PQ key, scheme || keyHash (quantum spec §4, F-4)
     uint256 attestorSetId;               //!< the vault primitive set whose members cancel claims (U-22, U-23); null = YED off
     int claimDelay;                      //!< CLAIM_DELAY: the YED vault's (and its claim intents') delay, blocks (U-23); 576 (12 h), regtest 10
 
@@ -209,6 +216,10 @@ struct Params
     bool mintRequiresArmed;              //!< MINT_REQUIRES_ARMED (H-1): MINT-4 refuses a mint whose R is not ARMED
                                          //!< (mint-halted-unarmed); mainnet/testnet true, regtest -yellowbackmintrequiresarmed
                                          //!< (default false), hashed in the Params record (M13)
+    int pqFalconHeight;                  //!< the Falcon (scheme 0x02) activation height, a mirror of the consensus
+                                         //!< pqFalconHeight (quantum spec R-A2, A-5) set by ParamsFromArgs; -1 = never
+                                         //!< (NO_ACTIVATION_HEIGHT: mainnet/testnet). MINT-3 admits a Falcon owner and
+                                         //!< TOK-PQ binds from it. Not in the Params record (spec §3.4: no schema change)
 
     Params();
 
@@ -225,6 +236,8 @@ struct Params
      * Snapshot record carries `attest`; until then the status is passed in.
      */
     bool IsArmed(bool snapshotArmed) const { return attestRequired && snapshotArmed; }
+    /** IsPQFalconActive(consensus, height) as the module reads it (quantum spec R-A2, A-5): pqFalconHeight >= 0 and height >= it. */
+    bool IsPQFalconActive(int64_t height) const { return pqFalconHeight >= 0 && height >= pqFalconHeight; }
     /** WINDOW_MIN_FILL of the three price windows (PRICE-1, L9). */
     int MinFill(int window) const
     {

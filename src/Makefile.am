@@ -171,6 +171,7 @@ BITCOIN_CORE_H = \
   key_constants.h \
   key_io.h \
   keystore.h \
+  pqkey.h \
   dbwrapper.h \
   limitedmap.h \
   logging.h \
@@ -504,6 +505,7 @@ libbitcoin_common_a_SOURCES = \
   key_io.cpp \
   keystore.cpp \
   netbase.cpp \
+  pqkey.cpp \
   primitives/block.cpp \
   primitives/transaction.cpp \
   proof_verifier.cpp \

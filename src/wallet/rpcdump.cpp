@@ -12,8 +12,11 @@
 #include "script/standard.h"
 #include "sync.h"
 #include "util.h"
+#include "utilstrencodings.h"
 #include "utiltime.h"
 #include "wallet.h"
+#include "yellowback/address.h"
+#include "yellowback/params.h"
 #include "yellowback/wallet.h"
 
 #include <fstream>
@@ -490,6 +493,36 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
             }
         }
 
+        // A post-quantum key (dumpwallet's "pqseed=<scheme>:<index>:<seed hex>", quantum plan §4.6).
+        if (boost::algorithm::starts_with(vstr[0], "pqseed=")) {
+            std::vector<std::string> f;
+            boost::split(f, vstr[0].substr(7), boost::is_any_of(":"));
+            CPQKey pqkey;
+            if (f.size() != 3 || !IsHex(f[2])) {
+                fGood = false;
+                continue;
+            }
+            const std::vector<unsigned char> seedBytes = ParseHex(f[2]);
+            const CPQKey::Secret seed(seedBytes.begin(), seedBytes.end());
+            int64_t scheme = 0, index = 0;
+            if (!ParseInt64(f[0], &scheme) || !ParseInt64(f[1], &index) || scheme < 0 || scheme > 255 ||
+                index < 0 || index > (int64_t)CPQKey::PQ_INDEX_NONE || !pqkey.Set((uint8_t)scheme, seed, (uint32_t)index)) {
+                fGood = false;
+                continue;
+            }
+            if (pwalletMain->HavePQKey(pqkey.GetID())) {
+                LogPrintf("Skipping import of a post-quantum key (key already present)\n");
+                continue;
+            }
+            const int64_t nTime = DecodeDumpTime(vstr[1]);
+            if (!pwalletMain->AddPQKeyWithTime(pqkey, nTime)) {
+                fGood = false;
+                continue;
+            }
+            nTimeBegin = std::min(nTimeBegin, nTime);
+            continue;
+        }
+
         CKey key = keyIO.DecodeSecret(vstr[0]);
         if (!key.IsValid())
             continue;
@@ -707,6 +740,26 @@ UniValue dumpwallet_impl(const UniValue& params, bool fDumpZKeys)
         }
     }
     file << "\n";
+
+    // Post-quantum keys (quantum plan §4.6): the 48-byte keygen seed and the HD index; importwallet
+    // (and z_importwallet) re-create the key pair from the seed. Older nodes skip these lines.
+    {
+        const yellowback::Params& yp = yellowback::ParamsForNetwork(Params().NetworkIDString());
+        file << "# Post-quantum keys (pqseed=<scheme>:<index>:<seed>)\n";
+        for (const CPQKeyID& id : pwalletMain->GetPQKeys()) {
+            CPQKey pqkey;
+            if (!pwalletMain->GetPQKey(id, pqkey))
+                continue;
+            const CPQKey::Secret& seed = pqkey.Seed();
+            const int64_t nTime = pwalletMain->mapPQKeyCreateTime.count(id) ? pwalletMain->mapPQKeyCreateTime[id] : 0;
+            std::vector<unsigned char> idBytes(1, id.scheme);
+            idBytes.insert(idBytes.end(), id.hash.begin(), id.hash.end());
+            file << strprintf("pqseed=%d:%u:%s %s # owner=%s addr=%s\n", (int)id.scheme, pqkey.Index(),
+                              HexStr(seed.begin(), seed.end()), EncodeDumpTime(nTime),
+                              HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp));
+        }
+        file << "\n";
+    }
 
     if (fDumpZKeys) {
         std::set<libzcash::SproutPaymentAddress> sproutAddresses;

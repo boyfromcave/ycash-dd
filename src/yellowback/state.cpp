@@ -5,6 +5,7 @@
 #include "yellowback/state.h"
 
 #include "arith_uint256.h"
+#include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
 #include "script/script.h"
 #include "vault/act.h"
@@ -63,6 +64,7 @@ const char* const INTENT_SPEND_MALFORMED = "intent-spend-malformed";
 const char* const INTENT_CANCEL_RESIDUAL = "intent-cancel-residual";
 const char* const INTENT_CANCEL_NO_VAULT = "intent-cancel-no-vault";
 const char* const YED_TEMPLATE_OUTPUT = "yed-template-output";
+const char* const BAD_YED_HOLDER = "bad-yed-holder";
 const char* const BUNDLE_STAT = "stat";
 const char* const ATTESTOR_REGISTER_RETIRED = "attestor-register-retired";
 const char* const ATTESTOR_REVIVE_RETIRED = "attestor-revive-retired";
@@ -335,11 +337,15 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     if (!(lock > ref) || lock - ref < P.classMin[p.termClass] || lock - ref > P.classMax[p.termClass]) return verdict::BAD_MINT_LOCK_HEIGHT;
     // MINT-3
     if (tx.vout.size() < 3) return verdict::BAD_MINT_OUTPUTS;
-    if (!p.ownerPubKey.IsValid() || !p.ownerPubKey.IsCompressed() || !p.ownerPubKey.IsFullyValid()) return verdict::BAD_MINT_OWNER_KEY;
+    // The owner is a post-quantum key id, scheme || keyHash in the 33 owner bytes (quantum spec §3.1, §3.2).
+    const CPQKeyID owner = OwnerFromBytes(p.ownerKeyBytes);
+    if (!vault::IsOwnerValid(owner)) return verdict::BAD_MINT_OWNER_KEY;
+    // A Falcon (scheme 0x02) owner only from the Falcon height (quantum plan §4.4, spec A-4, R-A2; the mirror, A-5).
+    if (owner.scheme == pq::SCHEME_FN_DSA_512 && !P.IsPQFalconActive(H)) return verdict::BAD_MINT_OWNER_KEY;
     // U-23: the collateral is the primitive's V (tag YED, the attestor set, CLAIM_DELAY, ownerHeight = lockHeight,
     // ownerHeight = appHeight = refHeight + 1, IT-1); v2's P2SH VaultScript and the pre-IT-1 shape (ownerHeight =
     // lockHeight, appHeight = lockHeight + GRACE) are refused for new mints.
-    const CScript expected = YedVaultScript(P, p.ownerPubKey, ref);
+    const CScript expected = YedVaultScript(P, owner, ref);
     if (expected.empty() || tx.vout[0].scriptPubKey != expected) return verdict::BAD_MINT_VAULT_SCRIPT;
     // MINT-4 (ACT-5's activation and the PARTICIPATION/ENFORCEMENT halts left with the upgrade, §6: the
     // module is active from START_HEIGHT; NOT_ACTIVE is the virtual snapshot below it)
@@ -379,6 +385,8 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
         && P.baseRatioBps[p.termClass] < P.recapRatioBps) return verdict::MINT_SUPPLY_CAP;
     // MINT-7
     if (opReturnIndex == 1) return verdict::BAD_MINT_TOKEN_OUTPUT;
+    // TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH.
+    if (!HolderAllowed(P, H, tx.vout[1].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     // MINT-8 (FEE-0 when E(R) is empty, K11)
     const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
     if (!eligible.empty()) {
@@ -472,7 +480,8 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
 // ---------------------------------------------------------------------------
 // XFER-1..3 for a TRANSFER, or a REDEEM payload that spends no ACTIVE vault
 
-void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const Payload& p, Cents yedIn, TxLogRecord& log)
+/** Returns nullptr, or TOK-PQ's verdict when an assignment that would receive YED is not a holder (the transaction is invalid). */
+const char* ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid, const Payload& p, Cents yedIn, TxLogRecord& log)
 {
     const Params& P = ctx.params;
     const char* v = verdict::OK;
@@ -485,7 +494,13 @@ void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid
     if (v != verdict::OK) {
         log.verdict = v;                                                            // everything burns (cenotaph)
         log.yedOut = 0;
-        return;
+        return nullptr;
+    }
+    // TOK-PQ (quantum spec F-7, "Q4 as implemented"): only the assignments that actually receive YED -- after
+    // XFER-1..3 hold -- are bound; from the Falcon height a non-holder output makes the transaction invalid
+    // (refused, not burned: a wallet that missed the activation keeps its YED).
+    for (const Assignment& a : p.assignments) {
+        if (!HolderAllowed(ctx.params, ctx.height, tx.vout[a.vout].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     }
     for (const Assignment& a : p.assignments) {
         const COutPoint out(txid, a.vout);
@@ -503,6 +518,7 @@ void ApplyTransfer(EvalContext& ctx, const CTransaction& tx, const uint256& txid
     }
     log.yedOut = total;
     log.verdict = total < yedIn ? verdict::BURNED : verdict::OK;
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +556,10 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     for (const Assignment& a : p.assignments) {
         if ((Cents)a.cents < P.minOutput || (Cents)a.cents > P.maxOutput) return verdict::VAULT_SPEND_MALFORMED;
     }
+    // TOK-PQ (quantum spec F-7): from the Falcon height every assigned output is a Falcon TX_PQPKH.
+    for (const Assignment& a : p.assignments) {
+        if (!HolderAllowed(P, H, tx.vout[a.vout].scriptPubKey)) return verdict::BAD_YED_HOLDER;
+    }
     const VaultRecord& vault = active[0].record;
     const bool claim = selector.value() == vault::SEL_APP;
     // U-23: a claim moves the whole vault into intents (the primitive's S-2 holds: every I output carries
@@ -547,7 +567,7 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // residual intent (RED-5 decides which is due) and no re-lock.
     std::vector<unsigned int> intents;
     if (claim) {
-        const CScript vaultSpk = YedVaultScriptAt(P, vault.OwnerKey(), vault.ownerHeight, vault.appHeight);
+        const CScript vaultSpk = YedVaultScriptAt(P, vault.Owner(), vault.ownerHeight, vault.appHeight);
         const uint256 vaultHash = vault::ScriptHash256(vaultSpk);
         for (unsigned int j = 0; j < tx.vout.size(); j++) {
             if (tx.vout[j].scriptPubKey == vaultSpk) return verdict::VAULT_CLAIM_INTENTS;
@@ -617,15 +637,15 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
             facts.claimPath = "b";
         }
         // RED-5: the residual above the claimant's cap goes back to the owner (R1: no margin under (b) alone).
-        // U-23: it is the owner's residual intent, paying P2PKH(owner) at least the residual; the other
+        // U-23: it is the owner's residual intent, paying the owner's PQPKH at least the residual; the other
         // intent is the claimant's. With no residual due the claim has exactly one intent.
         if (!pClaim.has_value()) return verdict::RED5_RESIDUAL;
         const int marginBps = facts.claimPath == "a" ? P.claimThresholdBps : (int)BPS;
         facts.residualZat = ResidualZat(vault.collateralZat, ClaimantMaxZat(vault.mintedCents, marginBps, pClaim.value()));
         if (facts.residualZat >= P.residualMinZat) {
-            const CPubKey owner = vault.OwnerKey();
-            if (!owner.IsValid() || intents.size() != 2) return verdict::RED5_RESIDUAL;
-            const uint256 ownerHash = vault::ScriptHash256(P2PKHOf(owner.GetID()));
+            const CPQKeyID owner = vault.Owner();
+            if (!vault::IsOwnerValid(owner) || intents.size() != 2) return verdict::RED5_RESIDUAL;
+            const uint256 ownerHash = vault::ScriptHash256(GetScriptForDestination(owner));   // the owner's PQPKH (quantum spec F-3)
             for (unsigned int j : intents) {
                 vault::IntentParams ip;
                 IsYedIntentOutput(tx.vout[j].scriptPubKey, &ip);
@@ -756,7 +776,7 @@ std::string ApplyIntentSpend(EvalContext& ctx, const CTransaction& tx, const uin
         log.closedVaults.push_back(in.record.vault);
         return verdict::OK;
     }
-    const CScript vaultSpk = YedVaultScriptAt(P, vault->OwnerKey(), vault->ownerHeight, vault->appHeight);
+    const CScript vaultSpk = YedVaultScriptAt(P, vault->Owner(), vault->ownerHeight, vault->appHeight);
     int relock = -1;
     for (unsigned int j = 0; j < tx.vout.size(); j++) {
         if (tx.vout[j].scriptPubKey != vaultSpk) continue;
@@ -1059,7 +1079,7 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
         touched = true;
     } else if (fp.has_value() && (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM)) {
         log.type = (uint8_t)(fp->payload.type == PayloadType::TRANSFER ? TxLogType::TRANSFER : TxLogType::REDEEM);
-        ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log);
+        if (const char* holder = ApplyTransfer(ctx, tx, txid, fp->payload, yedIn, log)) return fail(holder);   // TOK-PQ
     } else {
         // The v3 types (REG-A1, NOT-1, EQV-1, REV-1): a holding rule writes its table and a TxLog entry; a
         // failing one is non-Yellowback for outputs, exactly like a transaction with no payload.

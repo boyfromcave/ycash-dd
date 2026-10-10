@@ -66,6 +66,7 @@ from test_framework.yellowback_model import assert_model_matches
 from test_framework.yellowback_util import (
     ATTESTOR_A,
     vault_app_height,
+    vault_owner,
     vault_owner_height,
     ATTESTOR_B,
     ATTEST_ARM_DELAY,
@@ -288,10 +289,11 @@ class YellowbackAttestTest(YellowbackTestFramework):
         payee = user.yed_getfeepayee(ref, collateral)
         extra = [(self.attest_fee(collateral), spk(self.bond_key_address(built['seqs'][0])))]
         residual = int(row['residualZat'])
-        owner = hex_str_to_bytes(live['ownerPubKey'])
-        residual_addr = residual_to or pubkey_to_address(owner)
+        owner = vault_owner(live)
+        # RED-5 (quantum spec F-3): the owner's residual intent pays the owner's PQPKH unless a test redirects it
+        residual_spk = spk(residual_to) if residual_to else ym.pqpkh_script(owner)
         if residual > 0:
-            extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), spk(residual_addr))))
+            extra.append((residual, ym.yed_intent_script(yed_params(), owner, vault_owner_height(live), vault_app_height(live), residual_spk)))
         hex_ = build_vault_spend_raw(node, live, 'claim', [token],
                                      payload=ym.encode_redeem(ref, 1, [], attest_fee_vout=2),
                                      fee=(payee['default']['payoutAddress'], int(payee['feeZat'])),
@@ -307,7 +309,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
                      ('redeem', 'claim', 'ok', row['claimPath'], residual, built['aClaim']))
         assert_equal(info['pClaim'], max(info['xClaim'], info['aClaim']))
         return {'txid': txid, 'ref': ref, 'row': row, 'residual': residual, 'info': info, 'claimant': claimant,
-                'vault': vault_txid, 'residualAddress': residual_addr, 'height': user.getblockcount()}
+                'vault': vault_txid, 'residualAddress': bytes_to_hex_str(residual_spk), 'height': user.getblockcount()}
 
     def release_claim(self, claimed, miner):
         """After CLAIM_DELAY: the claimant releases its intent (vout 0) and, when RED-5 was due, the
@@ -319,7 +321,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         node = self.nodes[claimed['claimant']]
         node.vault_release('%s:0' % claimed['txid'])
         if claimed['residual'] > 0:
-            node.vault_release('%s:3' % claimed['txid'], claimed['residualAddress'])
+            node.vault_release('%s:3' % claimed['txid'], claimed['residualAddress'])   # the residual's script (PQPKH(owner), F-3) or a redirect
         self.sync_all()
         self.step(miner, 1, 'release')
         self.assert_vault_everywhere(claimed['vault'], 'CLAIMED')
@@ -345,7 +347,7 @@ class YellowbackAttestTest(YellowbackTestFramework):
         user = nodes[USER]
         for node in self.enforcing_nodes():
             wait_yed_healthy(node)
-        assert_equal(user.yed_getinfo()['rpcversion'], 6)   # in-term claims (IT-7)
+        assert_equal(user.yed_getinfo()['rpcversion'], 7)   # post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
 
         print('activation at $%s, then the attestor wallets are funded' % PRICE)
         self.activate(POOLS, quote_usd=PRICE)

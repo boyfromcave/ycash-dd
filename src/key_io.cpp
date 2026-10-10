@@ -1,5 +1,6 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Copyright (c) 2016-2018 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -10,6 +11,9 @@
 #include <script/script.h>
 #include <utilstrencodings.h>
 
+
+#include "chainparams.h"
+#include "crypto/pq/scheme.h"
 
 #include <assert.h>
 #include <string.h>
@@ -37,6 +41,26 @@ public:
     {
         std::vector<unsigned char> data = keyConstants.Base58Prefix(KeyConstants::SCRIPT_ADDRESS);
         data.insert(data.end(), id.begin(), id.end());
+        return EncodeBase58Check(data);
+    }
+
+    // A PQ destination renders as its plain-YEC PQ address (owner decision D-Q-20): Base58Check(version ||
+    // scheme || keyHash), versions 0x4DD9 "sq…" / 0x4F61 "tq…" / 0x4C51 "rq…", 53 characters, the same
+    // TX_PQPKH script a PQ "ye…" names. Encode only, for now: DecodeDestination does not take it (the
+    // chain-wide decode and the RPCs that would accept it are a later task), and the wallet keeps PQ keys
+    // out of the address book, so no walletdb name record carries one. "" for an unknown network or scheme.
+    std::string operator()(const CPQKeyID& id) const
+    {
+        const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
+        if (!chain || !pq::IsKnownScheme(id.scheme)) return {};
+        const std::string net = chain->NetworkIDString();
+        std::vector<unsigned char> data;
+        if (net == "main") data = {0x4D, 0xD9};
+        else if (net == "test") data = {0x4F, 0x61};
+        else if (net == "regtest") data = {0x4C, 0x51};
+        else return {};
+        data.push_back(id.scheme);
+        data.insert(data.end(), id.hash.begin(), id.hash.end());
         return EncodeBase58Check(data);
     }
 

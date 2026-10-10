@@ -48,8 +48,11 @@
 #include "vault/template.h"
 
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
+#include "crypto/pq/sign.h"
 #include "key.h"
 #include "primitives/transaction.h"
+#include "policy/policy.h"
 #include "script/interpreter.h"
 #include "test/data/vault_vectors.json.h"
 #include "test/test_bitcoin.h"
@@ -106,6 +109,12 @@ COutPoint Prevout(const UniValue& v)
     return COutPoint(uint256(std::vector<unsigned char>(b.begin(), b.begin() + 32)), n);
 }
 
+/** {"scheme": n, "hash": hex32} (quantum plan §4.3: the owner is a post-quantum key id). */
+CPQKeyID OwnerOf(const UniValue& o)
+{
+    return CPQKeyID((uint8_t)o["scheme"].get_int(), U256(o["hash"]));
+}
+
 VaultParams VaultOf(const UniValue& p)
 {
     VaultParams v;
@@ -115,7 +124,7 @@ VaultParams VaultOf(const UniValue& p)
     v.delay = p["delay"].get_int64();
     v.ownerHeight = p["ownerHeight"].get_int64();
     v.appHeight = p["appHeight"].get_int64();
-    v.ownerKey = CPubKey(Bytes(p["ownerKey"]));
+    v.owner = OwnerOf(p["owner"]);
     return v;
 }
 
@@ -128,7 +137,7 @@ IntentParams IntentOf(const UniValue& p)
     i.delay = p["delay"].get_int64();
     i.cancelSetId = U256(p["cancelSetId"]);
     i.setId = U256(p["setId"]);
-    i.ownerKey = CPubKey(Bytes(p["ownerKey"]));
+    i.owner = OwnerOf(p["owner"]);
     return i;
 }
 
@@ -180,7 +189,7 @@ BOOST_AUTO_TEST_CASE(intent_templates)
         BOOST_REQUIRE_MESSAGE(ParseIntent(spk, got), "ParseIntent " + name);
         BOOST_CHECK(got.tag == want.tag && got.recipientHash == want.recipientHash && got.vaultHash == want.vaultHash &&
                     got.delay == want.delay && got.cancelSetId == want.cancelSetId && got.setId == want.setId &&
-                    got.ownerKey == want.ownerKey);
+                    got.owner == want.owner);
         // recipientHash / vaultHash are single SHA256 of the scripts; IntentFor reproduces the I
         CScript vspk = Script(ok[i]["vaultScript"]);
         CScript rspk = Script(ok[i]["recipientScript"]);
@@ -394,6 +403,92 @@ BOOST_AUTO_TEST_CASE(template_spends)
             BOOST_CHECK(RecoverSig(msg, ts->sigs[j], k));
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(pq_owner_spends)
+{
+    // The owner spends of the vector (SLH-DSA by test_framework/pq.py, Falcon by pq::SignWithEntropy)
+    // against the C++: the V's OWNER branch (selector 2) through the interpreter, OWNER-RELEASED
+    // (selector 3, whose OP_CHECKSETDORMANT reads set state) through the template, the sighash and
+    // pq::Verify (quantum plan §4.2, §4.3).
+    UniValue doc = Vectors();
+    const UniValue& sp = doc["ownerSpends"];
+    BOOST_REQUIRE(sp.size() >= 4);
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
+    // The Falcon owner's key is reproduced from its seed (pq::KeyGen).
+    const UniValue& fo = doc["falconOwner"];
+    std::vector<unsigned char> fpk, fsk;
+    BOOST_REQUIRE(pq::KeyGen(pq::SCHEME_FN_DSA_512, Bytes(fo["seed"]), fpk, fsk));
+    BOOST_CHECK_MESSAGE(Hex(fpk) == fo["pk"].get_str(), "falcon owner pk: " + Hex(fpk));
+    BOOST_CHECK(OwnerOf(fo["owner"]) == CPQKeyID(pq::SCHEME_FN_DSA_512, pq::KeyHash(pq::SCHEME_FN_DSA_512, fpk)));
+    int falcon = 0, released = 0;
+    for (size_t i = 0; i < sp.size(); i++) {
+        const std::string name = sp[i]["name"].get_str();
+        CTransaction tx;
+        BOOST_REQUIRE(DecodeHexTx(tx, sp[i]["tx"].get_str()));
+        const unsigned int nIn = sp[i]["nIn"].get_int();
+        const CScript code = Script(sp[i]["scriptCode"]);
+        const CAmount amount = sp[i]["amount"].get_int64();
+        const uint32_t branch = sp[i]["branchId"].get_int64();
+        const uint256 sighash = SignatureHash(code, tx, nIn, SIGHASH_ALL, amount, branch);
+        BOOST_CHECK_EQUAL(Hex(sighash), sp[i]["sighash"].get_str());
+        CPQKeyID owner;
+        VaultParams vp;
+        IntentParams ip;
+        if (sp[i]["kind"].get_str() == "V") {
+            BOOST_REQUIRE(ParseVault(code, vp));
+            owner = vp.owner;
+        } else {
+            BOOST_REQUIRE(ParseIntent(code, ip));
+            owner = ip.owner;
+        }
+        std::optional<TemplateSpend> ts = ParseTemplateSpend(code, tx.vin[nIn].scriptSig);
+        BOOST_REQUIRE(ts.has_value());
+        BOOST_CHECK_EQUAL(ts->selector, sp[i]["selector"].get_int());
+        // <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p>
+        const std::vector<std::vector<unsigned char>>& a = ts->sigs;
+        BOOST_REQUIRE(a.size() >= 4 && a.back().size() == 1);
+        const size_t p = a.back()[0];
+        BOOST_REQUIRE(a.size() >= p + 3 && a[a.size() - 2 - p].size() == 1);
+        const size_t s = a[a.size() - 2 - p][0];
+        BOOST_REQUIRE_EQUAL(a.size(), s + p + 2);
+        std::vector<unsigned char> sig, pk;
+        for (size_t j = 0; j < s; j++) sig.insert(sig.end(), a[j].begin(), a[j].end());
+        for (size_t j = s + 1; j < s + 1 + p; j++) pk.insert(pk.end(), a[j].begin(), a[j].end());
+        BOOST_CHECK(pq::KeyHash(owner.scheme, pk) == owner.hash);
+        BOOST_REQUIRE(!sig.empty() && sig.back() == SIGHASH_ALL);
+        const std::vector<unsigned char> bare(sig.begin(), sig.end() - 1);
+        BOOST_CHECK_MESSAGE(pq::Verify(owner.scheme, pk, bare, sighash), name + ": pq::Verify");
+        if (owner.scheme == pq::SCHEME_FN_DSA_512) {
+            // Reproducible: pq::SignWithEntropy with the vector's 88 bytes gives the same signature.
+            std::vector<unsigned char> again;
+            BOOST_REQUIRE(pq::SignWithEntropy(pq::SCHEME_FN_DSA_512, fsk, sighash, Bytes(sp[i]["falconEntropy"]), again));
+            BOOST_CHECK_MESSAGE(again == bare, name + ": FALCON_SIG for gen_vault_vectors.py = " + Hex(again));
+            falcon++;
+        }
+        const PrecomputedTransactionData txdata(tx);
+        TransactionSignatureChecker checker(&tx, nIn, amount, txdata);
+        ScriptError err;
+        if (sp[i]["verify"].get_str() == "script") {
+            const unsigned int f = owner.scheme == pq::SCHEME_FN_DSA_512 ? flags | SCRIPT_VERIFY_PQ_FALCON : flags;
+            BOOST_CHECK_MESSAGE(VerifyScript(tx.vin[nIn].scriptSig, code, f, checker, branch, &err), name + ": " + ScriptErrorString(err));
+            if (owner.scheme == pq::SCHEME_FN_DSA_512) {
+                BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, code, flags, checker, branch, &err));
+                BOOST_CHECK_EQUAL(err, SCRIPT_ERR_PQ_SCHEME);
+            }
+            TransactionSignatureChecker wrongAmount(&tx, nIn, amount + 1, txdata);
+            BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, code, f, wrongAmount, branch, &err));
+            VaultParams other = vp;
+            other.owner.hash = uint256S("0x01");
+            BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, BuildVault(other), f, checker, branch, &err));
+            // before the upgrade (no SCRIPT_VERIFY_VAULT) OP_CHECKPQSIG is a bad opcode
+            BOOST_CHECK(!VerifyScript(tx.vin[nIn].scriptSig, code, STANDARD_SCRIPT_VERIFY_FLAGS, checker, branch, &err));
+        } else {
+            released++;
+        }
+    }
+    BOOST_CHECK_EQUAL(falcon, 1);
+    BOOST_CHECK_EQUAL(released, 2);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

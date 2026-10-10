@@ -26,6 +26,8 @@
 
 #include <univalue.h>
 
+#include <algorithm>
+
 #include <boost/algorithm/string.hpp>
 
 namespace yellowback {
@@ -925,6 +927,17 @@ std::optional<Bundle> YellowbackIndex::BuildBundle(int refHeight, const std::vec
 
 // ---------------------------------------------------------------------------
 
+int PQFalconHeightOf(const Consensus::Params& consensus)
+{
+    // ::IsPQFalconActive(consensus, h) = UPGRADE_VAULT active at h && h >= pqFalconHeight (review A m-3): the
+    // mirror is the later of the two heights, -1 when either never activates.
+    const int vault = consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+    const int falcon = consensus.pqFalconHeight;
+    if (vault == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || vault < 0) return -1;
+    if (falcon == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || falcon < 0) return -1;
+    return std::max(vault, falcon);
+}
+
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Consensus::Params& consensus, Params& out)
 {
     // U-22: START_HEIGHT is the UPGRADE_VAULT activation height and the attestor set is per network
@@ -946,6 +959,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
         }
         out = ParamsForNetwork(networkId);
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
+        out.pqFalconHeight = PQFalconHeightOf(consensus);
         return std::nullopt;
     }
     uint256 setId;
@@ -965,6 +979,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const Co
     if (!carrier.has_value()) return std::string("-yellowbackbundlecarrier must be scriptsig, opreturn or either");
     const bool requireArmed = GetBoolArg("-yellowbackmintrequiresarmed", false);
     out = RegtestParams(setId.IsNull() ? 0 : startHeight, (int)sigmaRef, (int)capBps, setId, (int)armMin, carrier.value(), requireArmed);
+    out.pqFalconHeight = PQFalconHeightOf(consensus);
     return std::nullopt;
 }
 

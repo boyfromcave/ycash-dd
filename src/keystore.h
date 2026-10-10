@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -7,6 +8,7 @@
 #define BITCOIN_KEYSTORE_H
 
 #include "key.h"
+#include "pqkey.h"
 #include "pubkey.h"
 #include "script/script.h"
 #include "script/standard.h"
@@ -40,6 +42,14 @@ public:
     virtual bool GetKey(const CKeyID &address, CKey& keyOut) const =0;
     virtual std::set<CKeyID> GetKeys() const =0;
     virtual bool GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const =0;
+
+    //! Post-quantum keys (quantum plan §4.6): TX_PQPKH holders and vault owners.
+    virtual bool AddPQKey(const CPQKey& key) =0;
+    virtual bool HavePQKey(const CPQKeyID& id) const =0;
+    virtual bool GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const =0;
+    virtual std::set<CPQKeyID> GetPQKeys() const =0;
+    //! The public key of a held PQ key (readable while an encrypted wallet is locked).
+    virtual bool GetPQPubKey(const CPQKeyID& id, std::vector<unsigned char>& pkOut) const =0;
 
     //! Support for BIP 0013 : see https://github.com/bitcoin/bips/blob/master/bip-0013.mediawiki
     virtual bool AddCScript(const CScript& redeemScript) =0;
@@ -98,6 +108,7 @@ public:
 
 typedef std::map<CKeyID, CKey> KeyMap;
 typedef std::map<CKeyID, CPubKey> WatchKeyMap;
+typedef std::map<CPQKeyID, CPQKey> PQKeyMap;
 typedef std::map<CScriptID, CScript > ScriptMap;
 typedef std::set<CScript> WatchOnlySet;
 typedef std::map<libzcash::SproutPaymentAddress, libzcash::SproutSpendingKey> SproutSpendingKeyMap;
@@ -121,6 +132,7 @@ class CBasicKeyStore : public CKeyStore
 protected:
     HDSeed hdSeed;
     KeyMap mapKeys;
+    PQKeyMap mapPQKeys;
     WatchKeyMap mapWatchKeys;
     ScriptMap mapScripts;
     WatchOnlySet setWatchOnly;
@@ -170,6 +182,12 @@ public:
         }
         return false;
     }
+    bool AddPQKey(const CPQKey& key);
+    bool HavePQKey(const CPQKeyID& id) const;
+    bool GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const;
+    std::set<CPQKeyID> GetPQKeys() const;
+    bool GetPQPubKey(const CPQKeyID& id, std::vector<unsigned char>& pkOut) const;
+
     virtual bool AddCScript(const CScript& redeemScript);
     virtual bool HaveCScript(const CScriptID &hash) const;
     virtual bool GetCScript(const CScriptID &hash, CScript& redeemScriptOut) const;
@@ -305,6 +323,16 @@ public:
 
 typedef std::vector<unsigned char, secure_allocator<unsigned char> > CKeyingMaterial;
 typedef std::map<CKeyID, std::pair<CPubKey, std::vector<unsigned char> > > CryptedKeyMap;
+
+/** An encrypted post-quantum key (quantum plan §4.6): its HD index, its public key and its keygen
+ *  seed encrypted under the wallet's master key (IV = the first 16 bytes of the key id's hash). */
+struct CCryptedPQKey
+{
+    uint32_t index = CPQKey::PQ_INDEX_NONE;
+    std::vector<unsigned char> pk;
+    std::vector<unsigned char> cryptedSeed;
+};
+typedef std::map<CPQKeyID, CCryptedPQKey> CryptedPQKeyMap;
 typedef std::map<libzcash::SproutPaymentAddress, std::vector<unsigned char> > CryptedSproutSpendingKeyMap;
 
 //! Sapling 

@@ -23,10 +23,14 @@
 
 #include "consensus/validation.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
+#include "random.h"
+#include "hash.h"
 #include "key.h"
 #include "primitives/block.h"
 #include "script/standard.h"
 #include "test/data/yellowback_golden.json.h"
+#include "test/data/yellowback_pq_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "test/yellowback_bench.h"
 #include "utilstrencodings.h"
@@ -44,8 +48,24 @@ using namespace yellowback;
 
 namespace {
 
+/** The vault owner is a post-quantum key id (quantum plan §4.3); these cases keep their EC test keys
+ *  for tokens and payees and name the vault owner by a stand-in SLH-DSA key id derived from them. */
+CPQKeyID TestPQOwner(const CPubKey& k)
+{
+    return CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash(k.begin(), k.end()));
+}
+
+/** The 33 owner bytes (scheme || keyHash) a MINT payload and a VaultRecord carry. */
+std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
+{
+    const CPQKeyID id = TestPQOwner(k);
+    std::vector<unsigned char> b(1, id.scheme);
+    b.insert(b.end(), id.hash.begin(), id.hash.end());
+    return b;
+}
+
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "b848a699e835604fdf0aba9624195d089ab7ce5deafb93224799ea860804da87";   // in-term claims (SCHEMA_VERSION 8)
+const std::string GOLDEN_HASH = "17926ca6311ab27d92ea3ecb10eda2924eae72c133b9668b060b141dd13924a1";   // in-term claims (SCHEMA_VERSION 8), post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -78,6 +98,9 @@ struct MintOpts
     CAmount attestFeeValue = -1;            //!< -1 = attestFeeZat(feeZat(collateral))
     uint8_t attestFeeVout = 4;              //!< the payload field when attestPayee >= 0
     std::optional<CScript> attestFeeScript; //!< overrides the attestor-fee output's script
+    // quantum line
+    std::optional<CPQKeyID> pqOwner;        //!< the V's and the payload's owner (default TestPQOwner(owner))
+    std::optional<CScript> tokenScript;     //!< the token output vout[1] (default P2PKH(owner)); TOK-PQ
 };
 
 struct SpendOpts
@@ -362,7 +385,8 @@ struct Fixture
     {
         CPubKey owner = o.owner.value_or(ownerKey.GetPubKey());
         const uint32_t lock = (uint32_t)(refHeight + lockBlocks);
-        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, owner, refHeight));     // U-23, IT-1: the V template
+        const CPQKeyID pqOwner = o.pqOwner.value_or(TestPQOwner(owner));
+        CScript vs = o.vaultScriptOverride.value_or(YedVaultScript(P, pqOwner, refHeight));     // U-23, IT-1: the V template
         CAmount collateral = o.collateral;
         // An invalid class is a payload the verdict rejects (bad-mint-class). Collateral is
         // computed from a real class so the helper does not index baseRatioBps out of range;
@@ -372,8 +396,8 @@ struct Fixture
         m.vin.push_back(CTxIn(FakeInput()));
         for (const COutPoint& op : o.yedInputs) m.vin.push_back(CTxIn(op));
         m.vout.push_back(CTxOut(collateral, o.p2shVault ? vs : GetScriptForDestination(owner.GetID())));
-        m.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(owner.GetID())));
-        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, owner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
+        m.vout.push_back(CTxOut(TOKEN_VALUE, o.tokenScript.value_or(GetScriptForDestination(owner.GetID()))));
+        Payload p = Payload::Mint((uint8_t)o.termClass, (uint32_t)cents, lock, (uint32_t)refHeight, pqOwner, o.feeKey == -1 ? FEE_VOUT_NONE : o.feeVout,
                                   o.attestPayee >= 0 ? o.attestFeeVout : FEE_VOUT_NONE);
         if (!o.rawOwner.empty()) p.ownerKeyBytes = o.rawOwner;
         m.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(p))));
@@ -415,9 +439,9 @@ struct Fixture
     {
         std::optional<VaultRecord> v = Vault(vaultTxid);
         BOOST_REQUIRE(v.has_value());
-        CScript vs = YedVaultScriptAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        CScript vs = YedVaultScriptAt(P, v->Owner(), v->ownerHeight, v->appHeight);
         CScript sig = o.scriptSig.value_or(o.ownerPath ? (CScript() << valtype(71, 0x30) << OP_2) : (CScript() << OP_4));
-        const vault::VaultParams vp = YedVaultParamsAt(P, v->OwnerKey(), v->ownerHeight, v->appHeight);
+        const vault::VaultParams vp = YedVaultParamsAt(P, v->Owner(), v->ownerHeight, v->appHeight);
         CMutableTransaction m;
         m.nLockTime = o.ownerPath ? v->ownerHeight : v->appHeight;
         if (!o.vaultFirst) m.vin.push_back(CTxIn(yed.front()));
@@ -450,7 +474,7 @@ struct Fixture
             m.vout.push_back(CTxOut(afee, GetScriptForDestination(bondKeys[o.attestPayee].GetPubKey().GetID())));
         }
         if (o.residualValue.has_value()) {
-            const CScript to = o.residualScript.value_or(GetScriptForDestination(v->OwnerKey().GetID()));
+            const CScript to = o.residualScript.value_or(GetScriptForDestination(v->Owner()));
             m.vout.push_back(CTxOut(o.residualValue.value(), o.ownerPath ? to : vault::BuildIntent(vault::IntentFor(vp, vs, to))));
         }
         if (o.bundle.has_value()) m.vin.push_back(CarrierIn(o.bundle.value()));
@@ -733,6 +757,65 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
 
 // ===========================================================================
 // Tags, medians, activation (§3.2, §3.7 PRICE/ACT, §3.8 ACT/HALT)
+
+// Rule: TOK-PQ
+// Rule: MINT-3
+// The cross-implementation post-quantum chain (yellowback_pq_vectors.json "chain", built by the Python model):
+// Falcon owners and every holder shape on both sides of pqFalconHeight; the C++ module rejects exactly the listed
+// blocks with the listed verdicts and ends on the model's state hash; undoing everything restores the empty view.
+BOOST_AUTO_TEST_CASE(pq_vectors_chain_across_falcon)
+{
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_pq_vectors, json_tests::yellowback_pq_vectors + sizeof(json_tests::yellowback_pq_vectors))));
+    const UniValue& c = doc["chain"];
+    const UniValue& pj = c["params"];
+    yellowback::Params P = RegtestParams(pj["startHeight"].get_int(), pj["sigmaRefBps"].get_int(), pj["supplyCapBps"].get_int(), uint256S(pj["attestorSetId"].get_str()),
+                                         pj["attestArmMin"].get_int(), (BundleCarrier)pj["bundleCarrier"].get_int(),
+                                         pj["mintRequiresArmed"].get_bool());
+    P.pqFalconHeight = pj["pqFalconHeight"].get_int();
+    std::map<int, std::string> expected;
+    for (size_t i = 0; i < c["invalid"].size(); i++) expected[c["invalid"][i]["height"].get_int()] = c["invalid"][i]["verdict"].get_str();
+    BOOST_REQUIRE_EQUAL(expected.size(), 6U);
+    MemoryStateView view;
+    const MemoryStateView empty = view;
+    std::vector<UndoRecord> undos;
+    size_t invalidBlocks = 0;
+    const UniValue& blocks = c["blocks"];
+    for (size_t i = 0; i < blocks.size(); i++) {
+        const UniValue& b = blocks[i];
+        CBlock block;
+        for (size_t j = 0; j < b["txs"].size(); j++) {
+            CTransaction tx;
+            BOOST_REQUIRE(DecodeHexTx(tx, b["txs"][j].get_str()));
+            block.vtx.push_back(tx);
+        }
+        const int height = b["height"].get_int();
+        const uint256 hash = uint256S(b["hash"].get_str());
+        OverlayStateView overlay(view);
+        BlockEvaluation ev = EvaluateBlock(overlay, P, block, height, hash, b["subsidyZat"].get_int64());
+        overlay.Discard();
+        if (ev.blockInvalid) {
+            invalidBlocks++;
+            BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
+            BOOST_REQUIRE_MESSAGE(expected.count(height), strprintf("block %d invalid: %s", height, ev.reason));
+            BOOST_CHECK_EQUAL(ev.verdict, expected.at(height));
+            continue;
+        }
+        BOOST_CHECK_MESSAGE(!b.exists("invalid") || !b["invalid"].get_bool(), strprintf("block %d should be invalid", height));
+        UndoRecord undo;
+        BOOST_REQUIRE(!ApplyBlock(view, P, block, height, hash, b["subsidyZat"].get_int64(), undo).has_value());
+        undos.push_back(undo);
+    }
+    BOOST_CHECK_EQUAL(invalidBlocks, expected.size());
+    BOOST_CHECK_EQUAL(Hash(view), c["stateHash"].get_str());
+    State st(view);
+    BOOST_CHECK_EQUAL(st.GetTip()->height, c["tip"]["height"].get_int());
+    BOOST_CHECK_EQUAL(st.GetTotals().supplyCents, c["totals"]["supplyCents"].get_int64());
+    BOOST_CHECK_EQUAL((int)st.GetTotals().activeVaults, c["totals"]["activeVaults"].get_int());
+    for (auto it = undos.rbegin(); it != undos.rend(); ++it) UndoBlock(view, *it);
+    BOOST_CHECK(view == empty);
+}
+
 
 // Rule: TAG-3
 // Rule: TAG-4
@@ -1124,8 +1207,7 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     BOOST_CHECK_EQUAL(v.ownerHeight, ref + 1);                      // IT-1 (extended): and the owner's
     BOOST_CHECK_EQUAL(v.refHeight, ref);
     BOOST_CHECK_EQUAL(v.feePaidZat, FeeZat(v.collateralZat, f.P.feeMin, f.P.feeBps));
-    const CPubKey ownerPub = f.ownerKey.GetPubKey();
-    BOOST_CHECK(v.ownerPubKey == std::vector<unsigned char>(ownerPub.begin(), ownerPub.end()));
+    BOOST_CHECK(v.Owner() == TestPQOwner(f.ownerKey.GetPubKey()));
     BOOST_REQUIRE(f.Token(txid, 1).has_value());
     BOOST_CHECK_EQUAL(f.Token(txid, 1)->cents, 10000);
     BOOST_REQUIRE(f.Log(txid).has_value());
@@ -1140,7 +1222,7 @@ BOOST_AUTO_TEST_CASE(mint1_wellformed_creates_vault_and_token)
     // MINT-1 fails (version 1 payload): non-Yellowback, so its YED vault output is one no rule created (U-23):
     // the transaction is invalid; no vault.
     CMutableTransaction bad = f.MintTx(10000, 48, f.tip - 1);
-    std::vector<unsigned char> data = EncodePayload(Payload::Mint(0, 10000, f.tip + 47, f.tip - 1, f.ownerKey.GetPubKey(), 3));
+    std::vector<unsigned char> data = EncodePayload(Payload::Mint(0, 10000, f.tip + 47, f.tip - 1, TestPQOwner(f.ownerKey.GetPubKey()), 3));
     data[2] = 0x01;
     bad.vout[2] = CTxOut(0, PayloadScript(data));
     f.Mine(Fixture::Quote(50000, 1), { bad });
@@ -1275,11 +1357,127 @@ BOOST_AUTO_TEST_CASE(mint3_outputs_owner_key_vault_script)
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     // A V under another set or delay is not the YED vault either.
     { const int64_t lock = f.tip - 1 + 48;
-      vault::VaultParams vp = YedVaultParams(f.P, f.ownerKey.GetPubKey(), f.tip - 1);
+      vault::VaultParams vp = YedVaultParams(f.P, TestPQOwner(f.ownerKey.GetPubKey()), f.tip - 1);
       vp.delay += 1;
       MintOpts o; o.vaultScriptOverride = vault::BuildVault(vp);
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     { MintOpts o; o.p2shVault = false; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }   // no V at all
+}
+
+// Rule: MINT-3
+// Rule: TOK-PQ
+// The post-quantum line (quantum spec §3.2, F-7, R-A2, A-5): MINT-3 admits an SLH-DSA owner at every height and
+// a Falcon owner only from the Falcon height (the module's mirror of the consensus pqFalconHeight); TOK-PQ leaves
+// every holder shape valid below that height and, from it, admits only a Falcon TX_PQPKH as a token output of a
+// MINT, a TRANSFER and a vault-spending REDEEM. The rule is a function of the block height, so a reindex with the
+// Falcon height configured judges history as it was judged: the P2PKH tokens minted below it stay valid and
+// spendable (spending is not an output rule), and only new outputs at or above it are bound.
+BOOST_AUTO_TEST_CASE(mint3_tokpq_falcon_height_boundary)
+{
+    Fixture f;
+    f.Activate();
+    const int falconHeight = f.tip + 7;
+    f.P.pqFalconHeight = falconHeight;               // not hashed (spec §3.4): set after the first block is fine
+    BOOST_CHECK(!f.P.IsPQFalconActive(falconHeight - 1));
+    BOOST_CHECK(f.P.IsPQFalconActive(falconHeight));
+    const CPQKeyID slhOwner(pq::SCHEME_SLH_DSA_SHA2_128S, GetRandHash());
+    const CPQKeyID falconOwner(pq::SCHEME_FN_DSA_512, GetRandHash());
+    const CPQKeyID falconHolder(pq::SCHEME_FN_DSA_512, GetRandHash());
+    const CPQKeyID slhHolder(pq::SCHEME_SLH_DSA_SHA2_128S, GetRandHash());
+    const CScript falconSpk = GetScriptForDestination(falconHolder);
+    BOOST_CHECK_EQUAL(falconSpk.size(), 35u);
+    // The verdict of a mined transaction: "" when it was neither refused nor logged.
+    auto verdictOf = [&](const CMutableTransaction& m, bool* invalid) -> std::string {
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { m });
+        const std::string refused = f.Refused(CTransaction(m).GetHash());
+        if (invalid) *invalid = !refused.empty();
+        if (!refused.empty()) return refused;
+        std::optional<TxLogRecord> log = f.Log(CTransaction(m).GetHash());
+        return log.has_value() ? log->verdict : "";
+    };
+    BOOST_CHECK(HolderKey(falconSpk) == std::optional<CTxDestination>(CTxDestination(falconHolder)));
+
+    // Below the Falcon height: a Falcon owner is refused (MINT-3), a P2PKH or any PQPKH token is fine.
+    { MintOpts o; o.pqOwner = falconOwner; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), verdict::BAD_MINT_OWNER_KEY); }
+    BOOST_REQUIRE_LT(f.tip + 1, falconHeight);
+    CMutableTransaction below = f.MintTx(10000, 48, f.tip - 1);              // P2PKH token
+    BOOST_CHECK_EQUAL(MintVerdictOf(f, below), "");
+    const uint256 belowId = CTransaction(below).GetHash();
+    { MintOpts o; o.tokenScript = GetScriptForDestination(slhHolder); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }
+    { MintOpts o; o.tokenScript = GetScriptForPQChannel(slhHolder, f.userKey.GetPubKey(), 1000); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), ""); }   // D-Q-19 below
+    // A TRANSFER below the height to P2PKH and to an SLH-DSA PQPKH: no shape rule yet.
+    {
+        CMutableTransaction t = f.TransferTx({ COutPoint(belowId, 1) }, { Assignment(0, 6000), Assignment(1, 4000) });
+        t.vout[1].scriptPubKey = GetScriptForDestination(slhHolder);
+        bool invalid = true;
+        BOOST_CHECK_EQUAL(verdictOf(t, &invalid), verdict::OK);
+        BOOST_CHECK(!invalid);
+        BOOST_REQUIRE(f.Token(CTransaction(t).GetHash(), 0).has_value());
+        below = t;                                                           // its P2PKH output 0 is a pre-height token
+    }
+    const COutPoint preHeightP2PKH(CTransaction(below).GetHash(), 0);
+    while (f.tip + 1 < falconHeight) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    BOOST_REQUIRE_EQUAL(f.tip + 1, falconHeight);
+
+    // At the Falcon height: a P2PKH (or SLH-DSA PQPKH) token output of a MINT is bad-yed-holder (the tx is invalid).
+    { bool invalid = false; BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1), &invalid), verdict::BAD_YED_HOLDER); BOOST_CHECK(invalid); }
+    { MintOpts o; o.tokenScript = GetScriptForDestination(slhHolder); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), verdict::BAD_YED_HOLDER); }
+    // A Falcon owner mints now (MINT-3), and a Falcon holder takes the token.
+    CMutableTransaction pqMint;
+    { MintOpts o; o.pqOwner = falconOwner; o.tokenScript = falconSpk; pqMint = f.MintTx(10000, 48, f.tip - 1, o); BOOST_CHECK_EQUAL(MintVerdictOf(f, pqMint), ""); }
+    CMutableTransaction slhFalcon;
+    { MintOpts o; o.tokenScript = falconSpk; slhFalcon = f.MintTx(10000, 48, f.tip - 1, o); BOOST_CHECK_EQUAL(MintVerdictOf(f, slhFalcon), ""); }   // SLH-DSA owner, Falcon holder
+    COutPoint okToken;
+    BOOST_CHECK(f.Vault(CTransaction(pqMint).GetHash())->Owner() == falconOwner);
+    // D-Q-19: a hybrid channel holds YED from the Falcon height iff its client is a Falcon key.
+    {
+        MintOpts o; o.tokenScript = GetScriptForPQChannel(falconHolder, f.userKey.GetPubKey(), f.tip + 100);
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "");
+        MintOpts o2; o2.tokenScript = GetScriptForPQChannel(slhHolder, f.userKey.GetPubKey(), f.tip + 100);
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o2)), verdict::BAD_YED_HOLDER);
+    }
+
+    // The pre-height P2PKH token stays valid and spendable: a TRANSFER of it to a Falcon holder holds...
+    {
+        CMutableTransaction t = f.TransferTx({ preHeightP2PKH }, { Assignment(0, 6000) });
+        t.vout[0].scriptPubKey = falconSpk;
+        bool invalid = true;
+        BOOST_CHECK_EQUAL(verdictOf(t, &invalid), verdict::OK);
+        BOOST_CHECK(!invalid);
+        BOOST_CHECK_EQUAL(f.Token(CTransaction(t).GetHash(), 0)->cents, 6000);
+    }
+    // ...while a TRANSFER (or a REDEEM payload with no vault) to P2PKH is refused, not burned: the inputs stay unspent.
+    {
+        const COutPoint tok(CTransaction(pqMint).GetHash(), 1);
+        CMutableTransaction t = f.TransferTx({ tok }, { Assignment(0, 10000) });           // P2PKH(userKey)
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { t });
+        BOOST_CHECK_EQUAL(f.Refused(CTransaction(t).GetHash()), verdict::BAD_YED_HOLDER);
+        BOOST_CHECK(f.Token(tok.hash, tok.n).has_value());
+        CMutableTransaction r = f.TransferTx({ tok }, { Assignment(0, 10000) }, true, (uint32_t)(f.tip - 1));
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { r });
+        BOOST_CHECK_EQUAL(f.Refused(CTransaction(r).GetHash()), verdict::BAD_YED_HOLDER);
+        CMutableTransaction ok = f.TransferTx({ tok }, { Assignment(0, 10000) });
+        ok.vout[0].scriptPubKey = falconSpk;
+        BOOST_CHECK_EQUAL(verdictOf(ok, nullptr), verdict::OK);
+        okToken = COutPoint(CTransaction(ok).GetHash(), 0);
+    }
+    // A vault-spending REDEEM whose YED change is P2PKH is refused too (RED-1's TOK-PQ clause); Falcon change holds.
+    {
+        const uint256 vaultId = CTransaction(pqMint).GetHash();
+        const std::vector<COutPoint> yed = { COutPoint(CTransaction(slhFalcon).GetHash(), 1), okToken };   // 10,000 + 10,000
+        SpendOpts o; o.assigned = { Assignment(3, 10000) };                  // burn the 10,000 debt, 10,000 change at vout 3
+        CMutableTransaction p2pkhChange = f.SpendTx(vaultId, yed, f.tip - 1, o);
+        f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3), { p2pkhChange });
+        BOOST_CHECK_EQUAL(f.Refused(CTransaction(p2pkhChange).GetHash()), verdict::BAD_YED_HOLDER);
+        BOOST_CHECK_EQUAL(f.Vault(vaultId)->status, (uint8_t)VaultStatus::ACTIVE);
+        CMutableTransaction pqChange = f.SpendTx(vaultId, yed, f.tip - 1, o);
+        pqChange.vout[3].scriptPubKey = falconSpk;
+        bool invalid = true;
+        BOOST_CHECK_EQUAL(verdictOf(pqChange, &invalid), verdict::OK);
+        BOOST_CHECK(!invalid);
+        BOOST_CHECK_EQUAL(f.Vault(vaultId)->status, (uint8_t)VaultStatus::CLOSED);
+        BOOST_CHECK_EQUAL(f.Token(CTransaction(pqChange).GetHash(), 3)->cents, 10000);
+    }
 }
 
 // Rule: MINT-4
@@ -1990,9 +2188,9 @@ BOOST_AUTO_TEST_CASE(totality_every_lookup_misses)
     block.vtx.push_back(CTransaction(Fixture::Coinbase(1, std::nullopt)));
     CMutableTransaction mint;
     mint.vin.push_back(CTxIn(COutPoint(uint256S("11"), 0)));
-    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, k.GetPubKey(), 1)));
+    mint.vout.push_back(CTxOut(1000000000000LL, YedVaultScript(P, TestPQOwner(k.GetPubKey()), 1)));
     mint.vout.push_back(CTxOut(TOKEN_VALUE, GetScriptForDestination(k.GetPubKey().GetID())));
-    mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, k.GetPubKey(), FEE_VOUT_NONE)))));
+    mint.vout.push_back(CTxOut(0, PayloadScript(EncodePayload(Payload::Mint(0, 10000, 49, 1, TestPQOwner(k.GetPubKey()), FEE_VOUT_NONE)))));
     block.vtx.push_back(CTransaction(mint));
     CMutableTransaction redeem;
     redeem.vin.push_back(CTxIn(COutPoint(uint256S("22"), 0), CScript() << OP_0 << std::vector<unsigned char>(5, 1)));
@@ -3689,10 +3887,10 @@ BOOST_AUTO_TEST_CASE(in_term_vault_app_height_is_mint_height)
     BOOST_CHECK_EQUAL(r.ownerHeight, r.refHeight + 1);
     BOOST_CHECK_EQUAL(r.claimHeight, r.lockHeight + f.P.grace);
     vault::VaultParams vp;
-    BOOST_REQUIRE(vault::ParseVault(YedVaultScriptAt(f.P, r.OwnerKey(), r.ownerHeight, r.appHeight), vp));
+    BOOST_REQUIRE(vault::ParseVault(YedVaultScriptAt(f.P, r.Owner(), r.ownerHeight, r.appHeight), vp));
     BOOST_CHECK_EQUAL(vp.appHeight, r.refHeight + 1);
     BOOST_CHECK_EQUAL(vp.ownerHeight, r.refHeight + 1);
-    BOOST_CHECK(YedVaultScript(f.P, r.OwnerKey(), r.refHeight) == YedVaultScriptAt(f.P, r.OwnerKey(), r.refHeight + 1, r.refHeight + 1));
+    BOOST_CHECK(YedVaultScript(f.P, r.Owner(), r.refHeight) == YedVaultScriptAt(f.P, r.Owner(), r.refHeight + 1, r.refHeight + 1));
 }
 
 // Rule: IT-1
@@ -3703,7 +3901,7 @@ BOOST_AUTO_TEST_CASE(in_term_old_shape_vault_spendable_but_not_mintable)
     f.Activate();
     // A new mint carrying the pre-plan V (appHeight = lockHeight + GRACE) is refused.
     const int64_t lock = f.tip - 1 + 48;
-    { MintOpts o; o.vaultScriptOverride = YedVaultScriptAt(f.P, f.ownerKey.GetPubKey(), lock, lock + f.P.grace);
+    { MintOpts o; o.vaultScriptOverride = YedVaultScriptAt(f.P, TestPQOwner(f.ownerKey.GetPubKey()), lock, lock + f.P.grace);
       BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-vault-script"); }
     // A vault minted before the plan (its record remembers appHeight = lockHeight + GRACE) still spends: owner path ...
     const uint256 v = f.MintActive(10000);
