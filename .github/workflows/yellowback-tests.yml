@@ -637,6 +637,7 @@ jobs:
         run: |
           python3 src/test/gen_yellowback_corpus.py --check
           if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
+          if [ -f src/test/gen_pq_corpus.py ]; then python3 src/test/gen_pq_corpus.py --check; fi
 
   # ── schedule fan-out ─────────────────────────────────────────────────────────────────────────────
 
@@ -861,7 +862,7 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           # An unmatched glob (no Vault* on harden/yellowback) leaves the literal pattern, whose test fails as the
           # loop's last command; under `set -e` that status would end the step, so the subshell ends with true.
-          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault* PQ*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
           echo "fuzz targets:" $targets
           for t in $targets; do
             # bitcoind.cpp includes fuzz.cpp. Retargeting the symlink does not change the mtime make
@@ -881,6 +882,7 @@ jobs:
           path: |
             src/fuzzing/Yellowback*/output/crash-*
             src/fuzzing/Vault*/output/crash-*
+            src/fuzzing/PQ*/output/crash-*
           if-no-files-found: ignore
       - name: Upload node logs on failure
         if: failure()
@@ -1239,7 +1241,7 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           # An unmatched glob (no Vault* on harden/yellowback) leaves the literal pattern, whose test fails as the
           # loop's last command; under `set -e` that status would end the step, so the subshell ends with true.
-          targets=$(cd src/fuzzing && for d in Yellowback* Vault*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
+          targets=$(cd src/fuzzing && for d in Yellowback* Vault* PQ*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
           echo "fuzz targets:" $targets
           for t in $targets; do
             # Retargeting the symlink does not rebuild; remove every product of bitcoind.cpp (see nightly).
@@ -1260,6 +1262,10 @@ jobs:
             python3 src/test/gen_vault_corpus.py --write || true
             git add -f src/test/vault_fuzz_tests.cpp
           fi
+          if [ -f src/test/gen_pq_corpus.py ]; then
+            python3 src/test/gen_pq_corpus.py --write || true
+            git add -f src/test/vault_fuzz_tests.cpp
+          fi
       - name: Upload corpus and crashes
         # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
         if: always()
@@ -1272,7 +1278,10 @@ jobs:
             src/fuzzing/Yellowback*/output/crash-*
             src/fuzzing/Vault*/input
             src/fuzzing/Vault*/crashes
+            src/fuzzing/PQ*/input
+            src/fuzzing/PQ*/crashes
             src/fuzzing/Vault*/output/crash-*
+            src/fuzzing/PQ*/output/crash-*
           if-no-files-found: ignore
       - name: Open a PR with the new corpus files
         env:
