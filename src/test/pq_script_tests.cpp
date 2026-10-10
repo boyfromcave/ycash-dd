@@ -602,6 +602,47 @@ BOOST_AUTO_TEST_CASE(pq_sigops)
     BOOST_CHECK_EQUAL(MAX_STANDARD_TX_SIGOPS / pq::SIGOP_COST, 200U);
 }
 
+BOOST_AUTO_TEST_CASE(pq_p2sh_policy)
+{
+    // Quantum spec R-B2: AreInputsStandard counts OP_CHECKPQSIG's 20 policy sigops toward a P2SH
+    // redeem script's MAX_P2SH_SIGOPS (15), so a redeem script holding one is non-standard.
+    const valtype pk = PubKey(SLH);
+    const CScript pqpkh = PQPKH(KeyHashBytes(SLH, pk), SLH);
+    BOOST_CHECK_EQUAL(GetPQSigOpCount(pqpkh), pq::SIGOP_COST);
+    BOOST_CHECK_EQUAL(GetPQSigOpCount(CScript() << valtype(1, OP_CHECKPQSIG)), 0U);   // inside a push
+    CScript fifteen;
+    for (int j = 0; j < 15; j++) fifteen << OP_CHECKSIG;
+    const CScript fifteenPlusPQ = CScript(fifteen) << OP_CHECKPQSIG;
+    const CScript plain = CScript() << OP_DROP << OP_1;   // no sigops, not a Solver type
+
+    CCoinsView dummy;
+    CCoinsViewCache view(&dummy);
+    CMutableTransaction fund = SaplingTx();
+    fund.vin[0].prevout = COutPoint(uint256S("03"), 0);
+    const std::vector<CScript> redeems = {pqpkh, plain, fifteen, fifteenPlusPQ};
+    fund.vout.resize(redeems.size());
+    for (size_t i = 0; i < redeems.size(); i++) {
+        fund.vout[i].scriptPubKey = GetScriptForDestination(CScriptID(redeems[i]));
+        fund.vout[i].nValue = 1;
+    }
+    const CTransaction fundTx(fund);
+    view.ModifyCoins(fundTx.GetHash())->FromTx(fundTx, 1);
+    auto spend = [&](uint32_t n, const CScript& scriptSig) {
+        CMutableTransaction mtx = SaplingTx();
+        mtx.vin[0].prevout = COutPoint(fundTx.GetHash(), n);
+        mtx.vin[0].scriptSig = scriptSig;
+        return CTransaction(mtx);
+    };
+    CScript ssPQ = ScriptSig(Chunks(Sig(SLH)), Chunks(pk));
+    ssPQ << ToByteVector(pqpkh);
+    BOOST_CHECK(!AreInputsStandard(spend(0, ssPQ), view, VAULT_BRANCH_ID));
+    BOOST_CHECK(AreInputsStandard(spend(1, CScript() << OP_1 << ToByteVector(plain)), view, VAULT_BRANCH_ID));
+    BOOST_CHECK(AreInputsStandard(spend(2, CScript() << ToByteVector(fifteen)), view, VAULT_BRANCH_ID));
+    BOOST_CHECK(!AreInputsStandard(spend(3, CScript() << ToByteVector(fifteenPlusPQ)), view, VAULT_BRANCH_ID));
+    // the transaction-level count sees the same redeem script
+    BOOST_CHECK_EQUAL(GetPQSigOpCount(spend(0, ssPQ), view), pq::SIGOP_COST);
+}
+
 BOOST_AUTO_TEST_CASE(pq_error_order)
 {
     // The frozen order (QUANTUM-SPEC A-7): scheme -> registered/Falcon gate -> key hash 32 bytes ->
@@ -656,36 +697,56 @@ BOOST_AUTO_TEST_CASE(pq_error_order)
 
 BOOST_AUTO_TEST_CASE(pq_flag_plumbing)
 {
-    // pqFalconActive is false on mainnet and testnet, and on regtest unless -pqfalcon=1.
-    BOOST_CHECK(!Params(CBaseChainParams::MAIN).GetConsensus().pqFalconActive);
-    BOOST_CHECK(!Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconActive);
-    BOOST_CHECK(!Params(CBaseChainParams::REGTEST).GetConsensus().pqFalconActive);
+    const int NONE = Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+    // pqFalconHeight is unset on mainnet and testnet, and on regtest without -pqfalcon / -pqfalconheight.
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetConsensus().pqFalconHeight, NONE);
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::TESTNET).GetConsensus().pqFalconHeight, NONE);
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).GetConsensus().pqFalconHeight, NONE);
 
+    // IsPQFalconActive and GetVaultScriptFlags: the vault upgrade at 100, Falcon from pqFalconHeight
+    // (quantum spec R-A2); a Falcon height below the upgrade's waits for the upgrade.
     Consensus::Params params = Params(CBaseChainParams::REGTEST).GetConsensus();
     params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = 100;
-    for (bool falcon : {false, true}) {
-        params.pqFalconActive = falcon;
-        // before the upgrade: nothing, the Falcon flag included
-        BOOST_CHECK_EQUAL(GetVaultScriptFlags(99, params), 0U);
-        const unsigned int f = GetVaultScriptFlags(100, params);
-        BOOST_CHECK(f & SCRIPT_VERIFY_VAULT);
-        BOOST_CHECK(f & SCRIPT_VERIFY_CHECKSEQUENCEVERIFY);
-        BOOST_CHECK_EQUAL((f & SCRIPT_VERIFY_PQ_FALCON) != 0, falcon);
-        BOOST_CHECK_EQUAL(GetVaultScriptFlags(1000, params), f);
+    struct Row { int falconHeight; int height; bool falcon; };
+    for (const Row& r : std::vector<Row>{{NONE, 99, false}, {NONE, 100, false}, {NONE, 100000, false},
+                                         {0, 99, false}, {0, 100, true}, {50, 100, true},
+                                         {150, 100, false}, {150, 149, false}, {150, 150, true}, {150, 151, true}}) {
+        params.pqFalconHeight = r.falconHeight;
+        BOOST_CHECK_EQUAL(IsPQFalconActive(params, r.height), r.falcon);
+        const unsigned int f = GetVaultScriptFlags(r.height, params);
+        if (r.height < 100) {
+            BOOST_CHECK_EQUAL(f, 0U);
+        } else {
+            BOOST_CHECK(f & SCRIPT_VERIFY_VAULT);
+            BOOST_CHECK(f & SCRIPT_VERIFY_CHECKSEQUENCEVERIFY);
+        }
+        BOOST_CHECK_EQUAL((f & SCRIPT_VERIFY_PQ_FALCON) != 0, r.falcon);
     }
+    // without the vault upgrade at all, never
+    params.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight = NONE;
+    params.pqFalconHeight = 0;
+    BOOST_CHECK(!IsPQFalconActive(params, 1000000));
 
-    // -pqfalcon=1 on regtest, read by SelectParams; it does not reach mainnet.
+    // Regtest flags, read by SelectParams: -pqfalcon=1 is height 0, -pqfalconheight=<h> sets it (and
+    // wins over -pqfalcon); neither reaches mainnet (init.cpp refuses them there, R-B3).
     mapArgs["-pqfalcon"] = "1";
     SelectParams(CBaseChainParams::REGTEST);
-    BOOST_CHECK(Params().GetConsensus().pqFalconActive);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 0);
     SelectParams(CBaseChainParams::MAIN);
-    BOOST_CHECK(!Params().GetConsensus().pqFalconActive);
-    mapArgs["-pqfalcon"] = "0";
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, NONE);
+    mapArgs["-pqfalconheight"] = "250";
     SelectParams(CBaseChainParams::REGTEST);
-    BOOST_CHECK(!Params().GetConsensus().pqFalconActive);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 250);
     mapArgs.erase("-pqfalcon");
     SelectParams(CBaseChainParams::REGTEST);
-    BOOST_CHECK(!Params().GetConsensus().pqFalconActive);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, 250);
+    mapArgs["-pqfalcon"] = "0";
+    mapArgs.erase("-pqfalconheight");
+    SelectParams(CBaseChainParams::REGTEST);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, NONE);
+    mapArgs.erase("-pqfalcon");
+    SelectParams(CBaseChainParams::REGTEST);
+    BOOST_CHECK_EQUAL(Params().GetConsensus().pqFalconHeight, NONE);
     SelectParams(CBaseChainParams::MAIN);
 }
 

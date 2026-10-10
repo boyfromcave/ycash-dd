@@ -193,6 +193,9 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
             {
                 // Any other Script with less than 15 sigops OK:
                 unsigned int sigops = subscript.GetSigOpCount(true);
+                // ... OP_CHECKPQSIG's 20 policy sigops included (quantum spec R-B2), so a redeem
+                // script that holds one is non-standard:
+                sigops += GetPQSigOpCount(subscript);
                 // ... extra data left on the stack after execution is OK, too:
                 return (sigops <= MAX_P2SH_SIGOPS);
             }
@@ -205,7 +208,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     return true;
 }
 
-static unsigned int CountPQSigOps(const CScript& script)
+unsigned int GetPQSigOpCount(const CScript& script)
 {
     unsigned int n = 0;
     CScript::const_iterator pc = script.begin();
@@ -224,7 +227,7 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
     unsigned int n = 0;
     for (const CTxIn& txin : tx.vin) {
         const CScript& prevScript = mapInputs.GetOutputFor(txin).scriptPubKey;
-        n += CountPQSigOps(txin.scriptSig) + CountPQSigOps(prevScript);
+        n += GetPQSigOpCount(txin.scriptSig) + GetPQSigOpCount(prevScript);
         if (prevScript.IsPayToScriptHash()) {
             // the redeem script is the scriptSig's last push (as CScript::GetSigOpCount(scriptSig))
             CScript::const_iterator pc = txin.scriptSig.begin();
@@ -238,7 +241,7 @@ unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapI
                 }
             }
             if (pushOnly)
-                n += CountPQSigOps(CScript(data.begin(), data.end()));
+                n += GetPQSigOpCount(CScript(data.begin(), data.end()));
         }
     }
     return n;
