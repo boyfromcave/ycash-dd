@@ -125,7 +125,7 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
             reason = "scriptpubkey";
             return false;
         }
-        if ((whichType == TX_VAULT || whichType == TX_VAULT_INTENT || whichType == TX_PQPKH) && !vaultActive) {
+        if ((whichType == TX_VAULT || whichType == TX_VAULT_INTENT || whichType == TX_PQPKH || whichType == TX_PQCHANNEL) && !vaultActive) {
             reason = "scriptpubkey";
             return false;
         }
@@ -144,7 +144,7 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
         else if ((whichType == TX_MULTISIG) && (!fIsBareMultisigStd)) {
             reason = "bare-multisig";
             return false;
-        } else if (whichType == TX_PQPKH ? txout.nValue < GetPQDustThreshold(txout, ::minRelayTxFee)
+        } else if (whichType == TX_PQPKH || whichType == TX_PQCHANNEL ? txout.nValue < GetPQDustThreshold(txout, ::minRelayTxFee)
                                          : txout.IsDust(::minRelayTxFee)) {
             reason = "dust";
             return false;
@@ -177,7 +177,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
             return false;
         // Post-quantum spends may carry MAX_STANDARD_PQ_SCRIPTSIG, every other input
         // MAX_STANDARD_SCRIPTSIG (IsStandardTx admits the larger bound without prevouts; F-6).
-        const bool pqSpend = whichType == TX_PQPKH || whichType == TX_VAULT || whichType == TX_VAULT_INTENT;
+        const bool pqSpend = whichType == TX_PQPKH || whichType == TX_VAULT || whichType == TX_VAULT_INTENT || whichType == TX_PQCHANNEL;
         if (tx.vin[i].scriptSig.size() > (pqSpend ? MAX_STANDARD_PQ_SCRIPTSIG : MAX_STANDARD_SCRIPTSIG))
             return false;
         // A template input's scriptSig (push-only, IsStandardTx) is checked by the vault rules (S-1).
@@ -195,6 +195,29 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
                 return false;
             if (stack.size() != s + p + 2)
                 return false;
+            continue;
+        }
+        if (whichType == TX_PQCHANNEL) {
+            // Cooperative <serverSig> <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p> OP_1 (s + p + 4 pushes) or refund
+            // <sig_1>..<sig_s> <s> <pk_1>..<pk_p> <p> OP_0 (s + p + 3) (quantum spec D-Q-19).
+            const uint8_t scheme = vSolutions[0][0];
+            const size_t sigLen = pq::SigSize(scheme) + 1, pkLen = pq::PubKeySize(scheme);
+            if (sigLen == 1 || pkLen == 0)
+                return false;
+            const size_t s = (sigLen + pq::MAX_CHUNK - 1) / pq::MAX_CHUNK, p = (pkLen + pq::MAX_CHUNK - 1) / pq::MAX_CHUNK;
+            std::vector<std::vector<unsigned char> > stack;
+            if (!EvalScript(stack, tx.vin[i].scriptSig, SCRIPT_VERIFY_NONE, BaseSignatureChecker(), consensusBranchId))
+                return false;
+            if (stack.empty())
+                return false;
+            const std::vector<unsigned char>& sel = stack.back();
+            if (sel == std::vector<unsigned char>{0x01}) {
+                if (stack.size() != s + p + 4) return false;
+            } else if (sel.empty()) {
+                if (stack.size() != s + p + 3) return false;
+            } else {
+                return false;
+            }
             continue;
         }
         int nArgsExpected = ScriptSigArgsExpected(whichType, vSolutions);
@@ -266,6 +289,12 @@ CAmount GetPQDustThreshold(const CTxOut& txout, const CFeeRate& minRelayTxFee)
 {
     // As CTxOut::GetDustThreshold, with the input that spends a TX_PQPKH output (an SLH-DSA spend is
     // 7,938 bytes of scriptSig, not the 148-byte P2PKH input that function assumes; review A F8).
+    PQChannelParams cp;
+    if (MatchPQChannel(txout.scriptPubKey, cp)) {
+        // a channel's cooperative spend: the client's PQ spend, the server's signature push (1 + 73) and the selector
+        const size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + PQSpendInputSize(cp.client.scheme) + 74 + 1;
+        return 3 * minRelayTxFee.GetFee(nSize);
+    }
     CTxDestination dest;
     if (!ExtractDestination(txout.scriptPubKey, dest) || !IsPQKeyDestination(dest))
         return txout.GetDustThreshold(minRelayTxFee);
@@ -279,6 +308,12 @@ std::optional<uint8_t> PQScriptScheme(const CScript& scriptPubKey, txnouttype wh
         CTxDestination dest;
         if (ExtractDestination(scriptPubKey, dest) && IsPQKeyDestination(dest))
             return std::get<CPQKeyID>(dest).scheme;
+        return std::nullopt;
+    }
+    if (whichType == TX_PQCHANNEL) {
+        PQChannelParams cp;
+        if (MatchPQChannel(scriptPubKey, cp))
+            return cp.client.scheme;
         return std::nullopt;
     }
     if (whichType == TX_VAULT) {
