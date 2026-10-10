@@ -18,8 +18,9 @@
 namespace pq {
 
 // Seed sizes KeyGen accepts: SLH-DSA 48 (SK.seed || SK.prf || PK.seed, 16 bytes each, FIPS 205
-// Algorithm 18 slh_keygen_internal); Falcon 32 (absorbed by SHAKE256, which drives PQClean's
-// keygen). 0 for an unknown scheme.
+// Algorithm 18 slh_keygen_internal); Falcon 48 (absorbed by SHAKE256, which drives PQClean's
+// keygen: the bytes PQClean's crypto_sign_keypair reads from randombytes(48), so a NIST KAT
+// keygen seed reproduces the KAT key). 0 for an unknown scheme.
 size_t SeedSize(uint8_t scheme);
 // Secret key sizes: SLH-DSA 64 (SK.seed || SK.prf || PK.seed || PK.root); Falcon 1281 (PQClean).
 size_t SecretKeySize(uint8_t scheme);

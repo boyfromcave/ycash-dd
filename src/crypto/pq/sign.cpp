@@ -13,7 +13,7 @@ namespace pq {
 
 static const size_t SLH_N = 16;           // SLH-DSA-SHA2-128s n
 static const size_t SLH_SK = 4 * SLH_N;   // 64
-static const size_t FALCON_SEED = 32;
+static const size_t FALCON_SEED = 48; // the PQClean/NIST randombytes keygen seed length
 
 size_t SeedSize(uint8_t scheme)
 {

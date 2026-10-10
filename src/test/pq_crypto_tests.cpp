@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -148,6 +149,15 @@ CScript ChunkedScriptSig(const Bytes& sigWithHashtype, const Bytes& pk, size_t& 
     return out;
 }
 
+// TX_PQPKH (plan §4.3, coordinator 2026-10-10): 0x20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG (0xc2),
+// 35 bytes; the scheme id is a minimal push so the script runs under SCRIPT_VERIFY_MINIMALDATA.
+Bytes PQPKHScript(uint8_t scheme, const Bytes& keyHash)
+{
+    CScript s;
+    s << keyHash << (int64_t)scheme << (opcodetype)0xc2;
+    return Bytes(s.begin(), s.end());
+}
+
 struct KeyPair {
     Bytes pk, sk;
 };
@@ -219,6 +229,7 @@ UniValue BuildVectors()
         UniValue sp(UniValue::VOBJ);
         sp.pushKV("scheme", e["scheme"].get_int());
         sp.pushKV("key", (int)k);
+        sp.pushKV("scriptPubKey", HexStr(PQPKHScript((uint8_t)e["scheme"].get_int(), Hex(e["keyhash"]))));
         sp.pushKV("hashtype", 1);
         sp.pushKV("sigChunks", (int)s);
         sp.pushKV("pkChunks", (int)p);
@@ -254,7 +265,7 @@ BOOST_AUTO_TEST_CASE(pq_sizes_and_registry)
     BOOST_CHECK_EQUAL(pq::PubKeySize(0x02), 897U);
     BOOST_CHECK_EQUAL(pq::SigSize(0x02), 666U);
     BOOST_CHECK_EQUAL(pq::SeedSize(0x01), 48U);
-    BOOST_CHECK_EQUAL(pq::SeedSize(0x02), 32U);
+    BOOST_CHECK_EQUAL(pq::SeedSize(0x02), 48U);
     BOOST_CHECK_EQUAL(pq::SecretKeySize(0x01), 64U);
     BOOST_CHECK_EQUAL(pq::SecretKeySize(0x02), 1281U);
     // The library's own idea of the sizes agrees with the registry.
@@ -298,8 +309,6 @@ BOOST_AUTO_TEST_CASE(pq_keyhash)
     }
     // The scheme byte is committed: the same key bytes under another scheme hash differently.
     BOOST_CHECK(pq::KeyHash(1, pk) != pq::KeyHash(2, pk));
-    // Fixed value: SHA256(0x01 || 00..1f).
-    BOOST_CHECK_EQUAL(HexOf(pq::KeyHash(1, pk)), HexOf(pq::KeyHash(1, pk)));
     uint256 empty;
     const unsigned char one = 1;
     CSHA256().Write(&one, 1).Finalize(empty.begin());
@@ -360,7 +369,6 @@ BOOST_AUTO_TEST_CASE(pq_round_trip_and_rejects)
             BOOST_CHECK(!pq::Verify((uint8_t)u, kp.pk, sig, msg));
             Bytes pk, sk, out;
             BOOST_CHECK(!pq::KeyGen((uint8_t)u, Bytes(48), pk, sk));
-            BOOST_CHECK(!pq::KeyGen((uint8_t)u, Bytes(32), pk, sk));
             BOOST_CHECK(!pq::Sign((uint8_t)u, kp.sk, msg, out));
         }
 
@@ -511,6 +519,9 @@ BOOST_AUTO_TEST_CASE(pq_falcon_kat)
         BOOST_REQUIRE_EQUAL(ycash_falcon512_keygen_from_seed(pk.data(), sk.data(), kseed.data(), kseed.size()), 0);
         BOOST_CHECK_MESSAGE(HexStr(pk) == e["pk"].get_str(), "r3 pk count " << e["count"].get_int());
         BOOST_CHECK_MESSAGE(HexStr(sk) == e["sk"].get_str(), "r3 sk count " << e["count"].get_int());
+        Bytes apiPk, apiSk;
+        BOOST_REQUIRE(pq::KeyGen(pq::SCHEME_FN_DSA_512, kseed, apiPk, apiSk));
+        BOOST_CHECK(apiPk == pk && apiSk == sk);
 
         const Bytes msg = Hex(e["msg"]);
         const Bytes nonce = drbg.Get(40);
@@ -520,7 +531,7 @@ BOOST_AUTO_TEST_CASE(pq_falcon_kat)
 
         const Bytes sm = Hex(e["sm"]);
         const size_t siglen = ((size_t)sm[0] << 8) | sm[1];
-        BOOST_REQUIRE_EQUAL(sm.size(), 2 + siglen + msg.size() + 40 - 0);
+        BOOST_REQUIRE_EQUAL(sm.size(), 2 + 40 + msg.size() + siglen);
         BOOST_CHECK(Bytes(sm.begin() + 2, sm.begin() + 42) == nonce);
         BOOST_CHECK(Bytes(sm.begin() + 42, sm.begin() + 42 + msg.size()) == msg);
         BOOST_CHECK_EQUAL(sm[42 + msg.size()], 0x29);
@@ -607,22 +618,26 @@ BOOST_AUTO_TEST_CASE(pq_golden_vectors)
         BOOST_CHECK_EQUAL((int)p, sp["pkChunks"].get_int());
         BOOST_CHECK_EQUAL((int)scriptSig.size(), sp["scriptSigSize"].get_int());
         BOOST_CHECK(scriptSig.IsPushOnly());
+        const Bytes spk = PQPKHScript((uint8_t)sp["scheme"].get_int(), Hex(e["keyhash"]));
+        BOOST_CHECK(HexStr(spk) == sp["scriptPubKey"].get_str());
+        BOOST_CHECK_EQUAL(spk.size(), 35U);
+        BOOST_CHECK_EQUAL(spk[0], 0x20);
+        BOOST_CHECK_EQUAL(spk[33], sp["scheme"].get_int() == 1 ? 0x51 : 0x52);
+        BOOST_CHECK_EQUAL(spk[34], 0xc2);
         // Parse the scriptSig back: chunks of exactly 520 bytes but the last, counts as OP_n.
         CScript::const_iterator pc = scriptSig.begin();
         opcodetype op;
         Bytes data, sigOut, pkOut;
         std::vector<Bytes> elems;
+        std::vector<int> counts;
         while (scriptSig.GetOp(pc, op, data)) {
-            if (op >= OP_1 && op <= OP_16) {
-                data = Bytes(1, (unsigned char)(op - OP_1 + 1));
-                elems.push_back(Bytes()); // marker
-                elems.back() = data;
-                elems.back().insert(elems.back().begin(), 0xff); // tag the count
-            } else {
-                elems.push_back(data);
-            }
+            elems.push_back(data); // OP_n counts arrive as empty data; their positions are checked below
+            if (op >= OP_1 && op <= OP_16) counts.push_back((int)(op - OP_1 + 1));
         }
         BOOST_REQUIRE_EQUAL(elems.size(), s + 1 + p + 1);
+        BOOST_REQUIRE_EQUAL(counts.size(), 2U);
+        BOOST_CHECK_EQUAL(counts[0], (int)s);
+        BOOST_CHECK_EQUAL(counts[1], (int)p);
         for (size_t i = 0; i < s; i++) {
             BOOST_CHECK(i + 1 == s || elems[i].size() == pq::MAX_CHUNK);
             sigOut.insert(sigOut.end(), elems[i].begin(), elems[i].end());
