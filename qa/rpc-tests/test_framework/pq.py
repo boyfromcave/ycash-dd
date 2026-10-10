@@ -23,8 +23,9 @@ The message a script signature signs is the 32-byte ZIP-243 sighash in memory or
 ``SignatureHash(...)[0]`` returns, which are the ``uint256::begin()..end()`` bytes the node hands
 ``pq::Verify`` (the bytes ``CPubKey::Verify`` is given).
 
-Speed (CPython, one core): SLH-DSA keygen ~0.3 s, sign a few seconds, verify ~5 ms; Falcon verify a
-few ms. ``slh_sign(..., processes=N)`` spreads the hypertree layers over N processes.
+Speed (CPython 3.13, Apple silicon, one core): SLH-DSA keygen ~0.1 s, sign ~0.75 s, verify ~1 ms;
+Falcon verify ~2 ms. ``slh_sign(..., processes=N)`` builds the seven hypertree layers in N processes
+(fork where available; ~0.35 s with 4).
 """
 
 import hashlib
@@ -334,7 +335,8 @@ def slh_sign_internal(m, sk, addrnd=None, processes=1):
     walk = _ht_indices(idx_tree, idx_leaf)
     if processes and processes > 1:
         import multiprocessing
-        with multiprocessing.get_context('spawn').Pool(min(processes, SLH_D)) as pool:
+        method = 'fork' if 'fork' in multiprocessing.get_all_start_methods() else 'spawn'
+        with multiprocessing.get_context(method).Pool(min(processes, SLH_D)) as pool:
             trees = pool.map(_ht_layer_job, [(pk_seed, sk_seed, layer, tree) for layer, tree, _ in walk])
     else:
         trees = None
@@ -572,10 +574,26 @@ def pq_scriptsig(pk, sig_with_hashtype, extra=b''):
     return out + bytes(extra)
 
 
-def pqpkh_script(scheme, key_hash32):
-    """``TX_PQPKH``: ``<keyHash:32> <schemeId:1> OP_CHECKPQSIG`` (36 bytes)."""
+def pq_owner_slot(scheme, key_hash32):
+    """``<keyHash:32> <schemeId> OP_CHECKPQSIG`` (35 bytes): ``20 <hash32> 51|52 c2``. The scheme is
+    pushed as ``CScript << (int64_t)scheme``, i.e. ``OP_1`` / ``OP_2`` (spec F-1), never ``01 01``.
+    This is both ``TX_PQPKH`` and the V/I owner slot."""
     assert len(key_hash32) == KEYHASH_SIZE
-    return bytes([32]) + bytes(key_hash32) + bytes([1, scheme, 0xc2])
+    assert 1 <= scheme <= 16
+    return bytes([32]) + bytes(key_hash32) + bytes([0x50 + scheme, 0xc2])
+
+
+def pqpkh_script(scheme, key_hash32):
+    """``TX_PQPKH`` (35 bytes): ``0x20 <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG``."""
+    return pq_owner_slot(scheme, key_hash32)
+
+
+def parse_pqpkh(spk):
+    """``(scheme, keyHash)`` for an exact ``TX_PQPKH`` (the Solver match), else None."""
+    spk = bytes(spk)
+    if len(spk) == 35 and spk[0] == 0x20 and spk[33] in (0x51, 0x52) and spk[34] == 0xc2:
+        return spk[33] - 0x50, spk[1:33]
+    return None
 
 
 def pqpkh_script_of(scheme, pk):

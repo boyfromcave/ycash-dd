@@ -84,6 +84,7 @@ class SlhDsaAcvp(unittest.TestCase):
         bad[-1] ^= 1
         self.assertFalse(pq.verify(pq.SCHEME_SLH_DSA_SHA2_128S, pk, bytes(bad), msg))
         self.assertFalse(pq.verify(0x03, pk, sig, msg))
+        self.assertEqual(pq.slh_sign(sk, msg, processes=2), sig)       # the process-pool path agrees
 
 
 class FalconPadded512(unittest.TestCase):
@@ -142,9 +143,16 @@ class ScriptHelpers(unittest.TestCase):
         kh = pq.key_hash(1, pk)
         self.assertEqual(kh, hashlib.sha256(b'\x01' + pk).digest())
         spk = pq.pqpkh_script(1, kh)
-        self.assertEqual(len(spk), 36)
-        self.assertEqual(spk, bytes(sc.CScript([kh, b'\x01', sc.OP_CHECKPQSIG])))
-        self.assertEqual(pq.pqpkh_script_of(2, b'\x09' * 897)[-2:], bytes([2, 0xc2]))
+        self.assertEqual(len(spk), 35)
+        self.assertEqual(spk, b'\x20' + kh + b'\x51\xc2')
+        self.assertEqual(spk, bytes(sc.CScript([kh, 1, sc.OP_CHECKPQSIG])))        # CScript << int64_t
+        self.assertEqual(spk, v.push(kh) + v.push_int(1) + bytes([sc.OP_CHECKPQSIG]))
+        self.assertEqual(pq.parse_pqpkh(spk), (1, kh))
+        spk2 = pq.pqpkh_script_of(2, b'\x09' * 897)
+        self.assertEqual(spk2[-2:], bytes([0x52, 0xc2]))
+        self.assertEqual(pq.parse_pqpkh(spk2)[0], 2)
+        self.assertIsNone(pq.parse_pqpkh(b'\x20' + kh + b'\x01\x01\xc2'))             # 36-byte 01 01 form is not PQPKH
+        self.assertIsNone(pq.parse_pqpkh(b'\x20' + kh + b'\x53\xc2'))
 
     def test_chunking(self):
         for n, sizes in ((7857, [520] * 15 + [57]), (897, [520, 377]), (667, [520, 147]),
@@ -162,6 +170,10 @@ class ScriptHelpers(unittest.TestCase):
         vals = v.push_values(ss)
         self.assertEqual(vals[:-1], pushes)
         self.assertEqual(vals[-1], b'\x02')
+        self.assertEqual(len(ss), 1578)                 # Falcon OWNER scriptSig (spec §1.5)
+        slh = pq.pq_scriptsig(b'\x03' * 32, b'\x04' * 7857, extra=v.push_int(2))
+        self.assertEqual(len(slh), 7939)                # SLH-DSA OWNER scriptSig (spec §1.5)
+        self.assertEqual([op for op, _ in v.get_ops(slh)][15:], [0x39, 0x60, 0x20, 0x51, 0x52])
         ops = v.get_ops(ss)
         self.assertEqual(ops[2][0], v.OP_2)            # s as OP_n, minimal
         self.assertEqual(ops[0][0], v.OP_PUSHDATA2)     # 520-byte chunk
