@@ -379,9 +379,42 @@ libbitcoin_wallet_a_SOURCES = \
   $(BITCOIN_CORE_H) \
   $(LIBZCASH_H)
 
+# post-quantum signatures (src/crypto/pq/README.md): the vendored C code. The verify set is all
+# that consensus reaches (crypto/pq/scheme.cpp); the sign set is wallet-only (crypto/pq/sign.cpp).
+PQ_VERIFY_SOURCES = \
+  crypto/pq/slhdsa/cbmc.h \
+  crypto/pq/slhdsa/plat_local.h \
+  crypto/pq/slhdsa/sha2_256.c \
+  crypto/pq/slhdsa/sha2_512.c \
+  crypto/pq/slhdsa/sha2_api.h \
+  crypto/pq/slhdsa/slh_adrs.h \
+  crypto/pq/slhdsa/slh_dsa.c \
+  crypto/pq/slhdsa/slh_dsa.h \
+  crypto/pq/slhdsa/slh_param.h \
+  crypto/pq/slhdsa/slh_sha2.c \
+  crypto/pq/slhdsa/slh_sys.h \
+  crypto/pq/slhdsa/slh_var.h \
+  crypto/pq/falcon/codec.c \
+  crypto/pq/falcon/common.c \
+  crypto/pq/falcon/fips202.c \
+  crypto/pq/falcon/fips202.h \
+  crypto/pq/falcon/fpr.h \
+  crypto/pq/falcon/inner.h \
+  crypto/pq/falcon/vrfy.c \
+  crypto/pq/falcon/ycash_falcon.h \
+  crypto/pq/falcon/ycash_falcon_verify.c
+PQ_SIGN_SOURCES = \
+  crypto/pq/falcon/fft.c \
+  crypto/pq/falcon/fpr.c \
+  crypto/pq/falcon/keygen.c \
+  crypto/pq/falcon/rng.c \
+  crypto/pq/falcon/sign.c \
+  crypto/pq/falcon/ycash_falcon_sign.c
+
 # crypto primitives library
 crypto_libbitcoin_crypto_a_CPPFLAGS = $(AM_CPPFLAGS) $(BITCOIN_CONFIG_INCLUDES)
 crypto_libbitcoin_crypto_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
+crypto_libbitcoin_crypto_a_CFLAGS = $(AM_CFLAGS) $(PIE_FLAGS)
 crypto_libbitcoin_crypto_a_SOURCES = \
   crypto/aes.cpp \
   crypto/aes.h \
@@ -402,7 +435,9 @@ crypto_libbitcoin_crypto_a_SOURCES = \
   crypto/sha256.cpp \
   crypto/sha256.h \
   crypto/sha512.cpp \
-  crypto/sha512.h
+  crypto/sha512.h \
+  $(PQ_VERIFY_SOURCES) \
+  $(PQ_SIGN_SOURCES)
 
 if USE_ASM
 crypto_libbitcoin_crypto_a_SOURCES += crypto/sha256_sse4.cpp
@@ -458,6 +493,10 @@ libbitcoin_common_a_SOURCES = \
   consensus/funding.cpp \
   consensus/params.cpp \
   consensus/upgrades.cpp \
+  crypto/pq/scheme.cpp \
+  crypto/pq/scheme.h \
+  crypto/pq/sign.cpp \
+  crypto/pq/sign.h \
   core_read.cpp \
   core_write.cpp \
   hash.cpp \
@@ -646,6 +685,8 @@ libzcash_script_la_SOURCES = \
   crypto/sha1.cpp \
   crypto/sha256.cpp \
   crypto/sha512.cpp \
+  crypto/pq/scheme.cpp \
+  $(PQ_VERIFY_SOURCES) \
   hash.cpp \
   primitives/transaction.cpp \
   pubkey.cpp \
@@ -677,7 +718,7 @@ CLEANFILES = *.gcda *.gcno */*.gcno wallet/*/*.gcno
 
 DISTCLEANFILES = obj/build.h
 
-EXTRA_DIST = $(CTAES_DIST) rust
+EXTRA_DIST = $(CTAES_DIST) rust crypto/pq/README.md crypto/pq/slhdsa/LICENSE crypto/pq/falcon/LICENSE
 
 clean-local:
 	rm -f $(top_srcdir)/.cargo/config $(top_srcdir)/.cargo/.configured-for-*
