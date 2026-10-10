@@ -12,6 +12,7 @@
 #include "consensus/upgrades.h"
 #include "crypto/pq/scheme.h"
 #include "crypto/pq/sign.h"
+#include "key.h"
 #include "main.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
@@ -858,6 +859,52 @@ BOOST_AUTO_TEST_CASE(pq_valid_signatures)
         BOOST_CHECK(VerifyScript(ss, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
         BOOST_CHECK(VerifyScript(ssNone, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(pq_hashtype_matrix_real)
+{
+    // Mirrors ycash6's case of the same name (consensus review B's hashtype matrix). OP_CHECKPQSIG
+    // computes the sighash through the C++ SignatureHash that OP_CHECKSIG uses; for a v4 (Sapling)
+    // transaction that is ZIP-243, which accepts every hashtype byte. So with real keys and
+    // signatures an undefined hashtype (0x00, 0x04, 0x41, 0xff) is consensus-valid and only
+    // STRICTENC (policy) rejects it, exactly as OP_CHECKSIG behaves. (ycash6's v5 / ZIP-244 half
+    // has no counterpart here: v4.5.0 has no v5 transactions.)
+    const CAmount amount = 5000;
+    const unsigned int consensusFlags = PQ_FALCON_FLAGS;
+    const unsigned int policyFlags = STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FALCON_FLAGS;
+    const std::vector<int> hashtypes = {0x00, 0x01, 0x03, 0x04, 0x41, 0x83, 0xff};
+    CMutableTransaction mtx = SaplingTx();
+    mtx.vout.resize(2);
+    mtx.vout[1].nValue = 2;
+    const CTransaction tx(mtx);
+
+    CKey ecKey;
+    ecKey.MakeNewKey(true);
+    const CScript p2pkh = GetScriptForDestination(ecKey.GetPubKey().GetID());
+    for (int ht : hashtypes) {
+        const bool defined = ((ht & ~SIGHASH_ANYONECANPAY) >= SIGHASH_ALL && (ht & ~SIGHASH_ANYONECANPAY) <= SIGHASH_SINGLE);
+        // the OP_CHECKSIG reference on this line
+        const uint256 sighash = SignatureHash(p2pkh, tx, 0, ht, amount, VAULT_BRANCH_ID);
+        valtype ecSig;
+        BOOST_REQUIRE(ecKey.Sign(sighash, ecSig));
+        ecSig.push_back((unsigned char)ht);
+        const CScript ecSS = CScript() << ecSig << ToByteVector(ecKey.GetPubKey());
+        BOOST_CHECK_EQUAL(VerifyPQ(ecSS, p2pkh, tx, amount, consensusFlags), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(VerifyPQ(ecSS, p2pkh, tx, amount, policyFlags), defined ? SCRIPT_ERR_OK : SCRIPT_ERR_SIG_HASHTYPE);
+
+        for (uint8_t scheme : {SLH, FALCON}) {
+            const PQKey key = MakeKey(scheme, scheme == SLH ? 0x51 : 0x52);
+            const CScript spk = PQPKH(KeyHashBytes(scheme, key.pk), scheme);
+            const valtype sig = SignPQ(key, spk, tx, ht, amount, VAULT_BRANCH_ID);
+            const CScript ss = ScriptSig(Chunks(sig), Chunks(key.pk));
+            BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, consensusFlags), SCRIPT_ERR_OK);
+            BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, policyFlags), defined ? SCRIPT_ERR_OK : SCRIPT_ERR_SIG_HASHTYPE);
+            // the hashtype byte is bound: the same signature under another hashtype byte is false
+            valtype other = sig;
+            other.back() = (unsigned char)(ht ^ 0x02);
+            BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(other), Chunks(key.pk)), spk, tx, amount, consensusFlags), SCRIPT_ERR_EVAL_FALSE);
+        }
     }
 }
 
