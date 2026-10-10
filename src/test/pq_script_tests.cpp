@@ -11,6 +11,7 @@
 #include "coins.h"
 #include "consensus/upgrades.h"
 #include "crypto/pq/scheme.h"
+#include "crypto/pq/sign.h"
 #include "main.h"
 #include "policy/policy.h"
 #include "primitives/transaction.h"
@@ -22,6 +23,7 @@
 #include "utilstrencodings.h"
 #include "uint256.h"
 #include "util.h"
+#include "vault/checker.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -682,6 +684,117 @@ BOOST_AUTO_TEST_CASE(pq_flag_plumbing)
     SelectParams(CBaseChainParams::REGTEST);
     BOOST_CHECK(!Params().GetConsensus().pqFalconActive);
     SelectParams(CBaseChainParams::MAIN);
+}
+
+namespace {
+
+struct PQKey {
+    uint8_t scheme;
+    valtype pk, sk;
+};
+
+PQKey MakeKey(uint8_t scheme, unsigned char seedByte)
+{
+    PQKey k{scheme, {}, {}};
+    BOOST_REQUIRE(pq::KeyGen(scheme, valtype(pq::SeedSize(scheme), seedByte), k.pk, k.sk));
+    BOOST_REQUIRE_EQUAL(k.pk.size(), pq::PubKeySize(scheme));
+    return k;
+}
+
+/** A signature over SignatureHash(scriptCode, tx, 0, hashType, amount, branch) plus the hashtype byte. */
+valtype SignPQ(const PQKey& k, const CScript& scriptCode, const CTransaction& tx, int hashType,
+               CAmount amount, uint32_t branch, unsigned char entropyByte = 0x33)
+{
+    const uint256 sighash = SignatureHash(scriptCode, tx, 0, hashType, amount, branch);
+    valtype sig;
+    const valtype entropy = k.scheme == FALCON ? valtype(pq::FALCON_SIGN_ENTROPY_SIZE, entropyByte) : valtype();
+    BOOST_REQUIRE(pq::SignWithEntropy(k.scheme, k.sk, sighash, entropy, sig));
+    BOOST_REQUIRE_EQUAL(sig.size(), pq::SigSize(k.scheme));
+    sig.push_back((unsigned char)hashType);
+    return sig;
+}
+
+ScriptError VerifyPQ(const CScript& scriptSig, const CScript& spk, const CTransaction& tx, CAmount amount,
+                     unsigned int flags, uint32_t branch = VAULT_BRANCH_ID)
+{
+    const PrecomputedTransactionData txdata(tx);
+    TransactionSignatureChecker checker(&tx, 0, amount, txdata);
+    ScriptError err;
+    VerifyScript(scriptSig, spk, flags, checker, branch, &err);
+    return err;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_valid_signatures)
+{
+    // Real keys and signatures (crypto/pq/sign.h, the wallet side) verified by the interpreter through
+    // TransactionSignatureChecker::CheckPQSig and pq::Verify over the ZIP-243 sighash.
+    const CAmount amount = 123456;
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FALCON_FLAGS;
+    for (uint8_t scheme : {SLH, FALCON}) {
+        const PQKey key = MakeKey(scheme, scheme == SLH ? 0x41 : 0x42);
+        const CScript spk = PQPKH(KeyHashBytes(scheme, key.pk), scheme);
+        CMutableTransaction mtx = SaplingTx();
+        mtx.vout.resize(2);
+        mtx.vout[1].nValue = 2;
+        const CTransaction tx(mtx);
+
+        const valtype sig = SignPQ(key, spk, tx, SIGHASH_ALL, amount, VAULT_BRANCH_ID);
+        const CScript ss = ScriptSig(Chunks(sig), Chunks(key.pk));
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, flags), SCRIPT_ERR_OK);
+        // without PQ_FALCON, Falcon is an unknown scheme; SLH-DSA does not need it
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS),
+                          scheme == SLH ? SCRIPT_ERR_OK : SCRIPT_ERR_PQ_SCHEME);
+        // before the upgrade it is BAD_OPCODE
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, STANDARD_SCRIPT_VERIFY_FLAGS), SCRIPT_ERR_BAD_OPCODE);
+        // the size of the scriptSig of §2.1 (QUANTUM-SPEC): SLH 7,938 B, Falcon 1,577 B
+        BOOST_CHECK_EQUAL(ss.size(), scheme == SLH ? 7938U : 1577U);
+
+        // anything the sighash binds breaks it: a signature byte, the amount, the branch, the
+        // hashtype byte, an output; and the key hash binds the key
+        valtype bad = sig;
+        bad[10] ^= 0x01;
+        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(bad), Chunks(key.pk)), spk, tx, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount + 1, flags), SCRIPT_ERR_EVAL_FALSE);
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx, amount, flags, NetworkUpgradeInfo[Consensus::UPGRADE_NU5].nBranchId), SCRIPT_ERR_EVAL_FALSE);
+        bad = sig;
+        bad.back() = SIGHASH_NONE;
+        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(bad), Chunks(key.pk)), spk, tx, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+        CMutableTransaction mtx2 = mtx;
+        mtx2.vout[1].nValue = 3;
+        const CTransaction tx2(mtx2);
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spk, tx2, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+        const PQKey other = MakeKey(scheme, 0x7e);
+        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(sig), Chunks(other.pk)), spk, tx, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+        // another key's script with this key's signature: the key hash does not match
+        const CScript spkOther = PQPKH(KeyHashBytes(scheme, other.pk), scheme);
+        BOOST_CHECK_EQUAL(VerifyPQ(ss, spkOther, tx, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+        // the signature is over the executing script: signing another scriptCode fails
+        const valtype sigOther = SignPQ(key, spkOther, tx, SIGHASH_ALL, amount, VAULT_BRANCH_ID);
+        BOOST_CHECK_EQUAL(VerifyPQ(ScriptSig(Chunks(sigOther), Chunks(key.pk)), spk, tx, amount, flags), SCRIPT_ERR_EVAL_FALSE);
+
+        // SIGHASH_NONE | ANYONECANPAY: the outputs are free, the signature still binds this input
+        const int htNone = SIGHASH_NONE | SIGHASH_ANYONECANPAY;
+        const valtype sigNone = SignPQ(key, spk, tx, htNone, amount, VAULT_BRANCH_ID);
+        const CScript ssNone = ScriptSig(Chunks(sigNone), Chunks(key.pk));
+        BOOST_CHECK_EQUAL(VerifyPQ(ssNone, spk, tx, amount, flags), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(VerifyPQ(ssNone, spk, tx2, amount, flags), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(VerifyPQ(ssNone, spk, tx, amount - 1, flags), SCRIPT_ERR_EVAL_FALSE);
+        // with an undefined hashtype the signature verifies by consensus, not under STRICTENC
+        const valtype sigOdd = SignPQ(key, spk, tx, 0x04, amount, VAULT_BRANCH_ID);
+        const CScript ssOdd = ScriptSig(Chunks(sigOdd), Chunks(key.pk));
+        BOOST_CHECK_EQUAL(VerifyPQ(ssOdd, spk, tx, amount, PQ_FALCON_FLAGS), SCRIPT_ERR_OK);
+        BOOST_CHECK_EQUAL(VerifyPQ(ssOdd, spk, tx, amount, flags), SCRIPT_ERR_SIG_HASHTYPE);
+        // the vault primitive's checker (the one blocks and the mempool use under UPGRADE_VAULT)
+        // answers OP_CHECKPQSIG by inheritance, without a set snapshot
+        PrecomputedTransactionData txdata(tx);
+        vault::SetSigChecker vaultChecker(&tx, 0, amount, false, txdata, nullptr, 1);
+        ScriptError err;
+        BOOST_CHECK(VerifyScript(ss, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        BOOST_CHECK(VerifyScript(ssNone, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
