@@ -19,6 +19,7 @@
 #include "script/script.h"
 #include "script/script_error.h"
 #include "script/standard.h"
+#include "test/data/pq_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "utilstrencodings.h"
 #include "uint256.h"
@@ -26,6 +27,8 @@
 #include "vault/checker.h"
 
 #include <boost/test/unit_test.hpp>
+
+#include <univalue.h>
 
 #include <string>
 #include <vector>
@@ -794,6 +797,75 @@ BOOST_AUTO_TEST_CASE(pq_valid_signatures)
         BOOST_CHECK(VerifyScript(ss, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
         BOOST_CHECK(VerifyScript(ssNone, spk, flags, vaultChecker, VAULT_BRANCH_ID, &err));
+    }
+}
+
+namespace {
+
+/** Verifies OP_CHECKPQSIG over a fixed message (a golden vector's msg), as CheckPQSig does over the sighash. */
+class FixedMsgChecker : public BaseSignatureChecker
+{
+public:
+    uint256 msg;
+    bool CheckPQSig(uint8_t scheme, const valtype& vchSig, const valtype& vchPubKey,
+                    const CScript&, uint32_t) const override
+    {
+        if (vchSig.empty()) return false;
+        return pq::Verify(scheme, vchPubKey, valtype(vchSig.begin(), vchSig.end() - 1), msg);
+    }
+};
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pq_golden_spends)
+{
+    // src/test/data/pq_vectors.json "spends": whole TX_PQPKH scriptPubKeys and chunked scriptSigs
+    // (byte-identical on both node lines, YEW and the Python framework) through the interpreter.
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::pq_vectors, json_tests::pq_vectors + sizeof(json_tests::pq_vectors))));
+    const UniValue& keys = doc["keys"];
+    const UniValue& spends = doc["spends"];
+    BOOST_REQUIRE_EQUAL(spends.size(), 2U);
+    for (size_t i = 0; i < spends.size(); i++) {
+        const UniValue& sp = spends[i];
+        const UniValue& key = keys[sp["key"].get_int()];
+        const uint8_t scheme = sp["scheme"].get_int();
+        BOOST_REQUIRE_EQUAL(key["scheme"].get_int(), scheme);
+        const valtype spkBytes = ParseHex(sp["scriptPubKey"].get_str());
+        const valtype ssBytes = ParseHex(sp["scriptSig"].get_str());
+        const CScript spk(spkBytes.begin(), spkBytes.end());
+        const CScript ss(ssBytes.begin(), ssBytes.end());
+        const valtype pk = ParseHex(key["pk"].get_str());
+        valtype sig = ParseHex(key["sig"].get_str());
+        sig.push_back((unsigned char)sp["hashtype"].get_int());
+        BOOST_CHECK_EQUAL(ss.size(), (size_t)sp["scriptSigSize"].get_int());
+        // this file's builders produce the vector's bytes
+        BOOST_CHECK(PQPKH(KeyHashBytes(scheme, pk), scheme) == spk);
+        BOOST_CHECK(ParseHex(key["keyhash"].get_str()) == KeyHashBytes(scheme, pk));
+        BOOST_CHECK(ScriptSig(Chunks(sig), Chunks(pk)) == ss);
+        BOOST_CHECK_EQUAL(Chunks(sig).size(), (size_t)sp["sigChunks"].get_int());
+        BOOST_CHECK_EQUAL(Chunks(pk).size(), (size_t)sp["pkChunks"].get_int());
+
+        FixedMsgChecker checker;
+        const valtype msg = ParseHex(key["msg"].get_str());
+        checker.msg = uint256(msg);
+        const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FALCON_FLAGS;
+        ScriptError err;
+        BOOST_CHECK(VerifyScript(ss, spk, flags, checker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_OK);
+        // Falcon is rejected without the flag; SLH-DSA is not
+        VerifyScript(ss, spk, STANDARD_SCRIPT_VERIFY_FLAGS | PQ_FLAGS, checker, VAULT_BRANCH_ID, &err);
+        BOOST_CHECK_EQUAL(err, scheme == SLH ? SCRIPT_ERR_OK : SCRIPT_ERR_PQ_SCHEME);
+        VerifyScript(ss, spk, STANDARD_SCRIPT_VERIFY_FLAGS, checker, VAULT_BRANCH_ID, &err);
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_BAD_OPCODE);
+        // one bit of the signature (inside the first chunk), or another message, is false
+        valtype bad = ssBytes;
+        bad[3 + 100] ^= 0x01;
+        BOOST_CHECK(!VerifyScript(CScript(bad.begin(), bad.end()), spk, flags, checker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
+        checker.msg = uint256S("01");
+        BOOST_CHECK(!VerifyScript(ss, spk, flags, checker, VAULT_BRANCH_ID, &err));
+        BOOST_CHECK_EQUAL(err, SCRIPT_ERR_EVAL_FALSE);
     }
 }
 
