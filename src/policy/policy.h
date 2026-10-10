@@ -11,10 +11,12 @@
 #include "script/interpreter.h"
 #include "script/standard.h"
 
+#include <optional>
 #include <string>
 
 class CChainParams;
 class CCoinsViewCache;
+namespace Consensus { struct Params; }
 
 /** Default for -blockmaxsize and -blockminsize, which control the range of sizes the mining code will create **/
 static const unsigned int DEFAULT_BLOCK_MAX_SIZE = MAX_BLOCK_SIZE;
@@ -27,6 +29,11 @@ static const unsigned int MAX_P2SH_SIGOPS = 15;
 static const unsigned int MAX_STANDARD_TX_SIGOPS = MAX_BLOCK_SIGOPS/5;
 /** The largest `YV` act OP_RETURN scriptPubKey relayed once UPGRADE_VAULT is active (plan §15.5). */
 static const unsigned int MAX_VAULT_ACT_BYTES = 1200;
+/** The largest standard scriptSig of an input spending TX_PQPKH or a vault template once UPGRADE_VAULT
+ *  is active (quantum spec §0, §2.3, F-6): an SLH-DSA spend is 7,939 bytes. */
+static const unsigned int MAX_STANDARD_PQ_SCRIPTSIG = 9000;
+/** The largest standard scriptSig of every other input (Bitcoin's 15-of-15 P2SH multisig bound). */
+static const unsigned int MAX_STANDARD_SCRIPTSIG = 1650;
 /**
  * Standard script verification flags that standard transactions will comply
  * with. However scripts violating these flags may still be present in valid
@@ -50,6 +57,12 @@ static_assert(DEFAULT_BLOCK_MAX_SIZE <= MAX_BLOCK_SIZE);
 static_assert(DEFAULT_BLOCK_PRIORITY_SIZE <= DEFAULT_BLOCK_MAX_SIZE);
 
 bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType);
+
+/**
+ * The post-quantum owner/holder scheme of a TX_PQPKH, V or I scriptPubKey (quantum spec §1, §2), or
+ * nullopt for any other script.
+ */
+std::optional<uint8_t> PQScriptScheme(const CScript& scriptPubKey, txnouttype whichType);
     /**
      * Check for standard transaction types
      * @return True if all outputs (scriptPubKeys) use only standard transaction forms
