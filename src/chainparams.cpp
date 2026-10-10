@@ -745,8 +745,8 @@ public:
         fZIP209Enabled = true;
     }
 
-    void SetRegTestPqFalconActive(bool active) {
-        consensus.pqFalconActive = active;
+    void SetRegTestPqFalconHeight(int height) {
+        consensus.pqFalconHeight = height;
     }
 };
 static CRegTestParams regTestParams;
@@ -785,9 +785,11 @@ void SelectParams(const std::string& network)
         regTestParams.SetRegTestZIP209Enabled();
     }
 
-    // OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) on regtest only (quantum plan §4.8)
+    // OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) on regtest only (quantum plan §4.8, spec R-A2):
+    // -pqfalconheight=<h>, or -pqfalcon=1 for height 0; init.cpp refuses both on other networks.
     if (network == CBaseChainParams::REGTEST) {
-        regTestParams.SetRegTestPqFalconActive(GetBoolArg("-pqfalcon", false));
+        int height = GetBoolArg("-pqfalcon", false) ? 0 : Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
+        regTestParams.SetRegTestPqFalconHeight(GetArg("-pqfalconheight", height));
     }
 }
 
