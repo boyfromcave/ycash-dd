@@ -72,6 +72,7 @@ BASE_SCRIPTS= [
     # unlock / release / cancel, owner branches, dormancy, wind-down, rate limit, evictions,
     # reorg / undo, restart reconciliation; slashing; the wYEC bridge (P3), both signer shapes.
     'vault_primitive.py',
+    'vault_pq.py',
     'vault_slashing.py',
     'vault_bridge.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
