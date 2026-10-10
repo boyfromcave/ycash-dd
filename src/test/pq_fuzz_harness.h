@@ -14,7 +14,8 @@
 //
 //   byte 0   flags: bit 0 STRICTENC, bit 1 PQ_FALCON, bit 2 VAULT, bit 3 the key hash is
 //            SHA256(scheme ‖ the reassembled key) (else 32 bytes of 0x5a), bits 4-5 the key-hash
-//            length (0: 32, 1: 31, 2: 33, 3: 0), bit 6 the mock checker answers true
+//            length (0: 32, 1: 31, 2: 33, 3: 0), bit 6 the mock checker answers true,
+//            bit 7 the script is OP_CHECKPQSIG OP_CHECKPQSIG (a second execution is SCRIPT_ERR_PQ_COUNT, R-B1)
 //   byte 1   the scheme element: 0xff = empty, else the one byte
 //   then     items of 3 bytes, bottom of the stack first: u16 LE v, fill.
 //            v & 0x8000: the one-byte element {v & 0xff} (a count);
@@ -151,6 +152,7 @@ inline int RunPQScript(const std::vector<unsigned char>& data)
     const bool hashRight = f & 0x08;
     const int khLenSel = (f >> 4) & 3;
     const bool answer = f & 0x40;
+    const bool twice = f & 0x80;
 
     std::vector<valtype> stack;
     for (size_t i = 2; i + 3 <= data.size() && stack.size() < 400; i += 3) {
@@ -183,8 +185,18 @@ inline int RunPQScript(const std::vector<unsigned char>& data)
     stack.push_back(kh);
     stack.push_back(scheme);
 
-    const Model m = RunModel(stack, flags, answer);
-    const CScript script = CScript() << OP_CHECKPQSIG;
+    Model m = RunModel(stack, flags, answer);
+    CScript script = CScript() << OP_CHECKPQSIG;
+    int expectCallsOnError = 0;   // the first check's call, when the second is the error
+    if (twice) {
+        // the first runs as modelled; if it succeeds, the second fails before reading the stack
+        script << OP_CHECKPQSIG;
+        if (m.err == SCRIPT_ERR_OK) {
+            expectCallsOnError = m.checkerCalled ? 1 : 0;
+            m.err = SCRIPT_ERR_PQ_COUNT;
+            m.stack.clear();
+        }
+    }
 
     RecordingChecker checker;
     checker.answer = answer;
@@ -196,7 +208,7 @@ inline int RunPQScript(const std::vector<unsigned char>& data)
         if (st != m.stack) return -2;
         if ((checker.calls == 1) != m.checkerCalled || checker.calls > 1) return -2;
         if (checker.calls == 1 && (checker.scheme != m.scheme || checker.pk != m.pk || checker.sig != m.sig)) return -2;
-    } else if (checker.calls != 0) {
+    } else if (checker.calls != expectCallsOnError) {
         return -2;
     }
 

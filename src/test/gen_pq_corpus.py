@@ -29,7 +29,7 @@ BEGIN = "// BEGIN GENERATED PQ CORPUS (src/test/gen_pq_corpus.py; do not edit by
 END = "// END GENERATED PQ CORPUS"
 FOUND_PREFIX = "fuzz-"
 
-STRICTENC, FALCON, VAULT, HASH_RIGHT, ANSWER = 0x01, 0x02, 0x04, 0x08, 0x40
+STRICTENC, FALCON, VAULT, HASH_RIGHT, ANSWER, TWICE = 0x01, 0x02, 0x04, 0x08, 0x40, 0x80
 KH31, KH33, KH0 = 0x10, 0x20, 0x30
 SLH, FN = 1, 2
 PK = {SLH: 32, FN: 897}
@@ -105,6 +105,11 @@ def corpus():
     s.append(("falcon_order_sigchunk_pksize", seed(VAULT | FALCON | HASH_RIGHT, FN,
                                                    [elem(519), elem(148), num(2), elem(520), elem(378), num(2)])))
     s.append(("extra_below", seed(VAULT | HASH_RIGHT | ANSWER, SLH, [elem(3, 7), seq(SIG[SLH], 0x22), seq(PK[SLH], 0x11)])))
+    # R-B1: a second executed OP_CHECKPQSIG is PQ_COUNT; a first that fails reports its own error
+    s.append(("slh_twice", good(SLH, ANSWER | TWICE)))
+    s.append(("falcon_twice_false", good(FN, FALCON | TWICE)))
+    s.append(("twice_no_vault", seed(TWICE, SLH, [])))
+    s.append(("twice_first_fails", seed(VAULT | TWICE, 3, [])))
     s.append(("empty_stack", bytes([VAULT, SLH])))
     s.append(("one_byte", bytes([VAULT])))
     return s
