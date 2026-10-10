@@ -200,9 +200,39 @@ class ScriptHelpers(unittest.TestCase):
 class GoldenVectors(unittest.TestCase):
     """The library's golden vector (plan §4.7), reproduced byte for byte."""
 
-    def test_golden(self):
-        from test_framework import pq_golden
-        pq_golden.check(_load(GOLDEN), self)
+    @classmethod
+    def setUpClass(cls):
+        cls.data = _load(GOLDEN)
+        assert cls.data['format'] == 'ycash-pq-vectors-1'
+
+    def test_keys(self):
+        for k in self.data['keys']:
+            scheme, pk, msg, sig = k['scheme'], H(k['pk']), H(k['msg']), H(k['sig'])
+            self.assertEqual(pq.key_hash(scheme, pk), H(k['keyhash']), k['label'])
+            self.assertEqual(len(pk), pq.pubkey_size(scheme))
+            self.assertEqual(len(sig), pq.sig_size(scheme))
+            if scheme == pq.SCHEME_SLH_DSA_SHA2_128S:
+                pk2, sk = pq.keygen(scheme, H(k['seed']))
+                self.assertEqual(pk2, pk, k['label'])
+                self.assertEqual(pq.sign(scheme, sk, msg), sig, k['label'])       # deterministic: byte for byte
+            self.assertTrue(pq.verify(scheme, pk, sig, msg), k['label'])
+            self.assertFalse(pq.verify(scheme, pk, sig, msg[::-1]), k['label'])
+
+    def test_spends(self):
+        keys = self.data['keys']
+        for sp in self.data['spends']:
+            k = keys[sp['key']]
+            scheme, pk = sp['scheme'], H(k['pk'])
+            self.assertEqual(k['scheme'], scheme)
+            self.assertEqual(pq.pqpkh_script(scheme, pq.key_hash(scheme, pk)), H(sp['scriptPubKey']))
+            sig = H(k['sig']) + bytes([sp['hashtype']])
+            pushes = pq.pq_scriptsig_pushes(pk, sig)
+            self.assertEqual(pushes[sp['sigChunks']], bytes([sp['sigChunks']]))
+            self.assertEqual(pushes[-1], bytes([sp['pkChunks']]))
+            ss = pq.pq_scriptsig(pk, sig)
+            self.assertEqual(len(ss), sp['scriptSigSize'])
+            self.assertEqual(ss, H(sp['scriptSig']))
+            self.assertEqual(pq.pq_scriptsig_from_pushes(pushes), ss)
 
 
 if __name__ == '__main__':
