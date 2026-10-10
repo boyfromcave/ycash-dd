@@ -778,10 +778,19 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
 
+bool IsPQFalconActive(const Consensus::Params& params, int nHeight)
+{
+    return params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) &&
+           params.pqFalconHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+           nHeight >= params.pqFalconHeight;
+}
+
 unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params)
 {
     if (!params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT))
         return 0;
+    if (IsPQFalconActive(params, nHeight))
+        return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
     return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
 }
 
@@ -1763,6 +1772,7 @@ bool AcceptToMemoryPool(
         // merely non-standard transaction.
         unsigned int nSigOps = GetLegacySigOpCount(tx);
         nSigOps += GetP2SHSigOpCount(tx, view);
+        nSigOps += GetPQSigOpCount(tx, view); // policy: 20 per OP_CHECKPQSIG (quantum plan D-Q-7)
         if (nSigOps > MAX_STANDARD_TX_SIGOPS)
             return state.DoS(0,
                              error("AcceptToMemoryPool: too many sigops %s, %d > %d",

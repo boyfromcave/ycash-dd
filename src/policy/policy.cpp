@@ -8,6 +8,7 @@
 
 #include "policy/policy.h"
 
+#include "crypto/pq/scheme.h"
 #include "main.h"
 #include "tinyformat.h"
 #include "util.h"
@@ -192,6 +193,9 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
             {
                 // Any other Script with less than 15 sigops OK:
                 unsigned int sigops = subscript.GetSigOpCount(true);
+                // ... OP_CHECKPQSIG's 20 policy sigops included (quantum spec R-B2), so a redeem
+                // script that holds one is non-standard:
+                sigops += GetPQSigOpCount(subscript);
                 // ... extra data left on the stack after execution is OK, too:
                 return (sigops <= MAX_P2SH_SIGOPS);
             }
@@ -202,4 +206,43 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     }
 
     return true;
+}
+
+unsigned int GetPQSigOpCount(const CScript& script)
+{
+    unsigned int n = 0;
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    while (pc < script.end() && script.GetOp(pc, opcode)) {
+        if (opcode == OP_CHECKPQSIG)
+            n += pq::SIGOP_COST;
+    }
+    return n;
+}
+
+unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+{
+    if (tx.IsCoinBase())
+        return 0;
+    unsigned int n = 0;
+    for (const CTxIn& txin : tx.vin) {
+        const CScript& prevScript = mapInputs.GetOutputFor(txin).scriptPubKey;
+        n += GetPQSigOpCount(txin.scriptSig) + GetPQSigOpCount(prevScript);
+        if (prevScript.IsPayToScriptHash()) {
+            // the redeem script is the scriptSig's last push (as CScript::GetSigOpCount(scriptSig))
+            CScript::const_iterator pc = txin.scriptSig.begin();
+            opcodetype opcode;
+            std::vector<unsigned char> data;
+            bool pushOnly = true;
+            while (pc < txin.scriptSig.end()) {
+                if (!txin.scriptSig.GetOp(pc, opcode, data) || opcode > OP_16) {
+                    pushOnly = false;
+                    break;
+                }
+            }
+            if (pushOnly)
+                n += GetPQSigOpCount(CScript(data.begin(), data.end()));
+        }
+    }
+    return n;
 }

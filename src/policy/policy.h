@@ -62,4 +62,16 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
      */
 bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, uint32_t consensusBranchId);
 
+/**
+ * Policy sigops of OP_CHECKPQSIG (docs/plans/yellowback-quantum-plan.md §4.1, D-Q-7):
+ * pq::SIGOP_COST for each OP_CHECKPQSIG in what a spend executes (each input's scriptSig, its
+ * previous output's scriptPubKey and, for P2SH, the redeem script). Not a consensus count
+ * (CScript::GetSigOpCount does not see 0xc2, as it does not see OP_CHECKSETSIG); the mempool and
+ * the block template add it to their sigop budgets (getblocktemplate's per-transaction "sigops"
+ * includes it), and AreInputsStandard to a P2SH redeem script's (R-B2).
+ */
+unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapInputs);
+/** The same count over one script: pq::SIGOP_COST per OP_CHECKPQSIG opcode (not inside pushes). */
+unsigned int GetPQSigOpCount(const CScript& script);
+
 #endif // BITCOIN_POLICY_POLICY_H

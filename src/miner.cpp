@@ -563,6 +563,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
             CAmount nTxFees = view.GetValueIn(tx)-tx.GetValueOut();
 
             nTxSigOps += GetP2SHSigOpCount(tx, view);
+            nTxSigOps += GetPQSigOpCount(tx, view); // policy: 20 per OP_CHECKPQSIG (quantum plan D-Q-7)
             if (nBlockSigOps + nTxSigOps >= MAX_BLOCK_SIGOPS)
                 continue;
 
