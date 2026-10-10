@@ -8,6 +8,7 @@
 #define BITCOIN_SCRIPT_STANDARD_H
 
 #include "script/interpreter.h"
+#include "serialize.h"
 #include "uint256.h"
 
 
@@ -26,6 +27,35 @@ public:
     CScriptID() : uint160() {}
     explicit CScriptID(const CScript& in);
     CScriptID(const uint160& in) : uint160(in) {}
+};
+
+/**
+ * A post-quantum key's id, the TX_PQPKH destination (docs/plans/yellowback-quantum-spec.md §2):
+ * the scheme byte (crypto/pq/scheme.h) and keyHash = SHA256(scheme || pk). Also the owner of a
+ * vault V / intent I. Ordered by scheme, then hash.
+ */
+struct CPQKeyID
+{
+    uint8_t scheme = 0;
+    uint256 hash;
+
+    CPQKeyID() {}
+    CPQKeyID(uint8_t schemeIn, const uint256& hashIn) : scheme(schemeIn), hash(hashIn) {}
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(scheme);
+        READWRITE(hash);
+    }
+
+    friend bool operator==(const CPQKeyID& a, const CPQKeyID& b) { return a.scheme == b.scheme && a.hash == b.hash; }
+    friend bool operator!=(const CPQKeyID& a, const CPQKeyID& b) { return !(a == b); }
+    friend bool operator<(const CPQKeyID& a, const CPQKeyID& b)
+    {
+        return a.scheme < b.scheme || (a.scheme == b.scheme && a.hash < b.hash);
+    }
 };
 
 /**
@@ -66,6 +96,9 @@ enum txnouttype
     // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
     TX_VAULT,        //!< vault V
     TX_VAULT_INTENT, //!< intent I
+    // Post-quantum pay-to-key-hash <keyHash:32> OP_1|OP_2 OP_CHECKPQSIG (quantum spec §2.1);
+    // standard only where UPGRADE_VAULT is active at the next block (IsStandardTx).
+    TX_PQPKH,
 };
 
 class CNoDestination {
@@ -80,9 +113,10 @@ public:
  *  * CNoDestination: no destination set
  *  * CKeyID: TX_PUBKEYHASH destination
  *  * CScriptID: TX_SCRIPTHASH destination
+ *  * CPQKeyID: TX_PQPKH destination (no plain-YEC address encoding; EncodeDestination returns "")
  *  A CTxDestination is the internal data type encoded in a bitcoin address
  */
-typedef std::variant<CNoDestination, CKeyID, CScriptID> CTxDestination;
+typedef std::variant<CNoDestination, CKeyID, CScriptID, CPQKeyID> CTxDestination;
 
 /** Check whether a CTxDestination is a CNoDestination. */
 bool IsValidDestination(const CTxDestination& dest);
@@ -92,6 +126,9 @@ bool IsKeyDestination(const CTxDestination& dest);
 
 /** Check whether a CTxDestination is a CScriptID. */
 bool IsScriptDestination(const CTxDestination& dest);
+
+/** Check whether a CTxDestination is a CPQKeyID. */
+bool IsPQKeyDestination(const CTxDestination& dest);
 
 /** Get the name of a txnouttype as a C string, or nullptr if unknown. */
 const char* GetTxnOutputType(txnouttype t);
@@ -134,6 +171,9 @@ bool ExtractDestinations(const CScript& scriptPubKey, txnouttype& typeRet, std::
  */
 CScript GetScriptForDestination(const CTxDestination& dest);
 CScript GetScriptForRawPubKey(const CPubKey& pubkey);
+
+/** The TX_PQPKH script <hash:32> OP_<scheme> OP_CHECKPQSIG (empty unless scheme is 1..16). */
+CScript GetScriptForPQKey(const CPQKeyID& id);
 
 /** Generate a multisig script. */
 CScript GetScriptForMultisig(int nRequired, const std::vector<CPubKey>& keys);

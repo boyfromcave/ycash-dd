@@ -1,5 +1,6 @@
 // Copyright (c) 2014-2016 The Bitcoin Core developers
 // Copyright (c) 2016-2018 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -39,6 +40,10 @@ public:
         data.insert(data.end(), id.begin(), id.end());
         return EncodeBase58Check(data);
     }
+
+    // No plain-YEC encoding for a PQ key (quantum spec §2.4, D-Q-11); YED owner and holder
+    // addresses are yellowback::EncodeAddress.
+    std::string operator()(const CPQKeyID& id) const { return {}; }
 
     std::string operator()(const CNoDestination& no) const { return {}; }
 };
