@@ -443,6 +443,7 @@ bool CheckFinalTx(const CTransaction &tx, int flags = -1);
 /**
  * The script verification flags UPGRADE_VAULT adds for a block at nHeight
  * (SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT, plan §15.1), or 0 before it.
+ * With params.pqFalconActive it adds SCRIPT_VERIFY_PQ_FALCON too (quantum plan §4.8).
  */
 unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params);
 

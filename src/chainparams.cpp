@@ -744,6 +744,10 @@ public:
     void SetRegTestZIP209Enabled() {
         fZIP209Enabled = true;
     }
+
+    void SetRegTestPqFalconActive(bool active) {
+        consensus.pqFalconActive = active;
+    }
 };
 static CRegTestParams regTestParams;
 
@@ -779,6 +783,11 @@ void SelectParams(const std::string& network)
     // When a developer is debugging turnstile violations in regtest mode, enable ZIP209
     if (network == CBaseChainParams::REGTEST && mapArgs.count("-developersetpoolsizezero")) {
         regTestParams.SetRegTestZIP209Enabled();
+    }
+
+    // OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) on regtest only (quantum plan §4.8)
+    if (network == CBaseChainParams::REGTEST) {
+        regTestParams.SetRegTestPqFalconActive(GetBoolArg("-pqfalcon", false));
     }
 }
 

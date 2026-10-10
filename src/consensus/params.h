@@ -247,6 +247,14 @@ struct Params {
 
     bool fCoinbaseMustBeShielded = false;
 
+    /**
+     * OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) is admitted: GetVaultScriptFlags adds
+     * SCRIPT_VERIFY_PQ_FALCON beside SCRIPT_VERIFY_VAULT. False on mainnet and testnet until
+     * FIPS 206 is final (docs/plans/yellowback-quantum-plan.md D-Q-2, §4.8); regtest sets it
+     * with -pqfalcon=1.
+     */
+    bool pqFalconActive = false;
+
     /** Needs to evenly divide MAX_SUBSIDY to avoid rounding errors. */
     int nSubsidySlowStartInterval;
     /**

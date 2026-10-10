@@ -782,6 +782,8 @@ unsigned int GetVaultScriptFlags(int nHeight, const Consensus::Params& params)
 {
     if (!params.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT))
         return 0;
+    if (params.pqFalconActive)
+        return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
     return SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT;
 }
 
