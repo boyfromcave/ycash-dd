@@ -554,11 +554,9 @@ void shake128_inc_ctx_release(shake128incctx *state) {
     free(state->ctx);
 }
 
+/* YCASH LOCAL PATCH: shake256incctx holds its state inline (fips202.h), so
+ * init, clone and release neither allocate, free nor exit. */
 void shake256_inc_init(shake256incctx *state) {
-    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
-    if (state->ctx == NULL) {
-        exit(111);
-    }
     keccak_inc_init(state->ctx);
 }
 
@@ -575,15 +573,11 @@ void shake256_inc_squeeze(uint8_t *output, size_t outlen, shake256incctx *state)
 }
 
 void shake256_inc_ctx_clone(shake256incctx *dest, const shake256incctx *src) {
-    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
-    if (dest->ctx == NULL) {
-        exit(111);
-    }
     memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
 }
 
 void shake256_inc_ctx_release(shake256incctx *state) {
-    free(state->ctx);
+    (void)state;
 }
 
 /*************************************************
