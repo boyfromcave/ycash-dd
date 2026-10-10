@@ -84,7 +84,8 @@ checks them with **verify** only. Falcon keygen from a seed is reproducible only
   notice, 2026); the code is frozen, which suits a pin.
 * Licence: MIT (Falcon Project, `falcon/LICENSE` unchanged, with its patent note on US7308097B2);
   `fips202.{c,h}` are public domain (header notice unchanged).
-* Files, **unmodified**: `inner.h fpr.h codec.c common.c vrfy.c keygen.c sign.c fft.c fpr.c rng.c fips202.c fips202.h LICENSE`.
+* Files, **unmodified**: `inner.h fpr.h codec.c common.c vrfy.c keygen.c sign.c fft.c fpr.c rng.c LICENSE`.
+  **Patched**: `fips202.c fips202.h` (one local patch, see "Local patches" below).
   `fips202.{c,h}` moved from PQClean's `common/` into `falcon/` so `inner.h`'s `#include "fips202.h"` resolves
   without an include path.
 * **Not vendored: `pqclean.c` and `api.h`.** `pqclean.c` takes its randomness from a global `randombytes()`.
@@ -112,8 +113,31 @@ Evidence (2026-10-10, Apple clang, arm64):
   registers (auto-vectorised integer code); there is no FP arithmetic or conversion (`fadd`, `fmul`, `fdiv`,
   `fcvt*`, `scvtf`, `ucvtf`) anywhere in the Falcon objects.
 
-Note: PQClean's `fips202.c` allocates each SHAKE context with `malloc` and calls `exit(111)` if that fails;
-a Falcon verify makes one such allocation.
+## Local patches
+
+### P1: `falcon/fips202.{c,h}`, SHAKE256 incremental context on the stack (2026-10-10)
+
+PQClean's `fips202.c` allocates each SHAKE context with `malloc` and calls `exit(111)` if that fails. Falcon reaches
+SHAKE only through `inner.h`'s `inner_shake256_*` macros, which map onto the **SHAKE256 incremental** API
+(`shake256incctx`); a Falcon verify (consensus) made one such allocation per signature, and keygen/sign several.
+A consensus path must not heap-allocate and exit, so `shake256incctx` now holds its state inline. Every changed line
+is marked `YCASH LOCAL PATCH`. The patch, in full:
+
+* `fips202.h`: `typedef struct { uint64_t *ctx; } shake256incctx;` becomes `typedef struct { uint64_t ctx[26]; }
+  shake256incctx;` (25 Keccak lanes + the position word = `PQC_SHAKEINCCTX_BYTES`, 208 bytes), plus a comment.
+* `fips202.c`: `shake256_inc_init` drops the `malloc`/`exit(111)` and only calls `keccak_inc_init(state->ctx)`;
+  `shake256_inc_ctx_clone` drops the `malloc`/`exit(111)` and keeps the `memcpy`; `shake256_inc_ctx_release` no
+  longer calls `free` (it is a no-op, `(void)state;`).
+
+The function names, signatures and the Keccak code are unchanged, so no Falcon file changes (`state->ctx` decays to
+the same `uint64_t *` the Keccak helpers take, and no Falcon code copies a context by value). The output is
+unchanged: `pq_crypto_tests` (golden vectors, the round-3 and PQClean padded KATs) pass byte-identically. The other
+contexts (`shake128*`, `shake256ctx`, `sha3_*`) still `malloc`; nothing in the node calls them (Falcon uses only the
+SHAKE256 incremental API, and nothing else includes `fips202.h`). The same patch is carried on the 6.20.0 line.
+
+`slhdsa/` needs no such patch: for SLH-DSA-SHA2-128s it runs only SHA-256/SHA-512 (`slh_sha2.c`, `sha2_256.c`,
+`sha2_512.c`; the SHAKE parameter sets and `sha3_*` are not vendored), and no vendored `slhdsa/` file contains
+`malloc`, `calloc`, `free`, `exit` or `abort` (grep, 2026-10-10); its state lives on the stack.
 
 ## Conformance data (tests)
 

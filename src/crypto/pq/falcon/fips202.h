@@ -24,8 +24,12 @@ typedef struct {
 } shake128ctx;
 
 // Context for incremental API
+/* YCASH LOCAL PATCH (src/crypto/pq/README.md, "Local patches"): the state is
+ * held inline (25 Keccak lanes + the absorb/squeeze position) instead of
+ * behind a malloc'd pointer, so shake256_inc_init() never allocates and never
+ * calls exit(). Falcon verification (consensus) uses this context. */
 typedef struct {
-    uint64_t *ctx;
+    uint64_t ctx[26];
 } shake256incctx;
 
 // Context for non-incremental API
