@@ -144,7 +144,8 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
         else if ((whichType == TX_MULTISIG) && (!fIsBareMultisigStd)) {
             reason = "bare-multisig";
             return false;
-        } else if (txout.IsDust(::minRelayTxFee)) {
+        } else if (whichType == TX_PQPKH ? txout.nValue < GetPQDustThreshold(txout, ::minRelayTxFee)
+                                         : txout.IsDust(::minRelayTxFee)) {
             reason = "dust";
             return false;
         }
@@ -241,6 +242,35 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     }
 
     return true;
+}
+
+size_t PQSpendInputSize(uint8_t scheme)
+{
+    if (!pq::IsKnownScheme(scheme)) return 0;
+    const size_t sigLen = pq::SigSize(scheme) + 1, pkLen = pq::PubKeySize(scheme);
+    size_t ss = 0, s = 0, p = 0;
+    for (size_t left = sigLen; left > 0; left -= std::min(left, pq::MAX_CHUNK), s++) {
+        const size_t c = std::min(left, pq::MAX_CHUNK);
+        ss += c + (c < OP_PUSHDATA1 ? 1 : c <= 0xff ? 2 : 3);
+    }
+    for (size_t left = pkLen; left > 0; left -= std::min(left, pq::MAX_CHUNK), p++) {
+        const size_t c = std::min(left, pq::MAX_CHUNK);
+        ss += c + (c < OP_PUSHDATA1 ? 1 : c <= 0xff ? 2 : 3);
+    }
+    ss += 2;                                      // <s> <p> as OP_n
+    // outpoint (36) + nSequence (4) + the scriptSig's compact size (3 above 252 bytes, else 1)
+    return 40 + (ss > 252 ? 3 : 1) + ss;
+}
+
+CAmount GetPQDustThreshold(const CTxOut& txout, const CFeeRate& minRelayTxFee)
+{
+    // As CTxOut::GetDustThreshold, with the input that spends a TX_PQPKH output (an SLH-DSA spend is
+    // 7,938 bytes of scriptSig, not the 148-byte P2PKH input that function assumes; review A F8).
+    CTxDestination dest;
+    if (!ExtractDestination(txout.scriptPubKey, dest) || !IsPQKeyDestination(dest))
+        return txout.GetDustThreshold(minRelayTxFee);
+    const size_t nSize = GetSerializeSize(txout, SER_DISK, 0) + PQSpendInputSize(std::get<CPQKeyID>(dest).scheme);
+    return 3 * minRelayTxFee.GetFee(nSize);
 }
 
 std::optional<uint8_t> PQScriptScheme(const CScript& scriptPubKey, txnouttype whichType)
