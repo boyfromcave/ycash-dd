@@ -75,6 +75,9 @@ BASE_SCRIPTS= [
     'vault_pq.py',
     'vault_slashing.py',
     'vault_bridge.py',
+    # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
+    # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
+    'vault_pq_wallet.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
