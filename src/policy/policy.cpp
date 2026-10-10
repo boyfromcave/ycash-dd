@@ -8,6 +8,7 @@
 
 #include "policy/policy.h"
 
+#include "crypto/pq/scheme.h"
 #include "main.h"
 #include "tinyformat.h"
 #include "util.h"
@@ -202,4 +203,43 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     }
 
     return true;
+}
+
+static unsigned int CountPQSigOps(const CScript& script)
+{
+    unsigned int n = 0;
+    CScript::const_iterator pc = script.begin();
+    opcodetype opcode;
+    while (pc < script.end() && script.GetOp(pc, opcode)) {
+        if (opcode == OP_CHECKPQSIG)
+            n += pq::SIGOP_COST;
+    }
+    return n;
+}
+
+unsigned int GetPQSigOpCount(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+{
+    if (tx.IsCoinBase())
+        return 0;
+    unsigned int n = 0;
+    for (const CTxIn& txin : tx.vin) {
+        const CScript& prevScript = mapInputs.GetOutputFor(txin).scriptPubKey;
+        n += CountPQSigOps(txin.scriptSig) + CountPQSigOps(prevScript);
+        if (prevScript.IsPayToScriptHash()) {
+            // the redeem script is the scriptSig's last push (as CScript::GetSigOpCount(scriptSig))
+            CScript::const_iterator pc = txin.scriptSig.begin();
+            opcodetype opcode;
+            std::vector<unsigned char> data;
+            bool pushOnly = true;
+            while (pc < txin.scriptSig.end()) {
+                if (!txin.scriptSig.GetOp(pc, opcode, data) || opcode > OP_16) {
+                    pushOnly = false;
+                    break;
+                }
+            }
+            if (pushOnly)
+                n += CountPQSigOps(CScript(data.begin(), data.end()));
+        }
+    }
+    return n;
 }
