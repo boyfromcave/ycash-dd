@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "ea81c888a8bd262f72700644a723e262b0e6962dd83c5b5377cff87a723ab880"
+    "sha256": "c08899a0f55ad10bc3624620bee2b7bfa604a101d40ad1a231b3b64b77d30fcd"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -1545,6 +1545,44 @@
         "optional": []
       }
     },
+    "set_leave": {
+      "wallet": true,
+      "signature": "set_leave \"setid\" ( \"memberkey\" )",
+      "params": [
+        {
+          "name": "setid",
+          "required": true,
+          "type": {
+            "type": "hash"
+          }
+        },
+        {
+          "name": "memberkey",
+          "required": false,
+          "type": {
+            "type": "key"
+          }
+        }
+      ],
+      "result": {
+        "type": "object",
+        "fields": {
+          "txid": {
+            "type": "hash"
+          },
+          "memberkey": {
+            "type": "key"
+          },
+          "exitheight": {
+            "type": "height"
+          },
+          "bondspendableat": {
+            "type": "height"
+          }
+        },
+        "optional": []
+      }
+    },
     "set_buildact": {
       "wallet": true,
       "signature": "set_buildact \"type\" {params}",
@@ -2081,7 +2119,7 @@
         "set_join",
         "set_sendact"
       ],
-      "provokedBy": "a join to a full set"
+      "provokedBy": "a join to a full set (a set a registered module governs may instead displace a member, below)"
     },
     {
       "code": -8,
