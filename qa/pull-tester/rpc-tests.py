@@ -82,6 +82,9 @@ BASE_SCRIPTS= [
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',
     'vault_pq_wallet_restore.py',
+    # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
+    # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -hdseedfile.
+    'wallet_pq_address.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',

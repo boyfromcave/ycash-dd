@@ -873,9 +873,10 @@ UniValue dumpwallet_impl(const UniValue& params, bool fDumpZKeys)
             const int64_t nTime = pwalletMain->mapPQKeyCreateTime.count(id) ? pwalletMain->mapPQKeyCreateTime[id] : 0;
             std::vector<unsigned char> idBytes(1, id.scheme);
             idBytes.insert(idBytes.end(), id.hash.begin(), id.hash.end());
-            file << strprintf("pqseed=%d:%u:%s %s # owner=%s addr=%s\n", (int)id.scheme, pqkey.Index(),
+            file << strprintf("pqseed=%d:%u:%s %s # owner=%s addr=%s yecaddr=%s\n", (int)id.scheme, pqkey.Index(),
                               HexStr(seed.begin(), seed.end()), EncodeDumpTime(nTime),
-                              HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp));
+                              HexStr(idBytes.begin(), idBytes.end()), yellowback::EncodeAddress(id, yp),
+                              keyIO.EncodeDestination(id));   // the plain-YEC sq…/tq…/rq… form (D-Q-20)
         }
         file << "\n";
     }
