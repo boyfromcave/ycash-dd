@@ -864,11 +864,11 @@ BOOST_AUTO_TEST_CASE(pq_valid_signatures)
 
 BOOST_AUTO_TEST_CASE(pq_hashtype_matrix_real)
 {
-    // Mirrors ycash6's case of the same name (consensus review B's hashtype matrix). OP_CHECKPQSIG
+    // Mirrors the 6.20.0 line's case of the same name (consensus review B's hashtype matrix). OP_CHECKPQSIG
     // computes the sighash through the C++ SignatureHash that OP_CHECKSIG uses; for a v4 (Sapling)
     // transaction that is ZIP-243, which accepts every hashtype byte. So with real keys and
     // signatures an undefined hashtype (0x00, 0x04, 0x41, 0xff) is consensus-valid and only
-    // STRICTENC (policy) rejects it, exactly as OP_CHECKSIG behaves. (ycash6's v5 / ZIP-244 half
+    // STRICTENC (policy) rejects it, exactly as OP_CHECKSIG behaves. (the 6.20.0 line's v5 / ZIP-244 half
     // has no counterpart here: v4.5.0 has no v5 transactions.)
     const CAmount amount = 5000;
     const unsigned int consensusFlags = PQ_FALCON_FLAGS;

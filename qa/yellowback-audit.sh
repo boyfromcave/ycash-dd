@@ -438,9 +438,19 @@ leg_attribution() {
   # upstream file it modifies that has copyright lines gains one; no Zcash or Bitcoin notice is ever
   # removed or altered. Files in the frozen set are exempt from the second rule (their bytes are gated;
   # an attribution line would itself be a frozen-set delta) and listed so the exemption stays visible.
-  local frozen f bad="" exempt=""
+  # Vendored third-party code (the quantum line's src/crypto/pq/falcon and src/crypto/pq/slhdsa, briefing
+  # rule 7) keeps its own notices unchanged; its licence is recorded in src/crypto/pq/README.md.
+  local frozen f d bad="" exempt="" vendored
   frozen=$(grep -v '^#' qa/yellowback-frozen-files.txt | grep -v '^$')
-  for f in $(git diff --name-only --diff-filter=A "$LEGACY...HEAD" -- src qa contrib zcutil | grep -E '\.(cpp|h|hpp|c|py|sh|rs)$' | grep -Ev '^src/(test/data|fuzzing)/|/fixtures/'); do
+  vendored='^src/crypto/pq/(falcon|slhdsa)/'
+  if git diff --name-only --diff-filter=A "$LEGACY...HEAD" -- src | grep -qE "$vendored"; then
+    for d in falcon slhdsa; do
+      grep -q "$d/LICENSE" src/crypto/pq/README.md 2>/dev/null || bad="$bad
+  vendored src/crypto/pq/$d without a licence record ($d/LICENSE) in src/crypto/pq/README.md"
+    done
+    echo "vendored files exempt from the added-file rule (own notices): $(git diff --name-only --diff-filter=A "$LEGACY...HEAD" -- src | grep -cE "$vendored") under src/crypto/pq/{falcon,slhdsa}/"
+  fi
+  for f in $(git diff --name-only --diff-filter=A "$LEGACY...HEAD" -- src qa contrib zcutil | grep -E '\.(cpp|h|hpp|c|py|sh|rs)$' | grep -Ev '^src/(test/data|fuzzing)/|/fixtures/' | grep -Ev "$vendored"); do
     grep -q 'The Ycash developers' "$f" || bad="$bad
   added without a Ycash line: $f"
   done
@@ -538,7 +548,9 @@ leg block "rule -> test tags (v2 plan §7)" leg_rule_tags
 leg block "rule -> test tags, v3 identifiers (v3 plan §7)" leg_rule_tags_v3
 [ "$interm" = 0 ] || leg block "rule -> test tags, in-term identifiers (in-term plan section 4)" leg_rule_tags_interm
 if [ "$mode" = upgrade ]; then
-  if [ "$interm" = 1 ]; then
+  if [ "$quantum" = 1 ]; then
+    leg block "RPC contract = the workspace generator's quantum-line output (rpcversion 7)" leg_contract_generator
+  elif [ "$interm" = 1 ]; then
     leg block "RPC contract = the workspace generator's in-term-line output (rpcversion 6)" leg_contract_generator
   else
     leg block "RPC contract = the workspace generator's upgrade-line output (rpcversion 5)" leg_contract_generator

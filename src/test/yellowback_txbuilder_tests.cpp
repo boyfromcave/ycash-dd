@@ -15,6 +15,7 @@
 
 #include "yellowback/attest.h"
 #include "yellowback/bundle.h"
+#include "yellowback/index.h"
 #include "yellowback/math.h"
 #include "yellowback/params.h"
 #include "yellowback/payload.h"
@@ -1324,6 +1325,29 @@ BOOST_AUTO_TEST_CASE(outpoint_selector_is_the_serialised_outpoint)
     BOOST_CHECK(std::vector<unsigned char>(sel.begin(), sel.begin() + 32) == std::vector<unsigned char>(o.hash.begin(), o.hash.end()));
     BOOST_CHECK_EQUAL((int)sel[32], 7);
     BOOST_CHECK_EQUAL((int)sel[33], 0);
+}
+
+// Review B (Y-B sweep): the size-priced fee of a YED transaction with a Falcon token input obeys -maxtxfee as
+// CWallet::CreateTransaction does: capped, never refused, never below the flat fee.
+BOOST_AUTO_TEST_CASE(yed_network_fee_caps_at_maxtxfee)
+{
+    const CFeeRate savedRate = pqFeeRate;
+    const CAmount savedMax = maxTxFee;
+    const CScript falcon = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256S("11")));
+    const CScript p2pkh = GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, 0x22))));
+    pqFeeRate = CFeeRate(COIN / 100);                                       // -pqfeerate=0.01
+    const size_t bytes = 1000 + 150 + PQSpendInputSize(pq::SCHEME_FN_DSA_512);
+    const CAmount uncapped = pqFeeRate.GetFee(bytes);
+    BOOST_CHECK_GT(uncapped, COIN / 50);
+    maxTxFee = DEFAULT_TRANSACTION_MAXFEE;                                   // 0.1 YEC: not binding
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), uncapped);
+    maxTxFee = COIN / 50;                                                   // -maxtxfee=0.02: capped
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon, p2pkh}, std::nullopt), COIN / 50);
+    maxTxFee = 1;                                                           // below the flat fee: the flat fee
+    BOOST_CHECK_EQUAL(YedNetworkFee({falcon}, std::nullopt), g_yellowbackFee);
+    BOOST_CHECK_EQUAL(YedNetworkFee({p2pkh}, std::nullopt), g_yellowbackFee); // no PQ input: never priced by size
+    pqFeeRate = savedRate;
+    maxTxFee = savedMax;
 }
 
 BOOST_AUTO_TEST_SUITE_END()
