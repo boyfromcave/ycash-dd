@@ -612,6 +612,7 @@ public:
         UNKNOWN = 0,
         P2PKH = 1,
         P2SH = 2,
+        P2PQPKH = 3, //!< TX_PQPKH (quantum spec §2.1); index-only, no consensus meaning (D-Q-20 SQ task)
     };
     bool IsPayToPublicKeyHash() const;
     bool IsPayToScriptHash() const;
