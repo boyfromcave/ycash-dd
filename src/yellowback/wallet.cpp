@@ -7,7 +7,9 @@
 #include "init.h"
 #include "script/ismine.h"
 #include "streams.h"
+#include "policy/policy.h"
 #include "util.h"
+#include "utilmoneystr.h"
 #include "wallet/wallet.h"
 #include "main.h"
 #include "vault/template.h"
@@ -99,15 +101,29 @@ bool YellowbackWallet::Commit(CWalletTx& wtx, std::optional<std::reference_wrapp
         known = wallet->mapWallet.count(wtx.GetHash()) != 0;
     }
     // D-Q-23 (b), D-Q-23a: a Yellowback transaction's size-priced network fee is capped at YedMaxTxFee() =
-    // max(-maxtxfee, $2 at the attested price), which may exceed -maxtxfee; the inherited broadcast would then
-    // refuse the wallet's own transaction as an "absurdly high fee" (AcceptToMemoryPool's fRejectAbsurdFee,
-    // which compares with -maxtxfee alone). The builder bounded the fee deliberately, so the commit records the
-    // transaction without the inherited broadcast and submits it itself without that check; relay to peers is
-    // the same RelayWalletTransaction the inherited path uses.
+    // min(max(-maxtxfee, $2 at the attested price), -yellowbackmaxtxfee), which may exceed -maxtxfee; the inherited
+    // broadcast would then refuse the wallet's own transaction as an "absurdly high fee" (AcceptToMemoryPool's
+    // fRejectAbsurdFee, which compares with -maxtxfee alone). So the commit records the transaction without the
+    // inherited broadcast and submits it itself without that check -- having first enforced the cap that check
+    // stood for (review M-1); relay to peers is the same RelayWalletTransaction the inherited path uses.
+    AssertLockHeld(cs_main);
+    if (std::optional<CAmount> over = YedFeeOverCap(wtx)) {
+        LogPrintf("yellowback: CommitTransaction(): %s pays a network fee of %s, above the cap %s; not committed\n",
+                  wtx.GetHash().ToString(), FormatMoney(over.value()), FormatMoney(YedMaxTxFee()));
+        return false;
+    }
     const bool broadcast = wallet->GetBroadcastTransactions();
-    wallet->SetBroadcastTransactions(false);
-    bool ok = wallet->CommitTransaction(wtx, reservekey);
-    wallet->SetBroadcastTransactions(broadcast);
+    bool ok;
+    {
+        // review A-3: the wallet's broadcast flag comes back however CommitTransaction leaves (a throw included)
+        struct BroadcastRestore {
+            CWallet* w;
+            bool v;
+            ~BroadcastRestore() { w->SetBroadcastTransactions(v); }
+        } restore{wallet, broadcast};
+        wallet->SetBroadcastTransactions(false);
+        ok = wallet->CommitTransaction(wtx, reservekey);
+    }
     if (ok && broadcast) {
         ok = wtx.AcceptToMemoryPool(false, false);
         if (ok) wtx.RelayWalletTransaction();
