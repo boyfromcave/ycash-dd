@@ -691,6 +691,15 @@ class Walk:
         return (bytes([0x63]) + ym.pq_owner_slot(client33)[:-1] + bytes([0xc2, 0x69]) + ym.push(server_pk) + bytes([0xac, 0x67])
                 + ym.push_int(refund) + bytes([0xb1, 0x75]) + ym.pq_owner_slot(client33) + bytes([0x68]))
 
+    CHANNEL_CENTS = 1_000             # what the walk puts into a channel; the rest of the coin returns to node 0
+
+    def channel_fund(self, coin, spk):
+        """A TRANSFER of CHANNEL_CENTS of node 0's ``coin`` into the channel ``spk`` (vout 0), the rest back to a node-0 holder."""
+        outs, assign = [(spk, 10_000)], [(0, min(self.CHANNEL_CENTS, coin["cents"]))]
+        if coin["cents"] > self.CHANNEL_CENTS:
+            outs.append((self.holder_script(self.node(USER)), 10_000)); assign.append((1, coin["cents"] - self.CHANNEL_CENTS))
+        return self.raw_transfer(USER, [(coin["txid"], coin["vout"], coin["valueZat"])], outs, assign)
+
     def s_pq(self):
         falcon = self.falcon_active()
         self.step("pq", "post-quantum owners and holders: PQ vault owners (YED and the primitive), PQ holder transfers, the hybrid channel "
@@ -770,15 +779,14 @@ class Walk:
             client = new_pq_owner("devnet-walk-channel-client")
             spk = self.channel_script(client, server_pk, refund)
             c = self.yed_coin(USER, ("p2pkh", "slh", "falcon"))
-            hex1 = self.raw_transfer(USER, [(c["txid"], c["vout"], c["valueZat"])], [(spk, 10_000)], [(0, c["cents"])])
+            hex1 = self.channel_fund(c, spk)
             t1 = self.call(USER, "sendrawtransaction", hex1)
             self.wait_mempool(t1); self.mine(1)
             client_addr = ym.base58check_encode(bytes.fromhex(self.yed_params()["pqAddressVersion"]) + client)
             rows = self.node(USER).yed_listtokens([client_addr])
-            self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [c["cents"]],
-                    "TRANSFER %s into a hybrid channel (SLH-DSA client, EC server): type pqchannel, %d cents listed under the client's address" % (t1[:16], c["cents"]))
-            dest = self.node(CLAIMANT).yed_getnewaddress()
-            hex2 = self.raw_transfer(USER, [(t1, 0, 10_000)], [(_spk_of_address(dest), 10_000)], [(0, c["cents"])])
+            self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [min(self.CHANNEL_CENTS, c["cents"])],
+                    "TRANSFER %s into a hybrid channel (SLH-DSA client, EC server): type pqchannel, %d cents listed under the client's address" % (t1[:16], min(self.CHANNEL_CENTS, c["cents"])))
+            hex2 = self.raw_transfer(USER, [(t1, 0, 10_000)], [(self.holder_script(self.node(USER)), 10_000)], [(0, min(self.CHANNEL_CENTS, c["cents"]))])
             tx = CTransaction(); tx.deserialize(BytesIO(hex_str_to_bytes(hex2)))
             sighash = SignatureHash(CScript(spk), tx, 0, SIGHASH_ALL, 10_000, SIGNING_BRANCH_ID)[0]
             key = CECKey(); key.set_secretbytes(wif_to_secret(self.node(USER).dumpprivkey(server_addr))); key.set_compressed(True)
@@ -794,19 +802,19 @@ class Walk:
             # Falcon active: TOK-PQ admits a channel only with a scheme-2 client; an SLH-DSA client is bad-yed-holder everywhere
             slh = hex_str_to_bytes(self.node(USER).vault_getnewowner(1)["owner"])
             c = self.yed_coin(USER, ("falcon", "p2pkh", "slh"))
-            bad = self.raw_transfer(USER, [(c["txid"], c["vout"], c["valueZat"])], [(self.channel_script(slh, server_pk, refund), 10_000)], [(0, c["cents"])])
+            bad = self.channel_fund(c, self.channel_script(slh, server_pk, refund))
             for i in self.yed_nodes:
                 self.fails(i, "sendrawtransaction", bad, expect="bad-yed-holder")
             fal = self.node(USER).yed_validateaddress(self.node(USER).yed_getnewaddress("pq"))
             client = hex_str_to_bytes(fal["keyid"])
-            good = self.raw_transfer(USER, [(c["txid"], c["vout"], c["valueZat"])], [(self.channel_script(client, server_pk, refund), 10_000)], [(0, c["cents"])])
+            good = self.channel_fund(c, self.channel_script(client, server_pk, refund))
             t1 = self.call(USER, "sendrawtransaction", good)
             self.wait_mempool(t1); self.mine(1)
             rows = self.node(USER).yed_listtokens([fal["address"]])
-            self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [c["cents"]],
-                    "TRANSFER %s into a hybrid channel with a Falcon client: type pqchannel, %d cents listed under the client's address (TOK-PQ admits it)" % (t1[:16], c["cents"]))
+            self.ok(self.node(USER).getrawtransaction(t1, 1)["vout"][0]["scriptPubKey"]["type"] == "pqchannel" and [r["cents"] for r in rows] == [min(self.CHANNEL_CENTS, c["cents"])],
+                    "TRANSFER %s into a hybrid channel with a Falcon client: type pqchannel, %d cents listed under the client's address (TOK-PQ admits it)" % (t1[:16], min(self.CHANNEL_CENTS, c["cents"])))
             self.note("the channel is not closed here: the Python framework has no Falcon signer and the node wallet does not sign TX_PQCHANNEL "
-                      "(sign.cpp: 'signed by the channel's own builders'); its %d cents stay in the channel on this devnet" % c["cents"])
+                      "(sign.cpp: 'signed by the channel's own builders'); its %d cents stay in the channel on this devnet" % min(self.CHANNEL_CENTS, c["cents"]))
             self.evidence("pq_channel", {"fund": t1, "refusedSlhClient": True, "client": "falcon"})
         self.statehashes("pq")
 
@@ -1231,6 +1239,14 @@ class Walk:
         spk = _spk_of_address(self.node(to_node).yed_getnewaddress("p2pkh"))
         return self.raw_transfer(USER, [(c["txid"], c["vout"], c["valueZat"])], [(spk, 10_000)], [(0, c["cents"])])
 
+    def ensure_yed(self, cents=2_000):
+        """Node 0 holds a confirmed YED coin of at least ``cents`` (the claims and the bridge steps may have spent it): mint one."""
+        if any(c["cents"] >= cents and not c.get("spentUnconfirmed") for c in self.node(USER).yed_listunspent()): return
+        self.fund_user()
+        self.note("node 0 holds no YED coin of %d cents: a mint first" % cents)
+        self.two_step(USER, "yed_mint", MINT_CENTS, LOCK_BLOCKS, "", "")
+        self.mine(1)
+
     def tok_pq_rows(self, label):
         """From the Falcon height: P2PKH holders stop receiving (wallet and every mempool refuse), Falcon holders continue."""
         self.ok(self.falcon_active() and self.pq_params().get("schemes") == [1, 2], "%s: params.pq.falconActive, schemes [1, 2]" % label)
@@ -1251,6 +1267,7 @@ class Walk:
             self.note("SKIP: no Falcon height on this devnet (`up --no-falcon`); `up --falcon-height N` walks the activation")
             self.summary["steps"]["falcon"] = "SKIP: no -pqfalconheight"
             return
+        self.ensure_yed()
         if h <= self.tip() + 2:
             self.note("Falcon has been active since height %d (the default devnet mirrors mainnet: Falcon live with the vault upgrade); "
                       "the activation and the reorg across it need `up --falcon-height N` with N above this step's start height (%d)" % (h, self.tip()))
@@ -1262,6 +1279,11 @@ class Walk:
             return
         if h - self.tip() > 400:
             raise WalkFailure("the Falcon height %d is %d blocks ahead; pick N within 400 blocks of this step (tip %d)" % (h, h - self.tip(), self.tip()))
+        if self.tip() > h - 2:
+            raise WalkFailure("the Falcon height %d came too close (tip %d after topping node 0 up): pick N at least 10 above this step's start" % (h, self.tip()))
+        # a reserve for after the reorg: every coin node 0 touches from here on is replayed from the mempool then
+        reserve = self.call(USER, "yed_send", self.node(HOLDER).yed_getnewaddress("p2pkh"), 400, keys=["txid"])["txid"]
+        self.wait_mempool(reserve); self.mine(1, quiet=True)
         # before: P2PKH holders still receive
         self.mine_to(h - 2)
         self.ok(not self.falcon_active(), "tip %d: Falcon inactive for the next block (%d < falconHeight %d)" % (self.tip(), self.tip() + 1, h))
@@ -1298,7 +1320,7 @@ class Walk:
         pools = {i: sorted(self.node(i).getrawmempool()) for i in self.yed_nodes}
         self.out("    = mempools after the reorg: %s" % jdump({i: [t[:12] for t in v] for i, v in pools.items()}, 900))
         self.ok(t1 in self.node(USER).getrawmempool(), "the pre-Falcon P2PKH transfer %s is back in the mempool (valid for height %d)" % (t1[:16], h - 1))
-        t2 = self.call(USER, "yed_send", self.node(CLAIMANT).yed_getnewaddress("p2pkh"), 300, keys=["txid"])["txid"]
+        t2 = self.call(HOLDER, "yed_send", self.node(CLAIMANT).yed_getnewaddress("p2pkh"), 300, keys=["txid"])["txid"]
         self.wait_mempool(t2)
         self.note("below the Falcon height again a new P2PKH transfer %s is accepted (TOK-PQ follows the tip)" % t2[:16])
         self.mine(1)
