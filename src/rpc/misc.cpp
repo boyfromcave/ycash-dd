@@ -17,9 +17,9 @@
 #ifdef ENABLE_WALLET
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
+#endif
 #include "yellowback/address.h"
 #include "yellowback/params.h"
-#endif
 
 #include <stdint.h>
 #include <variant>
