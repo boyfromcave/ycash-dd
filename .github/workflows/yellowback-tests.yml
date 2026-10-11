@@ -92,7 +92,7 @@ env:
   # as passing in Phase 0 are in doc/yellowback.md "Build and test baseline". getblocktemplate_proposals,
   # getblocktemplate_longpoll and invalidateblock abort ycashd at the pin (a stock regtest node
   # activates no Ycash upgrade) and p2p-acceptblock expects Bitcoin's unrequested-block behaviour.
-  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend
+  STOCK_BASELINE: mempool_reorg mempool_tx_expiry reorg_limit reindex wallet rawtransactions txn_doublespend zmq_concurrent_test
   # yellowback_stratum drives the real pool software, boyfromcave/yolo (Rust), and yellowback_chainviz
   # the chain observer, boyfromcave/chain-viz (Rust), each built --locked at a commit by the sidecars
   # job (bump by PR, audit I-5). Without a binary the script SKIPs, so the functional job refuses to
