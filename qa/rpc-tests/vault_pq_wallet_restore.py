@@ -18,7 +18,9 @@ wallet.dat backup taken before any PQ key was issued: it holds the HD seed and t
 - node 2 starts on the backup with -rescan: vault_list flags both vaults as its own, listunspent holds the
   three PQPKH coins, and its next vault_getnewowner of each scheme is the index after the highest key seen
   on chain (SLH-DSA 31, node 1's next; Falcon 25, issued by node 1 but never used), and it signs the owner
-  spend of vault 30.
+  spend of vault 30;
+- importwallet of another seed's pqseed lines at index 1000 and 0xfffffffe leaves the issued index alone
+  (quantum review F-1: the keys are stored with PQ_INDEX_NONE).
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_wallet_restore.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -148,6 +150,19 @@ class VaultPQWalletRestoreTest(BitcoinTestFramework):
         assert nxt2['owner'] not in {k['owner'] for k in slh}
         assert_equal(n2.vault_getnewowner(FALCON)['owner'], fal[25]['owner'])
         assert_equal(n2.vault_getnewowner(FALCON)['owner'], n1.vault_getnewowner(FALCON)['owner'])   # index 26
+
+        print('importwallet of another seed\'s keys at index 1000 and 0xfffffffe moves nothing (quantum review F-1)')
+        dump = os.path.join(self.options.tmpdir, 'export', 'foreignpq')
+        with open(dump, 'w') as f:
+            f.write('# foreign post-quantum keys\n')
+            for index, fill in ((1000, 'a1'), (0xfffffffe, 'b2')):
+                f.write('pqseed=1:%d:%s 2026-10-10T00:00:00Z # foreign\n' % (index, fill * 48))
+        before = n2.vault_getnewowner(SLH)
+        n2.importwallet(dump)
+        after = n2.vault_getnewowner(SLH)                              # still issuing: the index is one past before's
+        n1.vault_getnewowner(SLH)
+        assert_equal(after['owner'], n1.vault_getnewowner(SLH)['owner'])
+        assert before['owner'] != after['owner']
 
         print('the restored wallet signs the owner spend of the vault beyond the lookahead')
         r = n2.vault_ownerspend(v30, n2.getnewaddress())

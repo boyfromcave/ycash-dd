@@ -435,13 +435,24 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForPQKey(o0), 1000)));
     b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForPQKey(CPQKeyID(1, uint256S("0x99"))), 1000)));
     BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
-    // an imported key of another seed (its stored index 10 is that seed's) never moves B's index
-    CPQKey foreign;
-    const std::vector<unsigned char> other(48, 0x5a);
-    BOOST_REQUIRE(foreign.Set(1, CPQKey::Secret(other.begin(), other.end()), 10));
-    BOOST_REQUIRE(b.AddPQKey(foreign));
-    b.MarkPQKeyUsed(foreign.GetID());
-    b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForPQKey(foreign.GetID()), 1000)));
+    // Quantum review F-1: a key of another seed stored with its foreign index (1000; 0xfffffffe, one below
+    // PQ_INDEX_NONE) never moves B's index: not by MarkPQKeyUsed, not when seen on chain.
+    for (uint32_t foreignIndex : {1000U, 0xfffffffeU}) {
+        CPQKey foreign;
+        std::vector<unsigned char> other(48, 0x5a);
+        other[0] = (unsigned char)(foreignIndex & 0xff);
+        BOOST_REQUIRE(foreign.Set(1, CPQKey::Secret(other.begin(), other.end()), foreignIndex));
+        BOOST_CHECK(!b.IsOwnPQKey(foreign));
+        BOOST_REQUIRE(b.AddPQKey(foreign));
+        b.MarkPQKeyUsed(foreign.GetID());
+        b.NotePQKeysUsed(CTransaction(SpendTx(GetScriptForPQKey(foreign.GetID()), 1000)));
+        BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
+    }
+    // even an own key at 0xfffffffe cannot push the index to PQ_INDEX_NONE (GetNewPQKey would fail for good)
+    const CPQKey ownTop = Derived(1, 0xfffffffeU);
+    BOOST_CHECK(b.IsOwnPQKey(ownTop));
+    BOOST_REQUIRE(b.AddPQKey(ownTop));
+    b.MarkPQKeyUsed(ownTop.GetID());
     BOOST_CHECK_EQUAL(b.mapPQIssued[1], 3U);
 
     CPQKeyID next, nextF;
@@ -458,9 +469,14 @@ BOOST_AUTO_TEST_CASE(pq_key_lookahead_restore)
     LOCK(c.cs_wallet);
     BOOST_REQUIRE(c.SetHDSeed(HDSeed(raw)));
     BOOST_REQUIRE(c.LoadPQKey(Derived(1, 0), 0) && c.LoadPQKey(Derived(1, 1), 0));
+    CPQKey legacyForeign;                                    // a foreign key a wallet stored with its index before F-1
+    const std::vector<unsigned char> lf(48, 0x6b);
+    BOOST_REQUIRE(legacyForeign.Set(1, CPQKey::Secret(lf.begin(), lf.end()), 500));
+    BOOST_REQUIRE(c.LoadPQKey(legacyForeign, 0));
     CPQKeyID cn;
     BOOST_REQUIRE(c.GetNewPQKey(1, cn));
-    BOOST_CHECK(cn == Derived(1, 2).GetID());
+    BOOST_CHECK(cn == Derived(1, 2).GetID());              // one past the highest own index, not 0, not 501
+    BOOST_CHECK_EQUAL(c.mapPQIssued[1], 3U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

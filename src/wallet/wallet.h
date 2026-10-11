@@ -1430,11 +1430,17 @@ public:
      * (NotePQKeysUsed, from AddToWalletIfInvolvingMe), which moves the lookahead past it. TopUpPQKeys needs an
      * unlocked wallet with an HD seed (it runs at load, at walletpassphrase and after each issue or mark).
      * The derivation (DerivePQSeed) is unchanged; the keys are ordinary "pqkey"/"cpqkey" records.
+     * A rescan while an encrypted wallet is locked marks keys used but cannot derive the lookahead past them:
+     * when more than PQ_KEY_LOOKAHEAD keys of a scheme were used, rescan again after walletpassphrase.
      */
     void TopUpPQKeys(std::optional<uint8_t> scheme = std::nullopt);
     void MarkPQKeyUsed(const CPQKeyID& id);
     void NotePQKeysUsed(const CTransaction& tx);
     uint32_t PQIssued(uint8_t scheme) const;
+    //! True when key was derived from this wallet's HD seed at its stored index (DerivePQSeed).
+    bool IsOwnPQKey(const CPQKey& key) const;
+    //! Writes the "pqissued" record a wallet without one starts from: one past its highest own-seed index.
+    void SeedPQIssued(uint8_t scheme);
     bool SetPQIssued(uint8_t scheme, uint32_t next);
     bool LoadPQIssued(uint8_t scheme, uint32_t next);
     //! Adds a PQ key to the store and saves it to disk.

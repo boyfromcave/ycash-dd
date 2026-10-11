@@ -409,8 +409,9 @@ bool CWallet::GetNewPQKey(uint8_t scheme, CPQKeyID& idOut)
     const RawHDSeed raw = seed.RawSeed();
     // Review B I-2: the next index is the next one *issued* (or seen in use, MarkPQKeyUsed), not the next one
     // held: the wallet holds PQ_KEY_LOOKAHEAD keys beyond it (TopUpPQKeys) and hands those out in order.
+    SeedPQIssued(scheme);
     const uint32_t index = PQIssued(scheme);
-    if (index == CPQKey::PQ_INDEX_NONE)
+    if (index >= CPQKey::PQ_INDEX_NONE - 1)   // index + 1 must stay a real index
         return false;
     CPQKey key;
     if (!key.Set(scheme, DerivePQSeed(raw.data(), raw.size(), scheme, index), index))
@@ -422,6 +423,35 @@ bool CWallet::GetNewPQKey(uint8_t scheme, CPQKeyID& idOut)
     TopUpPQKeys(scheme);
     idOut = key.GetID();
     return true;
+}
+
+bool CWallet::IsOwnPQKey(const CPQKey& key) const
+{
+    AssertLockHeld(cs_wallet);
+    if (key.Index() == CPQKey::PQ_INDEX_NONE)
+        return false;
+    HDSeed seed;
+    if (!GetHDSeed(seed))
+        return false;
+    const RawHDSeed raw = seed.RawSeed();
+    return key.Seed() == DerivePQSeed(raw.data(), raw.size(), key.Scheme(), key.Index());
+}
+
+void CWallet::SeedPQIssued(uint8_t scheme)
+{
+    AssertLockHeld(cs_wallet);
+    if (mapPQIssued.count(scheme) || IsLocked())
+        return;
+    // A wallet without the "pqissued" record predates the lookahead: continue one past the highest index of a
+    // key of this wallet's own seed it holds (never reissue index 0; ignore an imported key's foreign index).
+    uint32_t next = 0;
+    for (const CPQKeyID& id : GetPQKeys()) {
+        CPQKey key;
+        if (id.scheme != scheme || !GetPQKey(id, key) || !IsOwnPQKey(key))
+            continue;
+        if (key.Index() + 1 > next) next = key.Index() + 1;
+    }
+    SetPQIssued(scheme, next);
 }
 
 uint32_t CWallet::PQIssued(uint8_t scheme) const
@@ -471,9 +501,8 @@ void CWallet::TopUpPQKeys(std::optional<uint8_t> only)
     for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
         if (only.has_value() && only.value() != scheme)
             continue;
+        SeedPQIssued(scheme);                                        // the record the lookahead starts from
         const uint32_t issued = PQIssued(scheme);
-        if (!mapPQIssued.count(scheme) && !SetPQIssued(scheme, issued))   // the record the lookahead starts from
-            return;
         const uint32_t end = issued > CPQKey::PQ_INDEX_NONE - PQ_KEY_LOOKAHEAD ? CPQKey::PQ_INDEX_NONE : issued + PQ_KEY_LOOKAHEAD;
         for (uint32_t index = issued; index < end; index++) {
             if (held.count(std::make_pair(scheme, index)))
@@ -492,20 +521,19 @@ void CWallet::MarkPQKeyUsed(const CPQKeyID& id)
     AssertLockHeld(cs_wallet);
     std::vector<unsigned char> pk;
     uint32_t index;
-    if (!GetPQKeyInfo(id, pk, index) || index == CPQKey::PQ_INDEX_NONE)
+    // index + 1 must stay a real index (never PQ_INDEX_NONE, which would stop GetNewPQKey for good)
+    if (!GetPQKeyInfo(id, pk, index) || index >= CPQKey::PQ_INDEX_NONE - 1)
         return;
     if (index < PQIssued(id.scheme))
         return;
-    // Only a key of this wallet's own seed moves the index: an imported key carries the index it had in the
-    // wallet it came from (importwallet's pqseed lines), which says nothing about this seed's keys. Checked
-    // when the wallet can read the secret (unlocked); a locked wallet trusts the stored index.
+    // Only a key of this wallet's own seed moves the index (quantum review F-1): a key from another seed
+    // says nothing about this seed's keys. importwallet stores such a key with PQ_INDEX_NONE; the check here
+    // also covers a foreign key a wallet stored with its index before that rule, whenever the wallet can read
+    // the secret. A locked wallet trusts the stored index (its keys come from its own derivation or an import
+    // made while unlocked).
     if (!IsLocked()) {
-        HDSeed seed;
         CPQKey key;
-        if (!GetHDSeed(seed) || !GetPQKey(id, key))
-            return;
-        const RawHDSeed raw = seed.RawSeed();
-        if (key.Seed() != DerivePQSeed(raw.data(), raw.size(), id.scheme, index))
+        if (!GetPQKey(id, key) || !IsOwnPQKey(key))
             return;
     }
     if (!SetPQIssued(id.scheme, index + 1))
