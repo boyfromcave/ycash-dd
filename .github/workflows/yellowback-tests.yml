@@ -101,7 +101,7 @@ env:
   YOLO_REPO: boyfromcave/yolo
   YOLO_COMMIT: dc9c57a671e37821c21932b4859f9d28800d27e9
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: b4eb44b568555ae9482a7245f6c9514f9bb10fc3
+  CHAINVIZ_COMMIT: dfbef2b76dc6825186ed12919b6f37c97949ca3b  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
   # The lightwalletd fork the nightly drives (its upgrade/vault branch: rpcversion 5, the vault views),
   # at a commit (audit E-6), and the Go toolchain it builds with, checked against go.dev's sha256.
   LWD_REPO: boyfromcave/lightwalletd
