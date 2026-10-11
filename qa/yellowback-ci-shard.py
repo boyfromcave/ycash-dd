@@ -67,6 +67,7 @@ WEIGHTS = {
     "reorg_limit": 40,
     "reindex": 40,
     "txn_doublespend": 30,
+    "zmq_concurrent_test": 100,         # 45 s stress + the window build (2026-10-11, M-series laptop)
 }
 DEFAULT = 240
 
