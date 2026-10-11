@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2015 The Bitcoin Core developers
 // Copyright (c) 2016-2018 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -15,6 +16,10 @@
 
 #include <vector>
 #include <string>
+
+/** The plain-YEC PQ address version (D-Q-20) of a network ID: 4dd9 "sq…" main, 4f61 "tq…" test, 4c51 "rq…"
+ *  regtest; empty for any other network. */
+std::vector<unsigned char> PlainPQAddressVersion(const std::string& networkID);
 
 class KeyIO {
 private:

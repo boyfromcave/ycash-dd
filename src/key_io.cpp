@@ -20,6 +20,14 @@
 #include <algorithm>
 #include <variant>
 
+std::vector<unsigned char> PlainPQAddressVersion(const std::string& networkID)
+{
+    if (networkID == "main") return {0x4D, 0xD9};
+    if (networkID == "test") return {0x4F, 0x61};
+    if (networkID == "regtest") return {0x4C, 0x51};
+    return {};
+}
+
 namespace
 {
 class DestinationEncoder
@@ -53,12 +61,8 @@ public:
     {
         const CChainParams* chain = dynamic_cast<const CChainParams*>(&keyConstants);
         if (!chain || !pq::IsKnownScheme(id.scheme)) return {};
-        const std::string net = chain->NetworkIDString();
-        std::vector<unsigned char> data;
-        if (net == "main") data = {0x4D, 0xD9};
-        else if (net == "test") data = {0x4F, 0x61};
-        else if (net == "regtest") data = {0x4C, 0x51};
-        else return {};
+        std::vector<unsigned char> data = PlainPQAddressVersion(chain->NetworkIDString());
+        if (data.empty()) return {};
         data.push_back(id.scheme);
         data.insert(data.end(), id.hash.begin(), id.hash.end());
         return EncodeBase58Check(data);
