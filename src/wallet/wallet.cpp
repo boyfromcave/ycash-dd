@@ -4902,7 +4902,7 @@ void CWallet::ReacceptWalletTransactions()
     // Try to add wallet transactions to memory pool
     for (std::pair<const int64_t, CWalletTx*>& item : mapSorted) {
         CWalletTx& wtx = *(item.second);
-        wtx.AcceptToMemoryPool(false);
+        wtx.AcceptToMemoryPool(false, !PQFeeWithinCap(wtx));     // D-Q-26, as CommitTransaction
     }
 }
 
@@ -5945,9 +5945,10 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
 
                 CAmount nFeeNeeded = GetMinimumFee(nBytes, nTxConfirmTarget, mempool);
                 // quantum plan §4.5, D-Q-23 (b): a transaction with a PQ input pays max(DEFAULT_FEE, the plain PQ $/KB
-                // rate at the attested price x size) (-pqfeerate without a price; policy.h AttestedFeePolicy), capped at -maxtxfee.
+                // rate at the attested price x size) (-pqfeerate without a price; policy.h AttestedFeePolicy), capped at
+                // PQMaxTxFee() = min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee) (owner D-Q-26: the Yellowback cap).
                 if (fPQInput)
-                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(DEFAULT_FEE, nBytes)), maxTxFee);
+                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(DEFAULT_FEE, nBytes)), PQMaxTxFee());
 
                 // If we made it here and we aren't even able to meet the relay fee on the next pass, give up
                 // because we must be at the maximum allowed fee.
@@ -6009,7 +6010,9 @@ bool CWallet::CommitTransaction(CWalletTx& wtxNew, std::optional<std::reference_
         if (fBroadcastTransactions)
         {
             // Broadcast
-            if (!wtxNew.AcceptToMemoryPool(false))
+            // D-Q-26: a PQ-input transaction within PQMaxTxFee() may pay more than -maxtxfee; its own wallet submits it
+            // without the absurd-fee check (sendrawtransaction from outside keeps it)
+            if (!wtxNew.AcceptToMemoryPool(false, !PQFeeWithinCap(wtxNew)))
             {
                 // This must not fail. The transaction has already been signed and recorded.
                 LogPrintf("CommitTransaction(): Error: Transaction not valid\n");

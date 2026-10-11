@@ -11,6 +11,7 @@
 #include "arith_uint256.h"
 #include "crypto/pq/scheme.h"
 #include "main.h"
+#include "script/sign.h"
 #include "tinyformat.h"
 #include "util.h"
 #include "utilstrencodings.h"
@@ -429,6 +430,11 @@ CAmount YedMaxTxFee()
     return p.yedMaxTxFeeZat > 0 ? std::min(cap, p.yedMaxTxFeeZat) : cap;
 }
 
+CAmount PQMaxTxFee()
+{
+    return YedMaxTxFee();
+}
+
 CAmount PQSizeFee(CAmount floor, size_t nBytes)
 {
     return std::max(floor, PlainPQFeeRate().GetFee(nBytes));
@@ -454,4 +460,18 @@ std::optional<CAmount> YedFeeOverCap(const CTransaction& tx)
     if (!view.HaveInputs(tx)) return std::nullopt;      // the mempool's own checks decide (missing inputs)
     const CAmount fee = view.GetValueIn(tx) - tx.GetValueOut();
     return fee > YedMaxTxFee() ? std::optional<CAmount>(fee) : std::nullopt;
+}
+
+bool PQFeeWithinCap(const CTransaction& tx)
+{
+    AssertLockHeld(cs_main);
+    LOCK(mempool.cs);
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    CCoinsViewCache view(&viewMemPool);
+    if (!view.HaveInputs(tx)) return false;
+    bool pq = false;
+    for (const CTxIn& in : tx.vin) {
+        if (IsPQInputScript(view.GetOutputFor(in).scriptPubKey)) { pq = true; break; }
+    }
+    return pq && view.GetValueIn(tx) - tx.GetValueOut() <= PQMaxTxFee();
 }
