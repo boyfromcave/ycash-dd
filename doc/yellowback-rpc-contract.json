@@ -76,7 +76,7 @@
       "raisedBy": [
         "yed_registerattestor"
       ],
-      "when": "bondYec < BOND_MIN (10 YEC on regtest): register with 9"
+      "when": "bondYec < the module's floor for a join in the next block (params.attest.bondMinZat, D-Q-28; 10 YEC on regtest before arming): register with 9"
     },
     "bond-locked": {
       "raisedBy": [
@@ -549,7 +549,7 @@
     "returns": {
       "aMint": 1985000,
       "armed": true,
-      "attestFeeZat": 2518891688,
+      "attestFeeZat": 251889169,
       "baseRatioBps": 50000,
       "bundleSeqs": [
         1,
@@ -560,8 +560,8 @@
       "lockHeight": 377,
       "minRatioBps": 50000,
       "pMint": 1985000,
-      "protocolFeeCents": 100,
-      "protocolFeeZat": 5037783375,
+      "protocolFeeCents": 1000,
+      "protocolFeeZat": 503778338,
       "refHeight": 329,
       "requiredZat": 251889169000,
       "requiredZatFloored": 251889169000,
@@ -574,10 +574,10 @@
   "yed_estimatefee": {
     "args": "<mintedCents> [priceMicroUsd]",
     "returns": {
-      "attestFeeZat": 2777777778,
+      "attestFeeZat": 125000000,
       "feeCents": 100,
-      "feeZat": 5555555556,
-      "pMint": 18000
+      "feeZat": 250000000,
+      "pMint": 400000
     }
   },
   "yed_estimateredeem": {
@@ -589,15 +589,15 @@
       "early": true,
       "earlyRedeemFeeBps": 500,
       "earlyRedeemFeeCents": 5000,
-      "earlyRedeemFeeZat": 12594458450,
+      "earlyRedeemFeeZat": 2518891688,
       "error": "",
-      "feeZat": 13224181372,
+      "feeZat": 3022670026,
       "height": 360,
       "lockHeight": 377,
       "pMint": 1985000,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
-      "protocolFeeCents": 100,
-      "protocolFeeZat": 5037783375,
+      "protocolFeeCents": 1000,
+      "protocolFeeZat": 503778338,
       "status": "ACTIVE",
       "termClass": "A",
       "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0"
@@ -762,7 +762,10 @@
           "attestFeeBps": 2500,
           "attestMaxAge": 8,
           "bondMaturity": 8,
+          "bondMinFloorZat": 100000000,
           "bondMinLock": 200,
+          "bondMinNoPriceZat": 1000000000,
+          "bondMinUsdCents": 400,
           "bondMinZat": 1000000000,
           "bundleMax": 6,
           "carrierMode": "scriptsig",
@@ -827,7 +830,7 @@
             "yellowback": {
               "maxTxFeeCeilingZat": 1000000000,
               "maxTxFeeUsdMicro": 2000000,
-              "maxTxFeeZat": 1000000000,
+              "maxTxFeeZat": 500000000,
               "usdPerKBMicro": 50000,
               "zatPerKB": 12500000
             }
@@ -886,10 +889,10 @@
         "sigmaRefBps": 0,
         "startHeight": 103,
         "supplyCap": {
-          "capCents": 33333330,
+          "capCents": 74074068,
           "circulatingZat": 1234567800000000,
-          "issuedBeforeStartZat": 625000000000,
-          "maxVaultCents": null,
+          "issuedBeforeStartZat": 1200000000000000,
+          "maxVaultCents": 7407406,
           "maxVaultShareBps": 1000,
           "priceMicroUsd": 400000,
           "vaultShareFloorCents": 1000000
@@ -1184,13 +1187,13 @@
     "args": "[count] [skip]",
     "returns": [
       {
-        "attestFeeZat": 157430730,
+        "attestFeeZat": 251889169,
         "claimHeight": 401,
         "claimPath": "a",
         "claimable": true,
         "collateralZat": 251889169000,
         "emergencyOpenAt": null,
-        "feeZat": 50377833753,
+        "feeZat": 503778338,
         "lockHeight": 377,
         "mintedCents": 100000,
         "noticeHeight": null,
