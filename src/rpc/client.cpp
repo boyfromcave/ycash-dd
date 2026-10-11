@@ -103,6 +103,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "rescanblockchain", 0},
     { "importprivkey", 2 },
     { "importprivkey", 3 },
+    { "z_importpqkey", 1 },
     { "importaddress", 2 },
     { "importaddress", 3 },
     { "importpubkey", 2 },

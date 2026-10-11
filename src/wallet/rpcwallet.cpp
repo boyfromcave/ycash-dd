@@ -8,6 +8,7 @@
 #include "consensus/upgrades.h"
 #include "consensus/params.h"
 #include "core_io.h"
+#include "crypto/pq/scheme.h"
 #include "experimental_features.h"
 #include "init.h"
 #include "key_io.h"
@@ -144,21 +145,41 @@ string AccountFromValue(const UniValue& value)
     return strAccount;
 }
 
+void EnsurePQRecipientPayable(const CTxDestination& dest)
+{
+    const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest);
+    if (!pq) return;
+    AssertLockHeld(cs_main);
+    const int next = chainActive.Height() + 1;
+    if (!Params().GetConsensus().NetworkUpgradeActive(next, Consensus::UPGRADE_VAULT))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "post-quantum addresses can be paid only once the vault upgrade is active at the next block");
+    if (pq->scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), next))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "an FN-DSA-512 (scheme 2) post-quantum address can be paid only once Falcon is active at the next block");
+}
+
 UniValue getnewaddress(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
         return NullUniValue;
 
-    if (fHelp || params.size() > 1)
+    if (fHelp || params.size() > 2)
         throw runtime_error(
-            "getnewaddress ( \"account\" )\n"
+            "getnewaddress ( \"account\" \"type\" )\n"
             "\nReturns a new Ycash address for receiving payments.\n"
             "\nArguments:\n"
             "1. \"account\"        (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
+            "2. \"type\"           (string, optional, default \"p2pkh\") \"p2pkh\" (a keypool key), or \"pq\": a post-quantum address\n"
+            "                     (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's HD seed, FN-DSA-512 once\n"
+            "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
+            "                     yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
+            "                     Needs the vault upgrade active at the next block and an unlocked wallet.\n"
+            "                     A post-quantum address receives plain YEC; sendtoaddress/sendmany spend it (fee by size),\n"
+            "                     z_sendmany, z_shieldcoinbase and z_mergetoaddress never do.\n"
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new Ycash address\n"
             "\nExamples:\n"
             + HelpExampleCli("getnewaddress", "")
+            + HelpExampleCli("getnewaddress", "\"\" \"pq\"")
             + HelpExampleRpc("getnewaddress", "")
         );
 
@@ -168,6 +189,26 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
     string strAccount;
     if (params.size() > 0)
         strAccount = AccountFromValue(params[0]);
+
+    const std::string type = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "p2pkh";
+    if (type == "pq" || type == "pqslh") {
+        // A plain-YEC post-quantum address (D-Q-20): the TX_PQPKH key a PQ YED address names, from the PQ key
+        // chain (DerivePQSeed). Scheme by the holder policy (quantum spec A-13): Falcon once active, else SLH-DSA.
+        const int next = chainActive.Height() + 1;
+        if (!Params().GetConsensus().NetworkUpgradeActive(next, Consensus::UPGRADE_VAULT))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "post-quantum addresses need the vault upgrade active at the next block");
+        EnsureWalletIsUnlocked();
+        const uint8_t scheme = type == "pq" && IsPQFalconActive(Params().GetConsensus(), next) ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S;
+        CPQKeyID id;
+        if (!pwalletMain->GetNewPQKey(scheme, id))
+            throw JSONRPCError(RPC_WALLET_ERROR, "cannot derive a post-quantum key (the wallet has no HD seed or is locked)");
+        // In the address book like a keypool address, so its receipts are not taken for change and
+        // listreceivedbyaddress / getaddressesbyaccount list it.
+        pwalletMain->SetAddressBook(id, strAccount, "receive");
+        return KeyIO(Params()).EncodeDestination(id);
+    }
+    if (type != "p2pkh")
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "type must be \"p2pkh\", \"pq\" or \"pqslh\"");
 
     if (!pwalletMain->IsLocked())
         pwalletMain->TopUpKeyPool();
@@ -479,6 +520,7 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
     if (!IsValidDestination(dest)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Ycash address");
     }
+    EnsurePQRecipientPayable(dest);
 
     // Amount
     CAmount nAmount = AmountFromValue(params[1]);
@@ -989,6 +1031,7 @@ UniValue sendfrom(const UniValue& params, bool fHelp)
     if (!IsValidDestination(dest)) {
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Ycash address");
     }
+    EnsurePQRecipientPayable(dest);
     CAmount nAmount = AmountFromValue(params[2]);
     if (nAmount <= 0)
         throw JSONRPCError(RPC_TYPE_ERROR, "Invalid amount for send");
@@ -1085,6 +1128,7 @@ UniValue sendmany(const UniValue& params, bool fHelp)
         if (!IsValidDestination(dest)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Ycash address: ") + name_);
         }
+        EnsurePQRecipientPayable(dest);
 
         if (destinations.count(dest)) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ") + name_);
@@ -4097,6 +4141,10 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     } else {
         CTxDestination taddr = keyIO.DecodeDestination(fromaddress);
         fromTaddr = IsValidDestination(taddr);
+        if (IsPQKeyDestination(taddr)) {
+            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_sendmany cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+        }
         if (!fromTaddr) {
             auto res = keyIO.DecodePaymentAddress(fromaddress);
             if (!IsValidPaymentAddress(res)) {
@@ -4149,6 +4197,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         string address = find_value(o, "address").get_str();
         bool isZaddr = false;
         CTxDestination taddr = keyIO.DecodeDestination(address);
+        EnsurePQRecipientPayable(taddr);   // a post-quantum (sq…) recipient is a TX_PQPKH output
         if (!IsValidDestination(taddr)) {
             auto res = keyIO.DecodePaymentAddress(address);
             if (IsValidPaymentAddress(res)) {
@@ -4550,6 +4599,10 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         if (!IsValidDestination(taddr)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address, should be a taddr or \"*\".");
         }
+        if (IsPQKeyDestination(taddr)) {
+            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+        }
     }
 
     // Validate the destination address
@@ -4815,6 +4868,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             isFromNonSprout = true;
         } else {
             CTxDestination taddr = keyIO.DecodeDestination(address);
+            if (IsPQKeyDestination(taddr)) {
+                // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_mergetoaddress cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+            }
             if (IsValidDestination(taddr)) {
                 taddrs.insert(taddr);
                 isFromNonSprout = true;
@@ -4853,6 +4910,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     bool isToSproutZaddr = false;
     bool isToSaplingZaddr = false;
     CTxDestination taddr = keyIO.DecodeDestination(destaddress);
+    EnsurePQRecipientPayable(taddr);   // a post-quantum (sq…) destination is a TX_PQPKH output
     if (!IsValidDestination(taddr)) {
         auto decodeAddr = keyIO.DecodePaymentAddress(destaddress);
         if (IsValidPaymentAddress(decodeAddr)) {
@@ -5262,6 +5320,7 @@ extern UniValue z_exportivk(const UniValue& params, bool fHelp);
 extern UniValue z_importivk(const UniValue& params, bool fHelp);
 extern UniValue z_exportwallet(const UniValue& params, bool fHelp);
 extern UniValue z_importwallet(const UniValue& params, bool fHelp);
+extern UniValue z_importpqkey(const UniValue& params, bool fHelp);
 
 extern UniValue z_getpaymentdisclosure(const UniValue& params, bool fHelp); // in rpcdisclosure.cpp
 extern UniValue z_validatepaymentdisclosure(const UniValue &params, bool fHelp);
@@ -5342,6 +5401,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "z_importivk",                  &z_importivk,              true  },
     { "wallet",             "z_exportwallet",               &z_exportwallet,           true  },
     { "wallet",             "z_importwallet",               &z_importwallet,           true  },
+    { "wallet",             "z_importpqkey",                &z_importpqkey,            true  },
     { "wallet",             "z_viewtransaction",            &z_viewtransaction,        false },
     { "wallet",             "z_getnotescount",              &z_getnotescount,          false },
     // TODO: rearrange into another category
