@@ -1545,6 +1545,15 @@ bool TransactionSignatureChecker::CheckPQSig(
         return false;
     }
 
+    return VerifyPQSignature(scheme, vchSig, vchPubKey, sighash);
+}
+
+bool TransactionSignatureChecker::VerifyPQSignature(
+    uint8_t scheme,
+    const vector<unsigned char>& vchSig,
+    const vector<unsigned char>& vchPubKey,
+    const uint256& sighash) const
+{
     return pq::Verify(scheme, vchPubKey, vchSig, sighash);
 }
 
