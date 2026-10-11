@@ -1250,6 +1250,13 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #ifdef ENABLE_MINING
     if (mapArgs.count("-mineraddress")) {
         CTxDestination addr = keyIO.DecodeDestination(mapArgs["-mineraddress"]);
+        if (IsValidDestination(addr) && !IsKeyDestination(addr)) {
+            // The miner pays a P2PKH script (GetMinerAddress); a P2SH or post-quantum (sq…) address is refused here
+            // rather than failing at the first block template.
+            return InitError(strprintf(
+                _("Invalid address for -mineraddress=<addr>: '%s' (a transparent address must be P2PKH; P2SH and post-quantum addresses are not supported)"),
+                mapArgs["-mineraddress"]));
+        }
         if (!IsValidDestination(addr)) {
             // Try a Sapling address
             auto zaddr = keyIO.DecodePaymentAddress(mapArgs["-mineraddress"]);
@@ -1949,9 +1956,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         bool minerAddressInLocalWallet = false;
         if (pwalletMain) {
             CTxDestination addr = keyIO.DecodeDestination(mapArgs["-mineraddress"]);
-            if (IsValidDestination(addr)) {
-                CKeyID keyID = std::get<CKeyID>(addr);
-                minerAddressInLocalWallet = pwalletMain->HaveKey(keyID);
+            if (const CKeyID* keyID = std::get_if<CKeyID>(&addr)) {   // a P2PKH address (step 3 refused the others)
+                minerAddressInLocalWallet = pwalletMain->HaveKey(*keyID);
             } else {
                 auto zaddr = keyIO.DecodePaymentAddress(mapArgs["-mineraddress"]);
                 minerAddressInLocalWallet = std::visit(

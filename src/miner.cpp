@@ -732,11 +732,10 @@ void GetMinerAddress(MinerAddress &minerAddress)
     // Try a transparent address first
     auto mAddrArg = GetArg("-mineraddress", "");
     CTxDestination addr = keyIO.DecodeDestination(mAddrArg);
-    if (IsValidDestination(addr)) {
+    if (const CKeyID* keyID = std::get_if<CKeyID>(&addr)) {   // P2PKH only: init refuses P2SH and PQ (sq…) addresses
         boost::shared_ptr<MinerAddressScript> mAddr(new MinerAddressScript());
-        CKeyID keyID = std::get<CKeyID>(addr);
 
-        mAddr->reserveScript = CScript() << OP_DUP << OP_HASH160 << ToByteVector(keyID) << OP_EQUALVERIFY << OP_CHECKSIG;
+        mAddr->reserveScript = CScript() << OP_DUP << OP_HASH160 << ToByteVector(*keyID) << OP_EQUALVERIFY << OP_CHECKSIG;
         minerAddress = mAddr;
     } else {
         // Try a Sapling address

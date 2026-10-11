@@ -21,6 +21,7 @@
 #include "main.h"
 #include "net.h"
 #include "policy/policy.h"
+#include "support/cleanse.h"
 #include "random.h"
 #include "rpc/protocol.h"
 #include "rpc/register.h"
@@ -45,7 +46,9 @@
 #include <assert.h>
 #include <variant>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <fstream>
 #include <boost/thread.hpp>
 
 #ifdef YCASH_WR
@@ -5714,7 +5717,8 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         }
                     }
 
-                    if (txout.IsDust(::minRelayTxFee))
+                    // A post-quantum (TX_PQPKH) recipient's dust is priced with its real spend size, as policy does.
+                    if (txout.nValue < GetPQDustThreshold(txout, ::minRelayTxFee))
                     {
                         if (recipient.fSubtractFeeFromAmount && nFeeRet > 0)
                         {
@@ -6788,6 +6792,7 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     strUsage += HelpMessageOpt("-upgradewallet", _("Upgrade wallet to latest format on startup"));
     strUsage += HelpMessageOpt("-wallet=<file>", _("Specify wallet file absolute path or a path relative to the data directory") + " " + strprintf(_("(default: %s)"), DEFAULT_WALLET_DAT));
     strUsage += HelpMessageOpt("-walletbroadcast", _("Make the wallet broadcast transactions") + " " + strprintf(_("(default: %u)"), DEFAULT_WALLETBROADCAST));
+    strUsage += HelpMessageOpt("-hdseedfile=<file>", _("When creating a new wallet, take its HD seed from <file> (64 hex digits, or a z_exportwallet file's HDSeed= line) instead of a random one, and rescan from genesis: a seed-only restore of Sapling and post-quantum keys (transparent keypool keys are not seed-derived). Refused for an existing wallet with another seed"));
     strUsage += HelpMessageOpt("-walletnotify=<cmd>", _("Execute command when a wallet transaction changes (%s in cmd is replaced by TxID)"));
     strUsage += HelpMessageOpt("-zapwallettxes=<mode>", _("Delete all wallet transactions and only recover those parts of the blockchain through -rescan on startup") +
                                " " + _("(1 = keep tx meta data e.g. account owner and payment request information, 2 = drop tx meta data)"));
@@ -6802,6 +6807,33 @@ std::string CWallet::GetWalletHelpString(bool showDebug)
     }
 
     return strUsage;
+}
+
+static bool ReadHDSeedFile(const std::string& path, HDSeed& seedOut, std::string& err)
+{
+    std::ifstream file(path.c_str());
+    if (!file.is_open()) {
+        err = "cannot open " + path;
+        return false;
+    }
+    // The file holds the seed's hex (HD_WALLET_SEED_LENGTH bytes), bare or as z_exportwallet's "# HDSeed=<hex>" line.
+    std::string token, hex;
+    while (file >> token) {
+        if (boost::algorithm::starts_with(token, "HDSeed=")) { hex = token.substr(7); break; }
+        if (hex.empty() && token != "#" && IsHex(token)) hex = token;
+    }
+    if (hex.size() != 2 * HD_WALLET_SEED_LENGTH || !IsHex(hex)) {
+        memory_cleanse(&hex[0], hex.size());
+        err = strprintf("%s does not hold a %u-byte HD seed in hex", path, (unsigned)HD_WALLET_SEED_LENGTH);
+        return false;
+    }
+    std::vector<unsigned char> bytes = ParseHex(hex);
+    RawHDSeed raw(bytes.begin(), bytes.end());
+    seedOut = HDSeed(raw);
+    memory_cleanse(bytes.data(), bytes.size());
+    memory_cleanse(&hex[0], hex.size());
+    memory_cleanse(&token[0], token.size());
+    return true;
 }
 
 bool CWallet::InitLoadWallet(bool clearWitnessCaches)
@@ -6869,6 +6901,33 @@ bool CWallet::InitLoadWallet(bool clearWitnessCaches)
         walletInstance->SetMaxVersion(nMaxVersion);
     }
 
+    // Seed-only restore (-hdseedfile): a NEW wallet takes the given HD seed instead of a random one, so its
+    // Sapling (ZIP 32) and post-quantum (DerivePQSeed) keys are the backed-up wallet's. Set exactly once, as
+    // GenerateNewSeed would set a random seed: no wallet record is replaced. Transparent keypool keys are random
+    // in this wallet format and are not restored by a seed.
+    bool fRestoredSeed = false;
+    if (mapArgs.count("-hdseedfile")) {
+        HDSeed restored;
+        std::string err;
+        if (!ReadHDSeedFile(GetArg("-hdseedfile", ""), restored, err))
+            return UIError(strprintf(_("-hdseedfile: %s"), err));
+        if (!fFirstRun || walletInstance->HaveHDSeed()) {
+            HDSeed current;
+            if (!walletInstance->GetHDSeed(current) || current != restored)
+                return UIError(_("-hdseedfile applies only when creating a new wallet, and this wallet has another HD seed"));
+        } else {
+            if (!walletInstance->SetHDSeed(restored))
+                return UIError(_("-hdseedfile: cannot set the HD seed"));
+            CHDChain newHdChain;
+            newHdChain.nVersion = CHDChain::VERSION_HD_BASE;
+            newHdChain.seedFp = restored.Fingerprint();
+            newHdChain.nCreateTime = 1;   // unknown birthday: the restore rescans from genesis
+            walletInstance->SetHDChain(newHdChain, false);
+            fRestoredSeed = true;
+            LogPrintf("Wallet created from the HD seed in -hdseedfile (fingerprint %s)\n", restored.Fingerprint().GetHex());
+        }
+    }
+
     if (!walletInstance->HaveHDSeed())
     {
         // We can't set the new HD seed until the wallet is decrypted.
@@ -6933,7 +6992,12 @@ bool CWallet::InitLoadWallet(bool clearWitnessCaches)
                 return UIError(_("Cannot write default address") += "\n");
         }
 
-        walletInstance->SetBestChain(chainActive.GetLocator());
+        // A restored wallet has history: leave its best block unset so the rescan below starts at genesis, and
+        // drop the key birthday the fresh keypool gave it.
+        if (fRestoredSeed)
+            walletInstance->nTimeFirstKey = 1;
+        else
+            walletInstance->SetBestChain(chainActive.GetLocator());
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);
