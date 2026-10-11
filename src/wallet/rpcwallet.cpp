@@ -4629,6 +4629,10 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         if (!ExtractDestination(out.tx->vout[out.i].scriptPubKey, address)) {
             continue;
         }
+        // z_shieldcoinbase never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
+        if (IsPQKeyDestination(address)) {
+            continue;
+        }
         // If taddr is not wildcard "*", filter utxos
         if (destinations.size() > 0 && !destinations.count(address)) {
             continue;
@@ -4952,6 +4956,10 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
             CTxDestination address;
             if (!ExtractDestination(scriptPubKey, address)) {
+                continue;
+            }
+            // z_mergetoaddress never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
+            if (IsPQKeyDestination(address)) {
                 continue;
             }
             // If taddr is not wildcard "*", filter utxos

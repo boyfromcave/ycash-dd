@@ -7,6 +7,7 @@
 
 #include "amount.h"
 #include "asyncrpcoperation_common.h"
+#include "script/standard.h"
 #include "asyncrpcqueue.h"
 #include "consensus/upgrades.h"
 #include "core_io.h"
@@ -31,6 +32,7 @@
 #include "miner.h"
 #include "wallet/paymentdisclosuredb.h"
 
+#include <algorithm>
 #include <array>
 #include <iostream>
 #include <chrono>
@@ -866,6 +868,12 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase, TxValues& txVa
             true,               // fOnlySpendable
             mindepth_,          // nMinDepth
             &destinations);     // onlyFilterByDests
+    // A TX_PQPKH coin is spent only by the YED/vault builders, never by z_sendmany: its signature needs the
+    // vault flags and this operation signs P2PKH only (quantum spec A-15).
+    t_inputs_.erase(std::remove_if(t_inputs_.begin(), t_inputs_.end(), [](const COutput& o) {
+        CTxDestination dest;
+        return ExtractDestination(o.tx->vout[o.i].scriptPubKey, dest) && IsPQKeyDestination(dest);
+    }), t_inputs_.end());
     if (t_inputs_.empty()) return false;
 
     // sort in ascending order, so smaller utxos appear first
