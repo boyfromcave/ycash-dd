@@ -1019,6 +1019,9 @@ private:
 };
 
 
+//! Review B I-2: post-quantum keys the wallet derives ahead of its next issued index, per scheme (the BIP44 gap limit).
+static const uint32_t PQ_KEY_LOOKAHEAD = 20;
+
 /** 
  * A CWallet is an extension of a keystore, which also maintains a set of transactions and balances,
  * and provides the ability to create new transactions.
@@ -1215,6 +1218,8 @@ public:
     //! Post-quantum keys (quantum plan §4.6): creation time per key, next HD index per scheme.
     std::map<CPQKeyID, int64_t> mapPQKeyCreateTime;
     std::map<uint8_t, uint32_t> mapPQNextIndex;
+    //! Review B I-2: per scheme, the next PQ key index to issue (walletdb "pqissued").
+    std::map<uint8_t, uint32_t> mapPQIssued;
 
     typedef std::map<unsigned int, CMasterKey> MasterKeyMap;
     MasterKeyMap mapMasterKeys;
@@ -1413,10 +1418,25 @@ public:
      * GetNewPQKey derives the wallet's next key of scheme from its HD seed (DerivePQSeed: HKDF-SHA256,
      * info "Ycash PQ key" || scheme || index_be32, 48 bytes), stores it (walletdb "pqkey", or
      * "cpqkey" when the wallet is encrypted) and returns its id. False when the wallet is locked,
-     * has no HD seed or the scheme is unknown. The index is the lowest at or above every stored
-     * key's index + 1 whose key the wallet does not hold yet.
+     * has no HD seed or the scheme is unknown. The index is the next one issued (PQIssued, walletdb
+     * "pqissued"); a key the lookahead already holds is handed out, not skipped.
      */
     bool GetNewPQKey(uint8_t scheme, CPQKeyID& idOut);
+    /**
+     * Review B I-2: the post-quantum key lookahead. The wallet holds the keys of indices
+     * [issued, issued + PQ_KEY_LOOKAHEAD) of each scheme beside the issued ones, so a wallet restored from its
+     * seed (a wallet.dat backup older than its newest PQ keys) recognises the TX_PQPKH holders, vault owners and
+     * channel clients issued after it while it rescans; an output to a held key of this seed marks it used
+     * (NotePQKeysUsed, from AddToWalletIfInvolvingMe), which moves the lookahead past it. TopUpPQKeys needs an
+     * unlocked wallet with an HD seed (it runs at load, at walletpassphrase and after each issue or mark).
+     * The derivation (DerivePQSeed) is unchanged; the keys are ordinary "pqkey"/"cpqkey" records.
+     */
+    void TopUpPQKeys(std::optional<uint8_t> scheme = std::nullopt);
+    void MarkPQKeyUsed(const CPQKeyID& id);
+    void NotePQKeysUsed(const CTransaction& tx);
+    uint32_t PQIssued(uint8_t scheme) const;
+    bool SetPQIssued(uint8_t scheme, uint32_t next);
+    bool LoadPQIssued(uint8_t scheme, uint32_t next);
     //! Adds a PQ key to the store and saves it to disk.
     bool AddPQKey(const CPQKey& key);
     //! As AddPQKey, with an explicit creation time (importwallet).
