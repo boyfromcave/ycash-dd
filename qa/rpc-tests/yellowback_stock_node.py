@@ -38,6 +38,7 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     debug_log_contains,
     wait_for_rejection,
+    vault_fee_zat,
     wait_yed_healthy,
     ym,
 )
@@ -177,7 +178,7 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         user, stock = self.nodes[USER], self.nodes[STOCK]
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref, required = int(est['refHeight']), int(est['requiredZat'])
-        payee = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         mint_hex, owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=payee)
         txid = user.sendrawtransaction(mint_hex)
         self.sync_all()
@@ -193,10 +194,10 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         self.mine(POOLS[0], LOCK + 2)
         live = dict(user.yed_getvault(txid))
         r = user.getblockcount() - REF_LAG
-        fee = user.yed_getfeepayee(r, int(live['collateralZat']))
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']   # one argument: refHeight ( selectorHex )
         good = build_vault_spend_raw(user, live, 'owner', [(txid, 1)],
                                      payload=ym.encode_redeem(r, 1, []),
-                                     fee=(fee['default']['payoutAddress'], int(fee['feeZat'])),
+                                     fee=(payee, vault_fee_zat(live)),   # RED-3': the fee at the vault's pMint
                                      ref_height=r)
         good_txid = stock.sendrawtransaction(good)
         h = stock.generate(1)[0]
@@ -211,7 +212,7 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         # and now a rule-breaking one: rejected, no ban, node 1 still a peer, then out-mined
         est = user.yed_estimatecollateral(CENTS, LOCK)
         ref, required = int(est['refHeight']), int(est['requiredZat'])
-        payee = user.yed_getfeepayee(ref, required)['default']['payoutAddress']
+        payee = user.yed_getfeepayee(ref)['default']['payoutAddress']
         mint_hex, owner = build_mint_tx(user, CENTS, LOCK, ref, required, fee_addr=payee)
         txid = user.sendrawtransaction(mint_hex)
         self.sync_all()
