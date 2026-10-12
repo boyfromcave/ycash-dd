@@ -240,12 +240,24 @@
       ],
       "when": "lockBlocks outside every class, or lockHeight + GRACE ≥ LOCKTIME_THRESHOLD"
     },
+    "mint-supply-cap": {
+      "raisedBy": [
+        "yed_mint"
+      ],
+      "when": "the wallet's dry run of MINT-1..10 refused the built mint under MINT-6 (a mint raced it to the cap after the mintpol-cap gate; RPC_VERIFY_REJECTED); yellowback_void_mint.py shows the consensus verdict"
+    },
     "mint-unsatisfiable": {
       "raisedBy": [
         "yed_mint",
         "yed_estimatecollateral"
       ],
       "when": "requiredZat > MAX_MONEY (K14): MAX_MINT cents at priceMicroUsd = PRICE_MIN"
+    },
+    "mint-vault-share": {
+      "raisedBy": [
+        "yed_mint"
+      ],
+      "when": "the wallet's dry run refused the built mint under MINT-6b (D-Q-23a): its debt exceeds max(maxVaultShareBps of the MINT-6 cap, vaultShareFloorCents) (params.supplyCap.maxVaultCents); silent while the cap is undefined (regtest's supplyCapBps 0), so provoke on a network parameter set with a cap (RPC_VERIFY_REJECTED)"
     },
     "mint10-diverged": {
       "raisedBy": [
@@ -485,7 +497,7 @@
     "args": "<vaultTxid> [to] [bundleHex] [wait] [minOutZat] [maxBurnCents]",
     "returns": {
       "aClaim": 395000,
-      "attestFeeZat": 157430730,
+      "attestFeeZat": 125944584,
       "attestPayee": "smExampleBondAddress11111111111111111",
       "bundleSeqs": [
         1,
@@ -1081,7 +1093,7 @@
           "vout": 1
         }
       ],
-      "attestFeeZat": 157430730,
+      "attestFeeZat": 125944584,
       "attestPayee": "smExampleBondAddress11111111111111111",
       "bundleSeqs": [
         1,
@@ -1133,7 +1145,7 @@
       "collateral": 2518.89169,
       "collateralZat": 251889169000,
       "emergencyOpenAt": null,
-      "feePaidZat": 50377833753,
+      "feePaidZat": 503778338,
       "lockHeight": 377,
       "mintHeight": 332,
       "mintedCents": 100000,
@@ -1248,7 +1260,7 @@
         "collateralZat": 251889169000,
         "earlyRedeemFeeZat": 0,
         "emergencyOpenAt": null,
-        "feePaidZat": 50377833753,
+        "feePaidZat": 503778338,
         "lockHeight": 377,
         "mintHeight": 332,
         "mintedCents": 100000,
@@ -1333,7 +1345,7 @@
         "collateral": 2518.89169,
         "collateralZat": 251889169000,
         "emergencyOpenAt": null,
-        "feePaidZat": 50377833753,
+        "feePaidZat": 503778338,
         "lockHeight": 377,
         "mintHeight": 332,
         "mintedCents": 100000,
@@ -1368,7 +1380,7 @@
     "args": "<cents> <lockBlocks> [from] [bundleHex] [wait] [maxCollateralZat]",
     "returns": {
       "aMint": 1985000,
-      "attestFeeZat": 157430730,
+      "attestFeeZat": 125944584,
       "attestPayee": "smExampleBondAddress11111111111111111",
       "bundleSeqs": [
         1,
@@ -1397,10 +1409,10 @@
     "args": "<vaultTxid> [to]",
     "returns": {
       "burnedCents": 100000,
-      "collateralOut": 238664977628,
+      "collateralOut": 248866488974,
       "earlyRedeemFeeZat": 12594458450,
       "extraBurnCents": 0,
-      "feeZat": 13224181372,
+      "feeZat": 3022670026,
       "payee": "smQvTmAz2ExamplePayoutAddress1111111",
       "to": "smExampleTransparentTwin111111111111",
       "txid": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d"
