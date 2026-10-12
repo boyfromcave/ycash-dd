@@ -51,6 +51,7 @@ UP = PRICE * Decimal('1.7')      # +70 % = $4,250 < $4,294.97
 CLAIMANT = 5
 TERMS = {'A': 48, 'B': 97, 'C': 145}
 FLOOR_ZAT_PER_KB = 5000          # policy.h DEFAULT_ATTESTED_FEE_FLOOR_PER_KB (D-Q-23a)
+VAULT_RPC_FEE = 10000            # policy.h: the vault RPCs' flat fee
 PLAIN_USD = 20000                # $0.02/KB
 YED_USD = 50000                  # $0.05/KB
 CAP_USD = 2000000                # $2
@@ -275,6 +276,16 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
         vsmall = user.yed_getvault(small['txid'])
+        # q/fees review: the vault primitive's vault_ownerspend takes the same clamp (a TEST-tag vault on a set with no
+        # members, released, so selector 3 opens at once), locked at today's rates before the restart below
+        setid = user.set_create({'seats': 3, 'unlockthreshold': 2, 'cancelthreshold': 1, 'slashthreshold': 2,
+                                 'maturity': 2, 'livenesswindow': 50, 'bondmin': 1, 'ratewindow': 20})['setid']
+        self.sync_all()
+        self.mine(POOLS[0])
+        prim = user.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': 5, 'ownerheight': user.getblockcount() + 1000,
+                                'amount': Decimal('0.01')})
+        self.sync_all()
+        self.mine(POOLS[0])
         # $1,000,000/KB and caps out of the way: the size-priced fee is far above the vault's collateral
         self.restart(USER, ['-yellowbackfeeusdperkb=1000000', '-yellowbackmaxtxfeeusd=1000000', '-yellowbackmaxtxfee=1000000'])
         self.sync_all(blocks_only=True)
@@ -287,6 +298,16 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(user.yed_getvault(small['txid'])['status'], 'CLOSED')
+        spent = user.vault_ownerspend(prim['outpoint'], user.getnewaddress())
+        assert_equal(spent['selector'], 3)
+        net_fee, raw = network_fee_of(user, spent['txid'])
+        size = len(raw['hex']) // 2
+        assert_greater_than(size, 8000)                                                     # an SLH-DSA owner scriptSig
+        assert_equal(net_fee, max(VAULT_RPC_FEE, FLOOR_ZAT_PER_KB * size // 1000))          # clamped, not refused
+        assert_equal(raw['vout'][0]['valueZat'], COIN // 100 - net_fee)
+        self.sync_all()
+        self.mine(POOLS[1])
+        assert_greater_than(user.getrawtransaction(spent['txid'], 1)['confirmations'], 0)
         self.restart(USER, [])
         self.sync_all(blocks_only=True)
         self.checkpoint('small vault at the floor')

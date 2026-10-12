@@ -194,10 +194,10 @@ class YellowbackStockNodeTest(YellowbackTestFramework):
         self.mine(POOLS[0], LOCK + 2)
         live = dict(user.yed_getvault(txid))
         r = user.getblockcount() - REF_LAG
-        fee = user.yed_getfeepayee(r)
+        payee = user.yed_getfeepayee(r)['default']['payoutAddress']   # one argument: refHeight ( selectorHex )
         good = build_vault_spend_raw(user, live, 'owner', [(txid, 1)],
                                      payload=ym.encode_redeem(r, 1, []),
-                                     fee=(fee['default']['payoutAddress'], vault_fee_zat(live)),   # RED-3': the debt at the vault's pMint
+                                     fee=(payee, vault_fee_zat(live)),   # RED-3': the fee at the vault's pMint
                                      ref_height=r)
         good_txid = stock.sendrawtransaction(good)
         h = stock.generate(1)[0]

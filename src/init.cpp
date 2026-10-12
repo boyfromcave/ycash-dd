@@ -1254,8 +1254,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 return InitError(strprintf(_("Invalid amount for -yellowbackmaxtxfee=<amount>: '%s'"), mapArgs["-yellowbackmaxtxfee"]));
             ::attestedFeePolicy.yedMaxTxFeeZat = n;
         }
-        if (::attestedFeePolicy.yedMaxTxFeeZat < VAULT_RPC_FEE)
-            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least the vault RPCs' flat fee, %s"), FormatMoney(VAULT_RPC_FEE)));
+        if (::attestedFeePolicy.yedMaxTxFeeZat < MIN_YED_MAX_TX_FEE)
+            return InitError(strprintf(_("-yellowbackmaxtxfee must be at least %s, above the fees the wallet must pay"), FormatMoney(MIN_YED_MAX_TX_FEE)));
     }
 
 #ifdef ENABLE_WALLET
@@ -1314,6 +1314,9 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError("-pqfalconheight must be a block height (>= 0).");
         }
     }
+
+    // D-Q-31: the least signer-set maturity (the exit window) of this network
+    vault::SetMinSetMaturity(chainparams.GetConsensus().nVaultMinSetMaturity);
 
     if (!mapMultiArgs["-nuparams"].empty()) {
         // Allow overriding network upgrade parameters for testing
@@ -2033,6 +2036,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         yellowback::Params yellowbackParams;
         yellowback::ParamsFromArgs(chainparams.NetworkIDString(), chainparams.GetConsensus(), yellowbackParams); // validated in step 3
         yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
+        // the primitive's liveness hook verifies through the index's signature cache (focused review; never deleted)
+        vault::SetModuleCache(static_cast<yellowback::SigCache*>(yellowback::g_yellowback->GetSigCache()));
         {
             // MINER-1..3, L6 (validated in step 3).
             KeyIO yellowbackKeyIO(chainparams);

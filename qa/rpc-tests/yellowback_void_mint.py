@@ -180,7 +180,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
             self.mine(POOLS[2])
         # a set of one seat, its member x with a bond that is spendable at once
         admit, x = v.fixed_secret('tpl-order-admit'), v.fixed_secret('tpl-order-member')
-        create, sid = v.node_set_create(user, v.act_set_create(1, 1, 1, 1, v.pubkey_of(admit), bond_lock_min=1, maturity=1))
+        create, sid = v.node_set_create(user, v.act_set_create(1, 1, 1, 1, v.pubkey_of(admit), bond_lock_min=1, maturity=2))
         v.node_send(user, create)
         self.sync_all()
         self.mine(POOLS[0])
@@ -190,12 +190,19 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
         assert bond[0] in user.getblock(user.getbestblockhash())['tx']
+        # the bond exit delay (owner 2026-10-11): an ACTIVE member's bond is never spendable, so x leaves first (its own
+        # SET_REMOVE); its bond is spendable from exit + maturity (2) and still slashable until spent
+        self.mine(POOLS[0], 2)                               # x is current (maturity 2)
+        v.node_send(user, v.node_act_tx(user, v.act_set_remove(sid, v.pubkey_of(x), 0), [x]))
+        self.sync_all()
+        self.mine(POOLS[0])
+        exit_h = user.getblockcount()
         # the cap's headroom: B alone fits, C alone fits, B and C together do not; C leaves room for the
         # soft-cap case after this one (the cap grows with issuance, so mine until it is wide enough)
         for _ in range(60):
             stats = user.yed_getstats()
             headroom = stats['supplyCapCents'] - stats['supplyCents']
-            if headroom >= 21000 and user.getblockcount() + 1 > locktime:
+            if headroom >= 21000 and user.getblockcount() + 1 > locktime and user.getblockcount() + 1 >= exit_h + 2:
                 break
             self.mine_round_robin(POOLS, 4)
         assert headroom >= 21000, headroom
