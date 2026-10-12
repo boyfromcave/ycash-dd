@@ -180,7 +180,7 @@ class YellowbackVoidMintTest(ArmedModeMixin, YellowbackTestFramework):
             self.mine(POOLS[2])
         # a set of one seat, its member x with a bond that is spendable at once
         admit, x = v.fixed_secret('tpl-order-admit'), v.fixed_secret('tpl-order-member')
-        create, sid = v.node_set_create(user, v.act_set_create(1, 1, 1, 1, v.pubkey_of(admit), bond_lock_min=1, maturity=1))
+        create, sid = v.node_set_create(user, v.act_set_create(1, 1, 1, 1, v.pubkey_of(admit), bond_lock_min=1, maturity=2))
         v.node_send(user, create)
         self.sync_all()
         self.mine(POOLS[0])
