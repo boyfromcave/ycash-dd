@@ -20,6 +20,9 @@ Variables (unset = default):
 | `YCASHD_LISTEN` | 1 | P2P listen |
 | `YCASHD_VAULT_HEIGHT` | unset | regtest only: `nuparams=6d5b7a31:<h>` |
 | `YCASHD_YELLOWBACK_ATTESTOR_SET` | unset | regtest only: `yellowbackattestorset=<setid>` |
+| `YCASHD_PQ_FALCON_HEIGHT` | `0` | regtest only: `pqfalconheight=<h>`, OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from `<h>` once the vault upgrade is active. `0` mirrors mainnet/testnet (Falcon from the vault activation, D-Q-2); `off` = SLH-DSA only |
+| `YCASHD_PQ_FEERATE` | unset (= the relay floor) | `pqfeerate=<YEC/kB>`, the wallet's fallback fee rate for a post-quantum input |
+| `YCASHD_HDSEED_FILE` | unset | path of a **mounted** secret file, passed as `-hdseedfile=<path>` (a new wallet takes its HD seed from the file: 64 hex digits or a z_exportwallet HDSeed= line) |
 | `YCASHD_CONF_EXTRA` | | extra `ycash.conf` lines, verbatim |
 | `YCASHD_EXTRA_ARGS` | | extra command-line flags, verbatim |
 | `YCASHD_CONF` | | use this mounted `ycash.conf` instead of generating one |
@@ -27,3 +30,29 @@ Variables (unset = default):
 
 The image runs as uid 2001 and holds no wallet of any user. The deployment that scales this
 (a node pool behind `lightwalletd-dd` on Kubernetes) is the `ycash-infra` repository. This is the v4.5.0 node line; the 6.20.0 line (`ycash6`) has the same files.
+
+## The post-quantum line
+
+This image builds the post-quantum vault line (`OP_CHECKPQSIG` 0xc2, SLH-DSA-SHA2-128s owners,
+FN-DSA-512 holders). The PQ code is vendored C under `src/crypto/pq/` (slhdsa-c, PQClean
+`falcon-padded-512/clean`), compiled by the ordinary autotools build: the image needs no extra
+package, Rust crate or configure flag for it. `yed_getinfo` reports `rpcversion` 8 (a compiled
+constant; nothing in `ycash.conf` selects it, and YED RPCs answer only once an attestor set is
+configured). `-pqfalcon` / `-pqfalconheight` are refused off regtest, so the entrypoint writes
+`pqfalconheight` only for `YCASHD_NETWORK=regtest`.
+
+## Secrets: seed-only restore
+
+A wallet seed never goes into the image, an environment variable, `ycash.conf` or the command
+line. Mount it as a file and point `YCASHD_HDSEED_FILE` at the path; the entrypoint checks the file is readable
+and passes `-hdseedfile=<path>` (the path, not the secret). The flag acts only when the wallet is
+created (a new datadir), so the mount can be dropped after the first start.
+
+```bash
+docker run -d --name ycashd -v ycashd_data:/var/lib/ycash \
+  -v "$PWD/seed.txt:/run/secrets/ycash-hdseed:ro" -e YCASHD_HDSEED_FILE=/run/secrets/ycash-hdseed \
+  -e YCASHD_RPC_USER=ycash -e YCASHD_RPC_PASSWORD=... ycash/ycashd:local
+```
+
+On Kubernetes, mount a `Secret` volume (`defaultMode: 0400`, pod `fsGroup: 2001`): the image runs
+as uid 2001, which must be able to read the file.
