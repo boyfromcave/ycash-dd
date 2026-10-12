@@ -121,8 +121,9 @@ env:
   # (scripts/extract_spec.py --check-in-term, `make spec-check-in-term`).
   # On upgrade/quantum-vaults: d992997, the workspace commit with the generator's quantum mode
   # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
-  # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md).
-  WORKSPACE_COMMIT: d9929976647757750b0c97d1c4276547b448e0d1
+  # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md). Since the fee merge: 26ae6b7, which adds the
+  # generator's fees mode (--check-fees, rpcversion 8) and docs/plans/yellowback-quantum-fees-rpc-delta.md.
+  WORKSPACE_COMMIT: 26ae6b7fdd29aba5d3163fc21ec6c7b6d3c304ab
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.

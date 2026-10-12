@@ -37,8 +37,8 @@ from test_framework.yellowback_util import (
     build_mint_tx,
     build_vault_spend_raw,
     debug_log_contains,
-    wait_for_rejection,
     vault_fee_zat,
+    wait_for_rejection,
     wait_yed_healthy,
     ym,
 )
