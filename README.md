@@ -25,7 +25,7 @@ lightwalletd, the bridge attestor, the pool), is
 
 ```text
   Yellowback          wYEC bridge         nYEC bridge
-  (YED, a dollar)    (to Ethereum)       (to NEAR, coming)
+  (YED, a dollar)    (to Ethereum)       (to NEAR)
         │                  │                   │
   ┌─────┴──────────────────┴───────────────────┴─────┐
   │  Post-quantum vault system                       │
