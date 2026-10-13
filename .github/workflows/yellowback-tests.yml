@@ -478,7 +478,9 @@ jobs:
           # post-quantum line (its node also reports params.pq, marker "falconActive") always compares with
           # ycash6's upgrade/quantum-vaults -- the same rule as ycash6's cross-line step, mirrored.
           case " $SCHEDULE_REFS " in *" $REF "*) other=$REF ;; *) other=upgrade/vault ;; esac
-          if grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
+          # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
+          # with ycash6's upgrade/vault; the markers below only route the record branches.
+          if [ "$REF" != upgrade/vault ] && grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
             other=upgrade/vault-in-term
             if grep -q '"falconActive"' src/rpc/yellowback.cpp 2>/dev/null; then other=upgrade/quantum-vaults; fi
           fi
