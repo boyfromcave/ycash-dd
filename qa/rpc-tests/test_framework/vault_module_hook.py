@@ -135,16 +135,23 @@ def yed_liveness_hook(params, block_hash_at):
 # without (a stock node's), replayed from the activation height and compared with set_getinfo.
 
 def replay_models(node, params):
-    """(model_with_hook, model_without, tip): both VaultModels over ``node``'s chain from UPGRADE_VAULT's activation
-    to its tip. Scripts are not re-checked (the node did); every set rule is. Raises AssertionError naming the first
-    block the models refuse."""
+    """(model_with_hook, model_without, tip, credits): both VaultModels over ``node``'s chain from UPGRADE_VAULT's
+    activation to its tip, and the number of (member, height) credits the hook returned on the way. Scripts are not
+    re-checked (the node did); every set rule is. Raises AssertionError naming the first block the models refuse."""
     from io import BytesIO
     from .mininode import CBlock
     act = node.vault_getinfo()['activationheight']
     assert act >= 0, 'UPGRADE_VAULT is not scheduled'
     tip = node.getblockcount()
     hashes = {h: node.getblockhash(h) for h in range(0, tip + 1)}
-    with_hook = v.VaultModel(activation_height=act, check_scripts=False, liveness_hook=yed_liveness_hook(params, hashes.get))
+    hook = yed_liveness_hook(params, hashes.get)
+    credits = []
+
+    def counting(tx, h, vmodel):
+        out = hook(tx, h, vmodel)
+        credits.extend(out)
+        return out
+    with_hook = v.VaultModel(activation_height=act, check_scripts=False, liveness_hook=counting)
     without = v.VaultModel(activation_height=act, check_scripts=False)
     for h in range(act, tip + 1):
         block = CBlock()
@@ -152,7 +159,7 @@ def replay_models(node, params):
         for name, model in (('with the module hook', with_hook), ('without a module', without)):
             r = model.connect_block(h, block.vtx)
             assert r is None, 'the VaultModel %s refuses block %d (%s), tx %d: %s' % (name, h, hashes[h], r[0], r[1])
-    return with_hook, without, tip
+    return with_hook, without, tip, len(credits)
 
 
 def _zat(yec):

@@ -40,7 +40,8 @@ After the walk, an independent witness of the set state (07/F-4): two Python Vau
 chain from the activation height, one with the YED module's liveness hook
 (test_framework/vault_module_hook.py, a port of Module::Liveness) and one without; every set and
 member of node 0 (a module node) must equal the first's, every one of node 1 (the stock node) the
-second's, and the models must differ exactly where the nodes do.
+second's, the models must differ exactly where the nodes do, and the hook must have credited
+liveness somewhere on the chain (the walk's heartbeats can re-converge the tip's lastact).
 
 The clients (chain-viz, lightwalletd, yolo) are left to the manual walk (its transcript is
 ``contrib/yellowback/devnet/upgrade-walk-transcript.txt``). SKIPs without the Rust attestor
@@ -97,7 +98,7 @@ def witness(directory, stock_evidence, say):
     user, stock = dv.rpc(state, 0, timeout=600), dv.rpc(state, 1, timeout=600)
     t0 = time.time()
     params = ym.params_from_getinfo(user.yed_getinfo())
-    with_hook, without, tip = vmh.replay_models(user, params)
+    with_hook, without, tip, credits = vmh.replay_models(user, params)
     assert stock.getbestblockhash() == user.getblockhash(tip), 'the stock node is not at the replayed tip'
     h = tip + 1
     n_user = vmh.compare_set_state(user, with_hook, h)
@@ -108,9 +109,11 @@ def witness(directory, stock_evidence, say):
     differ = {k.hex(): (a.members[k].last_act, b.members[k].last_act) for k in a.members if a.members[k].last_act != b.members[k].last_act}
     recorded = {k: (d['module'], d['stock']) for k, d in stock_evidence['lastactDiff'].items()}
     assert differ == recorded, 'the models differ in %r, the nodes (walk evidence) in %r' % (differ, recorded)
-    assert differ, 'the walk credited no attestation liveness: the module hook was never exercised'
-    say('witness: two VaultModels over [%d, %d] agree with node 0 (%d members, with the module hook) and node 1 (%d members, '
-        'without); %d lastAct differ, as on the nodes (%d s)' % (with_hook.activation_height, tip, n_user, n_stock, len(differ), time.time() - t0))
+    # the hook credited attestation liveness somewhere on the chain (a later heartbeat may re-converge the end state)
+    assert credits > 0, 'the walk credited no attestation liveness: the module hook was never exercised'
+    say('witness: two VaultModels over [%d, %d] agree with node 0 (%d members, with the module hook: %d credits) and node 1 '
+        '(%d members, without); %d lastAct differ at the tip, as on the nodes (%d s)'
+        % (with_hook.activation_height, tip, n_user, credits, n_stock, len(differ), time.time() - t0))
 
 
 def main():
