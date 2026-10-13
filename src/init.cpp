@@ -1356,6 +1356,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
     }
 
+    // Quantum spec R-A3, checked on every network's final upgrade schedule (compiled chainparams
+    // and regtest -nuparams alike): the vault opcodes and templates are defined over the ZIP-243
+    // sighash of v4 (Sapling) transactions only, so Vault needs Sapling active at or below its
+    // height; otherwise a pre-Sapling (Sprout / ZIP-143 sighash) transaction could spend a vault
+    // or OP_CHECKPQSIG. (This line has no v5 type, so NU5 needs no guard here.)
+    {
+        const auto& upgrades = chainparams.GetConsensus().vUpgrades;
+        const int vaultHeight = upgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+        const int saplingHeight = upgrades[Consensus::UPGRADE_SAPLING].nActivationHeight;
+        if (vaultHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+            (saplingHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || saplingHeight > vaultHeight)) {
+            return InitError("The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3: the vault opcodes are defined for v4 transactions only)");
+        }
+    }
+
     // Yellowback (upgrade plan U-21, U-22): the YED module is consensus wherever UPGRADE_VAULT has a height
     // and the network's attestor set is known (regtest: -nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>);
     // -yellowback and -experimentalfeatures no longer gate it. The index rebuilds from blocks on disk, so it
