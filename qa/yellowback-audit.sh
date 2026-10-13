@@ -288,7 +288,9 @@ for path in files:
         prev = next((src[k].strip() for k in range(n - 2, -1, -1) if src[k].strip()), "")
         where = "%s:%d (%s)" % (path, n, fn)
         if fn in MEMPOOL:
-            ok, rule = level == "0", "mempool path: DoS(0)"
+            # nStockDoS: AcceptToMemoryPool forwards ContextualCheckInputs' own (stock) score for a script
+            # failure of a template-input transaction that is not set-state-dependent (audit 07/F-1)
+            ok, rule = level in ("0", "nStockDoS"), "mempool path: DoS(0), or the forwarded stock nStockDoS"
         elif fn in BLOCK:
             ok, rule = level == "100", "block path: DoS(100)"
         elif "fMempool" in sig:
