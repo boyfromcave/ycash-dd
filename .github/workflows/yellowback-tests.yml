@@ -689,6 +689,7 @@ jobs:
           python3 src/test/gen_yellowback_corpus.py --check
           if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
           if [ -f src/test/gen_pq_corpus.py ]; then python3 src/test/gen_pq_corpus.py --check; fi
+          if [ -f src/test/gen_vault_state_corpus.py ]; then python3 src/test/gen_vault_state_corpus.py --check; fi
 
   # ── pull_request legs on overlay paths (audit 07/F-11) ──────────────────────────────────────────
   # The nightly lockorder and sanitizers variants never block a merge (GitHub cannot gate a merge on
@@ -1512,6 +1513,10 @@ jobs:
           fi
           if [ -f src/test/gen_pq_corpus.py ]; then
             python3 src/test/gen_pq_corpus.py --write || true
+            git add -f src/test/vault_fuzz_tests.cpp
+          fi
+          if [ -f src/test/gen_vault_state_corpus.py ]; then
+            python3 src/test/gen_vault_state_corpus.py --write || true
             git add -f src/test/vault_fuzz_tests.cpp
           fi
       - name: Upload corpus and crashes
