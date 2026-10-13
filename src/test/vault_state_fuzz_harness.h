@@ -473,7 +473,9 @@ inline CMutableTransaction NextTx(World& w, Reader& r, uint8_t op, int& bondVout
         IntentParams ip;
         const bool isV = ParseVault(coin.scriptPubKey, vp), isI = ParseIntent(coin.scriptPubKey, ip);
         if ((mask & 1) && isV) m.vout.push_back(CTxOut(value, BuildIntent(IntentFor(vp, coin.scriptPubKey, PlainScript(mask >> 7)))));
-        if (mask & 2) m.vout.push_back(CTxOut(coin.value - value, coin.scriptPubKey));
+        // output values stay in [0, MAX_MONEY]: no serialized transaction carries others (6.20.0's CTransaction refuses to
+        // build one), so the amount rules are reached through sums
+        if (mask & 2) m.vout.push_back(CTxOut(std::max<CAmount>(0, coin.value - value), coin.scriptPubKey));
         if (mask & 4) m.vout.push_back(CTxOut(value / 3, PlainScript(mask)));
         if ((mask & 8) && isV) // a V output that is not the spent V (on an unlock: a covenant breach)
             m.vout.push_back(CTxOut(value / 4, BuildVault(VaultOf(vp.setId, vp.cancelSetId, 1 + vp.delay % 65534, vp.appHeight, vp.tag))));

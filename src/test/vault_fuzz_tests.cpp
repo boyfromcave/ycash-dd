@@ -162,7 +162,7 @@ static const std::vector<std::pair<std::string, std::string>> VAULT_STATE_CORPUS
     {"unlock_plain_out", "03010001003102040700010500ca9a3b"},
     {"unlock_two_templates", "030100010031020406000005000000c2eb0b0700012300e1f505"},
     {"unlock_fee_input", "03010001003102040700014300e1f505"},
-    {"unlock_negative", "030100010031020407000103ffffffff"},
+    {"unlock_over_value", "030100010031020407000103ffffffff"},
     {"rate_limit", "03010001193102040700010300a3e1110700010380f0fa02"},
     {"rate_limit_epoch", "03010001190402040700010380f0fa0200090701010380f0fa02"},
     {"owner_spend", "03010001003102040700020400000000"},

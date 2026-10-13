@@ -145,7 +145,7 @@ def corpus():
     s.append(("unlock_plain_out", H + spend(0, 1, INTENT | PLAIN, 10 * COIN)))
     s.append(("unlock_two_templates", H + lock() + spend(0, 1, INTENT | RELOCK | SECOND_TEMPLATE, COIN)))
     s.append(("unlock_fee_input", H + spend(0, 1, INTENT | RELOCK | FEE, COIN)))
-    s.append(("unlock_negative", H + spend(0, 1, INTENT | RELOCK, 0xFFFFFFFF)))
+    s.append(("unlock_over_value", H + spend(0, 1, INTENT | RELOCK, 0xFFFFFFFF)))   # the relock clamps to 0
     s.append(("rate_limit", header(bps=1000) + spend(0, 1, INTENT | RELOCK, 3 * COIN) + spend(0, 1, INTENT | RELOCK, COIN // 2)))
     s.append(("rate_limit_epoch", header(bps=1000, window=4) + spend(0, 1, INTENT | RELOCK, COIN // 2) + nxt(9)
                                   + spend(1, 1, INTENT | RELOCK, COIN // 2)))
