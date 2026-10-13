@@ -258,6 +258,8 @@ def main():
     parser.add_argument('--help', '-h', '-?', action='store_true', help='print help text and exit')
     parser.add_argument('--jobs', '-j', type=int, default=4, help='how many test scripts to run in parallel. Default=4.')
     parser.add_argument('--nozmq', action='store_true', help='do not run the zmq tests')
+    # Yellowback (audit 04/F-1, 04/N-4): CI refuses a script that passes by printing SKIP.
+    parser.add_argument('--fail-on-skip', action='store_true', help='treat a script that prints a SKIP line as failed')
     args, unknown_args = parser.parse_known_args()
 
     # Create a set to store arguments and create the passon string
@@ -333,9 +335,21 @@ def main():
         subprocess.check_call((config["environment"]["SRCDIR"] + '/qa/rpc-tests/' + test_list[0]).split() + ['-h'])
         sys.exit(0)
 
-    run_tests(test_list, config["environment"]["SRCDIR"], config["environment"]["BUILDDIR"], config["environment"]["EXEEXT"], args.jobs, args.coverage, passon_args)
+    run_tests(test_list, config["environment"]["SRCDIR"], config["environment"]["BUILDDIR"], config["environment"]["EXEEXT"], args.jobs, args.coverage, passon_args, args.fail_on_skip)
 
-def run_tests(test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=False, args=[]):
+# Yellowback (audit 04/F-1, 04/N-4): a script that cannot run its assertions (an optional helper
+# binary or compiler is missing) prints a line starting with "SKIP" and exits 0. Such a line at
+# column 0 marks the run as skipped; "interm: SKIP: ..." mid-line (yellowback_devnet_upgrade.py)
+# is a deliberate value and does not. Under --fail-on-skip a skipped script fails the run.
+SKIP_LINE = re.compile(r'^SKIP\b')
+
+def classify(stdout, stderr, returncode):
+    """Return (passed, skipped) for a finished test script."""
+    passed = stderr == "" and returncode == 0
+    skipped = passed and any(SKIP_LINE.match(line) for line in stdout.splitlines())
+    return passed, skipped
+
+def run_tests(test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=False, args=[], fail_on_skip=False):
     BOLD = ("","")
     if os.name == 'posix':
         # primitive formatting on supported
@@ -373,20 +387,24 @@ def run_tests(test_list, src_dir, build_dir, exeext, jobs=1, enable_coverage=Fal
     job_queue = RPCTestHandler(jobs, tests_dir, test_list, flags)
 
     max_len_name = len(max(test_list, key=len))
-    results = BOLD[1] + "%s | %s | %s\n\n" % ("TEST".ljust(max_len_name), "PASSED", "DURATION") + BOLD[0]
+    results = BOLD[1] + "%s | %s | %s | %s\n\n" % ("TEST".ljust(max_len_name), "PASSED", "SKIPPED", "DURATION") + BOLD[0]
+    any_skipped = False
     for _ in range(len(test_list)):
-        (name, stdout, stderr, passed, duration) = job_queue.get_next()
-        all_passed = all_passed and passed
+        (name, stdout, stderr, passed, skipped, duration) = job_queue.get_next()
+        all_passed = all_passed and passed and not (skipped and fail_on_skip)
+        any_skipped = any_skipped or skipped
         time_sum += duration
 
         print('\n' + BOLD[1] + name + BOLD[0] + ":")
-        print('' if passed else stdout + '\n', end='')
+        print('' if passed and not skipped else stdout + '\n', end='')
         print('' if stderr == '' else 'stderr:\n' + stderr + '\n', end='')
+        if skipped:
+            print("%sSkipped: %s%s%s" % (BOLD[1], name, " (fails under --fail-on-skip)" if fail_on_skip else "", BOLD[0]))
         print("Pass: %s%s%s, Duration: %s s\n" % (BOLD[1], passed, BOLD[0], duration))
 
-        results += "%s | %s | %s s\n" % (name.ljust(max_len_name), str(passed).ljust(6), duration)
+        results += "%s | %s | %s | %s s\n" % (name.ljust(max_len_name), str(passed).ljust(6), str(skipped).ljust(7), duration)
 
-    results += BOLD[1] + "\n%s | %s | %s s (accumulated)" % ("ALL".ljust(max_len_name), str(all_passed).ljust(6), time_sum) + BOLD[0]
+    results += BOLD[1] + "\n%s | %s | %s | %s s (accumulated)" % ("ALL".ljust(max_len_name), str(all_passed).ljust(6), str(any_skipped).ljust(7), time_sum) + BOLD[0]
     print(results)
     print("\nRuntime: %s s" % (int(time.time() - time0)))
 
@@ -449,10 +467,10 @@ class RPCTestHandler:
                     log_out.seek(0), log_err.seek(0)
                     [stdout, stderr] = [l.read().decode('utf-8') for l in (log_out, log_err)]
                     log_out.close(), log_err.close()
-                    passed = stderr == "" and proc.returncode == 0
+                    (passed, skipped) = classify(stdout, stderr, proc.returncode)
                     self.num_running -= 1
                     self.jobs.remove(j)
-                    return name, stdout, stderr, passed, int(time.time() - time0)
+                    return name, stdout, stderr, passed, skipped, int(time.time() - time0)
             print('.', end='', flush=True)
 
 

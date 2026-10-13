@@ -215,6 +215,37 @@ leg_registration() {
   ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n' || return 1
 }
 
+# ── fail, never skip; the lockorder filter (audit 04/F-1, 04/N-4, 07/F-11) ─────────────────────
+
+leg_ci_guards() {
+  # Every rpc-tests.py run in the workflow passes --fail-on-skip: a script that prints a line starting
+  # with SKIP (an optional binary or compiler missing) must fail CI, never pass vacuously.
+  local bad
+  bad=$(grep -nE '^[[:space:]]*(\./)?qa/pull-tester/rpc-tests\.py' "$WF" | grep -v -- '--fail-on-skip' || true)
+  [ -z "$bad" ] || { echo "rpc-tests.py runs without --fail-on-skip in $WF:"; echo "$bad"; return 1; }
+  grep -qE '^[[:space:]]*(\./)?qa/pull-tester/rpc-tests\.py' "$WF" || { echo "no rpc-tests.py run found in $WF"; return 1; }
+  # The lockorder check names the vault primitive's lock sites (a vault inversion fails it).
+  python3 qa/yellowback-lockorder-check.py --selftest
+  # The PR lockorder leg's subset is part of the merge-gate list (registered, run by a job).
+  local n
+  for n in $(wfenv LOCKORDER_PR_SCRIPTS); do
+    case " $YELLOWBACK_SCRIPTS " in *" $n "*) ;; *) echo "LOCKORDER_PR_SCRIPTS names $n, which is not in YELLOWBACK_SCRIPTS"; return 1 ;; esac
+  done
+}
+
+leg_skip_scripts() {
+  # Report-only: each script that can print SKIP, and whether the workflow names it outside the env
+  # lists (a by-name guard: the sidecar/agent `test -x`, the Falcon probe, a variant's exclusion).
+  local f n rc=0
+  while read -r f; do
+    n=$(basename "$f" .py)
+    # grep -c, not -q: under pipefail an early-exiting grep -q would SIGPIPE the first one.
+    if [ "$(grep -v -E '^  [A-Z_]+: ' "$WF" | grep -cw -- "$n")" -gt 0 ]; then echo "guarded by name: $n"
+    else echo "no by-name guard in $WF: $n (--fail-on-skip still fails its SKIP)"; rc=1; fi
+  done < <(grep -l "^[[:space:]]*print(['\"]SKIP" qa/rpc-tests/*.py)
+  return $rc
+}
+
 # ── bans and the DoS rule ─────────────────────────────────────────────────────────────────────
 
 leg_structure() {
@@ -566,6 +597,8 @@ else
 fi
 leg block "determinism: no clock, no random source, no floating point (plan §3.10, §8.4 items 2, 8)" leg_determinism
 leg block "functional scripts executable, registered and run by a CI job" leg_registration
+leg block "fail, never skip (--fail-on-skip on every run) and the lockorder self-test" leg_ci_guards
+leg report "SKIP-capable scripts and their by-name guards" leg_skip_scripts
 leg block "module structure: no bans, total state machine, no networking" leg_structure
 if [ "$mode" = upgrade ]; then
   leg block "DoS rule: mempool DoS(0), block DoS(100) (upgrade plan U-21)" leg_dos_upgrade

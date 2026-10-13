@@ -149,6 +149,12 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_info)
     // Mainnet's current epoch stays Canopy at any height.
     BOOST_CHECK_EQUAL(CurrentEpochBranchId(4000000, Params(CBaseChainParams::MAIN).GetConsensus()),
                       NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId);
+    // The mainnet topology (audit 04/F-5): NU5 is never scheduled, so Vault's previous epoch walks
+    // back over it to Canopy -- the branch an "old-consensus-branch-id" diagnosis names on mainnet.
+    const Consensus::Params& mainParams = Params(CBaseChainParams::MAIN).GetConsensus();
+    BOOST_CHECK_EQUAL(mainParams.vUpgrades[Consensus::UPGRADE_NU5].nActivationHeight,
+                      Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    BOOST_CHECK_EQUAL(PrevEpochBranchId(VAULT_BRANCH_ID, mainParams), NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId);
 }
 
 BOOST_AUTO_TEST_CASE(vault_upgrade_regtest_activation)
@@ -178,6 +184,8 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_regtest_activation)
     BOOST_CHECK_EQUAL(CurrentEpochBranchId(9, params), NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId);
     BOOST_CHECK_EQUAL(CurrentEpochBranchId(10, params), VAULT_BRANCH_ID);
     BOOST_CHECK_EQUAL(PrevEpochBranchId(VAULT_BRANCH_ID, params), NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId);
+    // NU5 sits unactivated between Canopy and Vault (functional vault_upgrade.py runs this topology).
+    BOOST_CHECK(!params.NetworkUpgradeActive(1000, Consensus::UPGRADE_NU5));
     // Other upgrades keep the index-minus-one rule.
     BOOST_CHECK_EQUAL(PrevEpochBranchId(NetworkUpgradeInfo[Consensus::UPGRADE_CANOPY].nBranchId, params),
                       NetworkUpgradeInfo[Consensus::UPGRADE_HEARTWOOD].nBranchId);
