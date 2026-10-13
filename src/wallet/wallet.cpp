@@ -5952,7 +5952,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 // quantum plan §4.5, D-Q-23 (b): a transaction with a PQ input pays max(DEFAULT_FEE, the plain PQ $/KB
                 // rate at the attested price x size) (-pqfeerate without a price; policy.h AttestedFeePolicy), capped at
                 // PQMaxTxFee() = min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee) (owner D-Q-26: the Yellowback cap).
-                // Never below the 6.20.0 line's ZIP-317 conventional fee (audit 04/N-1, as ycash6's wallet): a PQ input is
+                // Never below the 6.20.0 line's ZIP-317 conventional fee (audit 04/N-1, as the 6.20.0 wallet): a PQ input is
                 // ~53 (SLH-DSA) or ~11 (Falcon) logical actions, which a -txunpaidactionlimit=0 node refuses unpaid and
                 // the ZIP-401 limiter evicts first.
                 if (fPQInput)

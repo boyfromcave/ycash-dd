@@ -163,7 +163,7 @@ CAmount YedMaxTxFee();
 CAmount PQMaxTxFee();
 
 /**
- * The release line's ZIP-317 conventional fee (ycash6 src/zip317.{h,cpp}: MARGINAL_FEE 500, GRACE_ACTIONS 2,
+ * The release line's ZIP-317 conventional fee (ycashd 6.20.0's src/zip317.{h,cpp}: MARGINAL_FEE 500, GRACE_ACTIONS 2,
  * P2PKH_STANDARD_INPUT_SIZE 150, P2PKH_STANDARD_OUTPUT_SIZE 34): 500 x max(2, logical actions), the logical
  * actions being max(ceil(vin bytes / 150), ceil(vout bytes / 34)) + 2 x JoinSplits + max(Sapling spends, outputs).
  * ycash-dd relays without it, but a 6.20.0 node started with -txunpaidactionlimit=0 refuses a transaction that

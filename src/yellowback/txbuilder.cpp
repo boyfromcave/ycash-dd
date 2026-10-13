@@ -85,7 +85,7 @@ CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uin
 
 /**
  * Audit 04/N-1: a YED transaction with a post-quantum input pays at least the 6.20.0 line's ZIP-317 conventional
- * fee (policy.h Zip317ConventionalFee), as ycash6's builders do (P-2), so a -txunpaidactionlimit=0 node relays it
+ * fee (policy.h Zip317ConventionalFee), as the 6.20.0 builders do (P-2), so a -txunpaidactionlimit=0 node relays it
  * and the ZIP-401 limiter does not rank it first for eviction. Estimated before signing, like YedEstimatedSize:
  * the vin bytes at PQSpendInputSize per PQ input and 150 per other input, plus one 150-byte input the caller may
  * not list (the V itself on the claim path, a carrier); the vout bytes at YED_OUTPUT_BYTES_ESTIMATE, above any
@@ -850,7 +850,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
         const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
                              : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold(::minRelayTxFee);
-        // audit 04/N-1: the clamp's floor keeps the 6.20.0 ZIP-317 conventional fee, as ycash6's small-vault path does
+        // audit 04/N-1: the clamp's floor keeps the 6.20.0 ZIP-317 conventional fee, as the 6.20.0 small-vault path does
         const std::optional<uint8_t> ownerScheme(owner.scheme);
         shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
                                                 std::max(YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, ownerScheme)),
