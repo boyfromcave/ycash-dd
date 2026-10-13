@@ -654,8 +654,8 @@ bool AddOrphanTx(const CTransaction& tx, NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(c
     // it will rebroadcast it later, after the parent transaction(s)
     // have been mined or received.
     // -maxorphantx (default 100) orphans, each of which is at most maxSize bytes big
-    // (10,000 once UPGRADE_VAULT is active, to park an SLH-DSA spend: audit 07/F-6), is
-    // at most 1 megabyte of orphans. A refused orphan is not added to recentRejects, so
+    // (99,999 once UPGRADE_VAULT is active, as on 6.20.0, to park SLH-DSA spends: audit
+    // 07/F-6), is at most 10 megabytes of orphans. A refused orphan is not added to recentRejects, so
     // it stays re-requestable.
     const unsigned int maxSize = Params().GetConsensus().NetworkUpgradeActive(chainActive.Height() + 1, Consensus::UPGRADE_VAULT)
         ? MAX_ORPHAN_TX_SIZE_VAULT : MAX_ORPHAN_TX_SIZE;
