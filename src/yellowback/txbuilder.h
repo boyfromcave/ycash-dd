@@ -178,6 +178,10 @@ size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<u
 /** The network fee of a YED transaction with these input scripts and (for a vault spend) owner scheme: the
  *  Yellowback size-priced fee, never below g_yellowbackFee, capped at YedMaxTxFee() (txbuilder.cpp). */
 CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme);
+/** Audit 04/N-1: the 6.20.0 line's ZIP-317 conventional fee of a YED transaction with a PQ input, estimated before
+ *  signing (0 without one); YedNetworkFee never goes below it. */
+static const size_t YED_OUTPUT_BYTES_ESTIMATE = 600;
+CAmount YedConventionalFeeEstimate(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme);
 
 /**
  * SelectYec's fee follower (review B L-1): the fee grows when the selection takes a PQ coin. `scripts` and

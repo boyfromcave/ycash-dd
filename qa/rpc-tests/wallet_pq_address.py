@@ -48,6 +48,7 @@ from test_framework.util import (
     wait_and_assert_operationid_status,
 )
 from test_framework.yellowback_model import base58check_decode, base58check_encode
+from test_framework.yellowback_util import MARGINAL_FEE, conventional_fee
 
 ACTIVATION = 210
 DELAY = 3
@@ -199,7 +200,7 @@ class WalletPQAddressTest(BitcoinTestFramework):
         both = n0.getaddressbalance({'addresses': [a, a2]})
         assert_equal(both['balance'], zat(3))
 
-        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size)')
+        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]
         n0.lockunspent(False, others)
         dest = n1.getnewaddress()
@@ -210,9 +211,11 @@ class WalletPQAddressTest(BitcoinTestFramework):
         size = len(tx['hex']) // 2
         fee = -n0.gettransaction(spend)['fee']
         # At least max(DEFAULT_FEE, -pqfeerate x size) (-pqfeerate defaults to -minrelaytxfee, 100 zat/kB); the
-        # wallet's own minimum (-mintxfee, 1000 zat/kB) prices this large transaction above it, by size.
-        assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000), (fee, size)
-        assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000), (fee, size)
+        # wallet's own minimum (-mintxfee, 1000 zat/kB) prices this large transaction above it, by size. Audit 04/N-1:
+        # never below the 6.20.0 line's ZIP-317 conventional fee (an SLH-DSA input is ~54 logical actions).
+        conv = conventional_fee(tx)
+        assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000, conv), (fee, size, conv)
+        assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000, conv + 2 * MARGINAL_FEE), (fee, size, conv)
         n0.lockunspent(True, others)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))

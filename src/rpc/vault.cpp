@@ -1800,8 +1800,10 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
     mtx.vin.push_back(CTxIn(op, CScript(), seq));
     mtx.vout.push_back(CTxOut(coin.nValue - VAULT_RPC_FEE, GetScriptForDestination(d)));
     // Small vault (review L-1, as the YED builder's owner path, yellowback::ClampOwnerNetworkFee): when the priced fee
-    // would leave the owner a dust output, it is clamped to YedFloorSizeFee(VAULT_RPC_FEE, size) instead of eating the
-    // vault; a dust result is refused (q/fees follow-up, mirrors 6.20.0 without its ZIP-317 term).
+    // would leave the owner a dust output, it is clamped to max(YedFloorSizeFee(VAULT_RPC_FEE, size), the ZIP-317
+    // conventional fee) instead of eating the vault; a dust result is refused (q/fees follow-up). Never below the 6.20.0
+    // line's ZIP-317 conventional fee (audit 04/N-1, as 6.20.0: an SLH-DSA owner scriptSig is ~53 logical actions,
+    // ~26.5k zat), so a 6.20.0 node with -txunpaidactionlimit=0 relays it and its ZIP-401 limiter does not evict it first.
     const CAmount dust = mtx.vout[0].GetDustThreshold(::minRelayTxFee);
     const unsigned int flags = SignFlags();
     const uint32_t branch = NextBranchId();
@@ -1816,9 +1818,12 @@ UniValue vault_ownerspend(const UniValue& params, bool fHelp)
         const SetSigChecker checker(&txc, 0, coin.nValue, false, txdata, snap, next);   // selector 3 reads the set state
         if (!SignPQOwnerSpend(*pwalletMain, owner, coin.scriptPubKey, mtx, 0, coin.nValue, selector, branch, flags, &serror, &checker))
             throw JSONRPCError(RPC_WALLET_ERROR, strprintf("cannot sign the owner spend (selector %d): %s", selector, ScriptErrorString(serror)));
-        const size_t size = ::GetSerializeSize(CTransaction(mtx), SER_NETWORK, PROTOCOL_VERSION);
-        const CAmount sized = yellowback::ClampOwnerNetworkFee(std::min(YedSizeFee(VAULT_RPC_FEE, size), YedMaxTxFee()), coin.nValue, dust,
-                                                               YedFloorSizeFee(VAULT_RPC_FEE, size));
+        const CTransaction signedTx(mtx);
+        const size_t size = ::GetSerializeSize(signedTx, SER_NETWORK, PROTOCOL_VERSION);
+        const CAmount conventional = Zip317ConventionalFee(signedTx);
+        const CAmount floorFee = std::max(YedFloorSizeFee(VAULT_RPC_FEE, size), conventional);
+        const CAmount priced = std::max(std::min(YedSizeFee(VAULT_RPC_FEE, size), YedMaxTxFee()), conventional);
+        const CAmount sized = yellowback::ClampOwnerNetworkFee(priced, coin.nValue, dust, floorFee);
         if (sized == fee) break;
         fee = sized;   // the size does not change with the output's value: one more pass signs it
     }

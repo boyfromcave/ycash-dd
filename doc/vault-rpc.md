@@ -364,7 +364,12 @@ the rate is `-yellowbackfeeusdperkb` (default $0.05/KB) at the attested price --
 Yellowback index tip's window medians, none while a halt bit is set -- never below
 max(5,000 zat/KB, `-pqfeerate`); without an attested price (no Yellowback index, below its start,
 under a halt) it is `-pqfeerate` (quantum plan §4.5, D-Q-23 (b), D-Q-26;
-`yed_getinfo.params.fees.network` reports the values in force).
+`yed_getinfo.params.fees.network` reports the values in force). Never below the 6.20.0 line's ZIP-317
+conventional fee of the signed spend (500 zat × max(2, logical actions), an input counting one action per
+150 bytes: ~27,500 zat for an SLH-DSA owner spend), outside the cap, as ycashd 6.20.0 pays it, so a 6.20.0 node
+started with `-txunpaidactionlimit=0` relays it and its ZIP-401 limiter does not rank it first for eviction
+(audit 04/N-1). The same floor applies to every transaction this wallet builds with a post-quantum input
+(`sendtoaddress`/`sendmany` from an `rq…`/`sq…` coin) and to the YED builders' post-quantum spends.
 
 ### `vault_app "outpoint" ( [{"address"|"script", "amount"}, ...] )`
 Params: `["outpoint": outpoint, "recipients"?: [Recipient]]`

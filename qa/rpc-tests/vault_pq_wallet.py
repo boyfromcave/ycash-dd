@@ -11,15 +11,19 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
 - vault_lock with no owner draws a new SLH-DSA wallet owner; owner as a PQ address, a pqkeyid and
   {scheme, keyhash}; vault_list's "wallet" flag on the owner's node only;
 - vault_ownerspend selector 3 on a released set (no members) and selector 2 after ownerHeight, each a
-  7,939-byte SLH-DSA owner scriptSig; the fee is max(VAULT_RPC_FEE, -pqfeerate x size): 10,000 at the
-  default rate, size-priced on a node with -pqfeerate=0.001;
+  7,939-byte SLH-DSA owner scriptSig; the fee is max(VAULT_RPC_FEE, -pqfeerate x size, the 6.20.0 line's ZIP-317
+  conventional fee (audit 04/N-1)): the conventional fee (~27,500 zat) at the default rate, size-priced on a node
+  with -pqfeerate=0.001;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
-  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size);
+  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size, the ZIP-317
+  conventional fee);
 - A-15: z_sendmany (ANY_TADDR) and z_mergetoaddress never select a TX_PQPKH coin (they cannot sign it);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
   signs its owner spend;
 - an encrypted wallet: the PQ keys survive encryption, a locked wallet refuses vault_getnewowner, the
-  default-owner vault_lock and vault_ownerspend, and works again after walletpassphrase.
+  default-owner vault_lock and vault_ownerspend, and works again after walletpassphrase; audit 02/PQ-4 (the
+  per-unlock PQ key cache): two owner spends of one key and a dumpwallet listing every PQ key after the unlock,
+  then walletlock refuses an owner spend and the dump again (the cache is cleared).
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_pq_wallet.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -30,6 +34,7 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.pq import pqpkh_script
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_util import conventional_fee
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
@@ -167,14 +172,15 @@ class VaultPQWalletTest(BitcoinTestFramework):
         mine = n0.vault_list({'mine': True})
         assert {near['outpoint'], far['outpoint'], by_id['outpoint'], by_obj['outpoint']} <= {r['outpoint'] for r in mine}
 
-        print('vault_ownerspend selector 3 (released set), fee 10,000 at the default rate')
+        print('vault_ownerspend selector 3 (released set), fee max(10,000, the ZIP-317 conventional fee) at the default rate')
         dest = n0.getnewaddress()
         r = n0.vault_ownerspend(far['outpoint'], dest)
         assert_equal(r['selector'], 3)
         self.mine(1)
         fee, size, tx = self.fee_of(r['txid'], zat(4))
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_OWNER_SCRIPTSIG)
-        assert_equal(fee, VAULT_RPC_FEE)
+        assert_equal(fee, max(VAULT_RPC_FEE, conventional_fee(tx)))                  # audit 04/N-1
+        assert fee > 25000, fee
         assert size > 8000, size
         assert tx['confirmations'] >= 1
 
@@ -187,7 +193,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         fee, size, tx = self.fee_of(r['txid'], zat(5))
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_OWNER_SCRIPTSIG)
         assert_equal(tx['locktime'], h + 6)
-        assert_equal(fee, VAULT_RPC_FEE)
+        assert_equal(fee, max(VAULT_RPC_FEE, conventional_fee(tx)))
 
         print('a vault owned by node 1 (-pqfeerate=0.001): its owner spend is priced by size')
         o1 = n1.vault_getnewowner()
@@ -197,7 +203,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert_equal(r['selector'], 3)
         self.mine(1)
         fee, size, tx = self.fee_of(r['txid'], zat(3))
-        assert_equal(fee, max(VAULT_RPC_FEE, HIGH_RATE * size // 1000))
+        assert_equal(fee, max(VAULT_RPC_FEE, HIGH_RATE * size // 1000, conventional_fee(tx)))
         assert fee > VAULT_RPC_FEE
 
         print('a TX_PQPKH output to node 1: listunspent, restart with -rescan, spend by coin selection')
@@ -260,7 +266,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
         size = len(tx['hex']) // 2
         fee = -zat(n1.gettransaction(txid)['fee'])
-        assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000), (fee, size)
+        assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000, conventional_fee(tx)), (fee, size)
         self.mine(1)
         assert_equal(pq_unspent(n1), [])
         if others:
@@ -270,6 +276,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         n2 = self.nodes[2]
         before = n2.vault_getnewowner()
         v2 = self.lock(n0, setid, h + 1000, 2, owner=before['owner'])
+        v2b = self.lock(n0, setid, h + 1000, 2, owner=before['owner'])     # 02/PQ-4: a second spend of the same key
         n2.encryptwallet(PASS)
         bitcoind_processes[2].wait()
         self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2))
@@ -285,11 +292,34 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert after['owner'] != before['owner']
         r = n2.vault_ownerspend(v2['outpoint'], n2.getnewaddress())
         assert_equal(r['selector'], 3)
+        r2 = n2.vault_ownerspend(v2b['outpoint'], n2.getnewaddress())     # the same owner key, from the unlock's cache
+        assert_equal(r2['selector'], 3)
         self.mine(1)
         assert self.tx_of(r['txid'])['confirmations'] >= 1
+        assert self.tx_of(r2['txid'])['confirmations'] >= 1
         lk = n2.vault_lock({'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 1000, 'amount': 1})
         self.mine(1)
         assert_equal({r['outpoint']: r['wallet'] for r in n2.vault_list({'setid': setid})}[lk['outpoint']], True)
+        print('02/PQ-4: dumpwallet after the unlock lists every PQ key; walletlock clears the cache')
+        os.makedirs(os.path.join(self.options.tmpdir, 'export2'), exist_ok=True)
+        self.restart(2, ['-exportdir=%s' % os.path.join(self.options.tmpdir, 'export2')])
+        n2 = self.nodes[2]
+        assert_raises_rpc('walletpassphrase', n2.dumpwallet, 'pqdump2')
+        n2.walletpassphrase(PASS, 600)
+        n2.dumpwallet('pqdump2')
+        with open(os.path.join(self.options.tmpdir, 'export2', 'pqdump2')) as f:
+            text2 = f.read()
+        for key in (before, after, o1b):
+            assert ('owner=' + key['owner']) in text2, key['owner']
+        assert ('owner=' + lk['owner']) in text2
+        n2.walletlock()
+        assert_raises_rpc('walletpassphrase', n2.vault_ownerspend, lk['outpoint'], n2.getnewaddress())
+        assert_raises_rpc('walletpassphrase', n2.dumpwallet, 'pqdump3')
+        n2.walletpassphrase(PASS, 600)
+        r3 = n2.vault_ownerspend(lk['outpoint'], n2.getnewaddress())     # unlocked again: the key is rebuilt
+        assert_equal(r3['selector'], 3)
+        self.mine(1)
+        assert self.tx_of(r3['txid'])['confirmations'] >= 1
         n2.walletlock()
         print('ok')
 

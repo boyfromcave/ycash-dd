@@ -17,7 +17,10 @@
 #   - the claimant pays the protocol fee of the vault it closes and no early fee;
 #   - the network fee of a PQ-owner redeem: the Yellowback $/KB rate (its 5,000 zat/KB floor at a high price),
 #     the dollar cap max(-maxtxfee, $2 at the price) accepted by the wallet's own mempool, and the -pqfeerate
-#     fallback once the price feed stops (FEE-0 then skips the protocol fee too).
+#     fallback once the price feed stops (FEE-0 then skips the protocol fee too);
+#   - audit 04/N-1: every transaction with a post-quantum input (the PQ-owner redeems, vault_ownerspend, a plain PQ
+#     send) pays at least the 6.20.0 line's ZIP-317 conventional fee, so a -txunpaidactionlimit=0 node relays it;
+#     at the fallback rate that floor is the fee (an SLH-DSA owner redeem: ~27,500 zat, no longer the flat 1,000).
 #
 # Rule: FEE-1' RED-3' IT-9' AFEE-1' MINT-2' MINT-5' MINT-8' D-Q-23 D-Q-24 D-Q-25
 
@@ -35,12 +38,14 @@ from test_framework.yellowback_util import (
     USER,
     YELLOWBACK_FEE,
     YellowbackTestFramework,
+    conventional_fee,
     protocol_fee_cents,
     protocol_fee_zat,
     set_quote,
     usd_to_micro,
     vault_early_redeem_fee_zat,
     vault_fee_zat,
+    yed_conventional_estimate,
 )
 from test_framework.yellowback_attest import ArmedModeMixin, wallet_claim
 from test_framework import yellowback_model as ym
@@ -78,6 +83,16 @@ def network_fee_of(node, txid):
     raw = node.getrawtransaction(txid, 1)
     spent = sum(node.getrawtransaction(v['txid'], 1)['vout'][v['vout']]['valueZat'] for v in raw['vin'])
     return spent - sum(o['valueZat'] for o in raw['vout']), raw
+
+
+def pq_input_sizes(raw):
+    """The serialized sizes of a transaction's post-quantum inputs (a scriptSig above 1,000 bytes) and the other count."""
+    sizes = []
+    for v in raw['vin']:
+        n = len(v['scriptSig']['hex']) // 2
+        if n > 1000:
+            sizes.append(40 + (3 if n > 252 else 1) + n)
+    return sizes, len(raw['vin']) - len(sizes)
 
 
 def estimated_bytes(raw):
@@ -204,6 +219,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(yed_rate, FLOOR_ZAT_PER_KB)
         assert_equal(net_fee, max(YELLOWBACK_FEE, min(yed_rate * estimated_bytes(raw) // 1000, max(MAX_TX_FEE, rate_zat_per_kb(CAP_USD, p_mint, 0)))))
         assert_greater_than(net_fee, YELLOWBACK_FEE)
+        assert net_fee >= conventional_fee(raw), (net_fee, conventional_fee(raw))                   # audit 04/N-1
         self.checkpoint('early redeem')
 
         print('the shock: -70 % then +70 % between mint and redeem; the fee stays fixed at pMint')
@@ -295,6 +311,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         redeemed = user.yed_redeem(small['txid'])
         net_fee, raw = network_fee_of(user, redeemed['txid'])
         assert_equal(net_fee, max(YELLOWBACK_FEE, FLOOR_ZAT_PER_KB * estimated_bytes(raw) // 1000))   # the floor rate, 5,000 zat/KB
+        assert net_fee >= conventional_fee(raw), (net_fee, conventional_fee(raw))                   # audit 04/N-1
         self.sync_all()
         self.mine(POOLS[1])
         assert_equal(user.yed_getvault(small['txid'])['status'], 'CLOSED')
@@ -303,7 +320,8 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         net_fee, raw = network_fee_of(user, spent['txid'])
         size = len(raw['hex']) // 2
         assert_greater_than(size, 8000)                                                     # an SLH-DSA owner scriptSig
-        assert_equal(net_fee, max(VAULT_RPC_FEE, FLOOR_ZAT_PER_KB * size // 1000))          # clamped, not refused
+        assert_equal(net_fee, max(VAULT_RPC_FEE, FLOOR_ZAT_PER_KB * size // 1000, conventional_fee(raw)))   # clamped, not refused
+        assert net_fee >= conventional_fee(raw)                                             # audit 04/N-1
         assert_equal(raw['vout'][0]['valueZat'], COIN // 100 - net_fee)
         self.sync_all()
         self.mine(POOLS[1])
@@ -334,6 +352,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(rate, rate_zat_per_kb(50 * 10 ** 6, usd_to_micro(DOWN)))
         assert_greater_than(fee, MAX_TX_FEE)                      # above -maxtxfee: the wallet's own mempool took it
         assert_greater_than(cap + 1, fee)                         # within the cap
+        assert fee >= conventional_fee(user.getrawtransaction(txid, 1))   # audit 04/N-1
         assert txid in user.getrawmempool()
         self.sync_all()
         self.mine(POOLS[1])
@@ -362,7 +381,14 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         redeemed = user.yed_redeem(m['txid'])
         assert_equal((redeemed['feeZat'], redeemed['payee']), (0, None))
         net_fee, raw = network_fee_of(user, redeemed['txid'])
-        assert_equal(net_fee, max(YELLOWBACK_FEE, 100 * estimated_bytes(raw) // 1000))                 # -pqfeerate's 100 zat/kB: the flat fee
+        # -pqfeerate's 100 zat/kB is below the flat fee; audit 04/N-1: the ZIP-317 conventional floor of a PQ-owner redeem
+        # (the builders' pre-signing estimate) is the fee, and it covers the signed transaction's conventional fee
+        pq_sizes, others = pq_input_sizes(raw)
+        floor = yed_conventional_estimate(pq_sizes, others)
+        print('  fallback: network fee %d zat = the conventional floor (the signed transaction\'s conventional fee %d)' % (net_fee, conventional_fee(raw)))
+        assert_equal(net_fee, max(YELLOWBACK_FEE, 100 * estimated_bytes(raw) // 1000, floor))
+        assert_greater_than(floor, 25_000)                                                              # an SLH-DSA owner input
+        assert net_fee >= conventional_fee(raw), (net_fee, conventional_fee(raw))
         self.sync_all()
         stock.generate(1)
         self.sync_all(blocks_only=True)

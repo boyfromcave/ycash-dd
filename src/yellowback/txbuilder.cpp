@@ -38,15 +38,11 @@ namespace yellowback {
  *  under STANDARD alone (quantum spec §5.2); PQ_FALCON lets a Falcon holder verify (only past the Falcon height). */
 static const unsigned int SIGN_FLAGS = STANDARD_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_CHECKSEQUENCEVERIFY | SCRIPT_VERIFY_VAULT | SCRIPT_VERIFY_PQ_FALCON;
 
-/**
- * The estimated size of a YED transaction with these input scripts and owner scheme, before signing: every PQ
- * input -- a TX_PQPKH among `prevScripts` (a YED token or a YEC coin) or the V's owner (`ownerScheme`) -- at
- * PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
- */
-size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+/** The PQ schemes among a YED transaction's inputs (the V's owner first), `other` counting the rest. */
+static std::vector<uint8_t> YedInputSchemes(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme, size_t& other)
 {
     std::vector<uint8_t> schemes;
-    size_t other = 0;
+    other = 0;
     if (ownerScheme.has_value()) schemes.push_back(ownerScheme.value());
     for (const CScript& spk : prevScripts) {
         const std::optional<CTxDestination> h = HolderKey(spk);
@@ -54,6 +50,18 @@ size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<u
         if (id && spk == GetScriptForPQKey(*id)) schemes.push_back(id->scheme);
         else other++;
     }
+    return schemes;
+}
+
+/**
+ * The estimated size of a YED transaction with these input scripts and owner scheme, before signing: every PQ
+ * input -- a TX_PQPKH among `prevScripts` (a YED token or a YEC coin) or the V's owner (`ownerScheme`) -- at
+ * PQSpendInputSize, every other input at 150 bytes, 1,000 bytes for the rest of the transaction.
+ */
+size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+{
+    size_t other = 0;
+    const std::vector<uint8_t> schemes = YedInputSchemes(prevScripts, ownerScheme, other);
     size_t bytes = 1000 + 150 * other;
     for (uint8_t scheme : schemes) bytes += PQSpendInputSize(scheme);
     return bytes;
@@ -71,7 +79,27 @@ size_t YedEstimatedSize(const std::vector<CScript>& prevScripts, std::optional<u
 CAmount YedNetworkFee(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
 {
     const size_t bytes = YedEstimatedSize(prevScripts, ownerScheme);
-    return std::max(g_yellowbackFee, std::min(YedSizeFee(g_yellowbackFee, bytes), YedMaxTxFee()));
+    const CAmount fee = std::max(g_yellowbackFee, std::min(YedSizeFee(g_yellowbackFee, bytes), YedMaxTxFee()));
+    return std::max(fee, YedConventionalFeeEstimate(prevScripts, ownerScheme));
+}
+
+/**
+ * Audit 04/N-1: a YED transaction with a post-quantum input pays at least the 6.20.0 line's ZIP-317 conventional
+ * fee (policy.h Zip317ConventionalFee), as the 6.20.0 builders do (P-2), so a -txunpaidactionlimit=0 node relays it
+ * and the ZIP-401 limiter does not rank it first for eviction. Estimated before signing, like YedEstimatedSize:
+ * the vin bytes at PQSpendInputSize per PQ input and 150 per other input, plus one 150-byte input the caller may
+ * not list (the V itself on the claim path, a carrier); the vout bytes at YED_OUTPUT_BYTES_ESTIMATE, above any
+ * YED transaction's outputs (a V script <= 274 bytes, the payload, five more outputs). 0 without a PQ input (the
+ * flat and size fees stand); outside the YedMaxTxFee cap, as on 6.20.0 (the conventional fee is the relay floor).
+ */
+CAmount YedConventionalFeeEstimate(const std::vector<CScript>& prevScripts, std::optional<uint8_t> ownerScheme)
+{
+    size_t other = 0;
+    const std::vector<uint8_t> schemes = YedInputSchemes(prevScripts, ownerScheme, other);
+    if (schemes.empty()) return 0;
+    size_t inBytes = 150 * (other + 1);
+    for (uint8_t scheme : schemes) inBytes += PQSpendInputSize(scheme);
+    return Zip317ConventionalFee(inBytes, YED_OUTPUT_BYTES_ESTIMATE);
 }
 
 CAmount ClampOwnerNetworkFee(CAmount networkFee, CAmount spendable, CAmount dust, CAmount floorFee)
@@ -189,6 +217,10 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
     plan.collateralOut = s.vaultValue + s.carrierValue + yedValue - s.networkFee - (fee ? s.feeZat : 0) - (attest ? s.attestFeeZat : 0)
                          - (residual ? s.residualZat : 0) - (change ? TOKEN_VALUE : 0);
     if (plan.collateralOut <= 0) throw std::runtime_error("vault-value-too-small: the vault does not cover the fees");
+    // audit 04/N-1 (as 6.20.0): the conventional-fee floor survives the small-vault clamp, which can leave a dust owner
+    // output; refuse it here rather than build a transaction the mempool rejects as dust.
+    if (s.collateralScript.has_value() && CTxOut(plan.collateralOut, s.collateralScript.value()).IsDust(::minRelayTxFee))
+        throw std::runtime_error("vault-value-too-small: the vault does not cover the fees and a non-dust output");
     plan.burnCents = s.withPayload ? yedIn - s.changeCents : yedIn;
 
     // Slots in order; indices are fixed before the payload is encoded (feeVout / attestFeeVout / assignments).
@@ -818,8 +850,11 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
         const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
                              : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold(::minRelayTxFee);
+        // audit 04/N-1: the clamp's floor keeps the 6.20.0 ZIP-317 conventional fee, as the 6.20.0 small-vault path does
+        const std::optional<uint8_t> ownerScheme(owner.scheme);
         shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
-                                                YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, std::optional<uint8_t>(owner.scheme))));
+                                                std::max(YedFloorSizeFee(g_yellowbackFee, YedEstimatedSize(yedScripts, ownerScheme)),
+                                                         YedConventionalFeeEstimate(yedScripts, ownerScheme)));
     }
     if (kind == BuiltKind::CLAIM) {
         // U-23: the vault's value goes to intents, so the network fee, the pool and attestor fees and the YED

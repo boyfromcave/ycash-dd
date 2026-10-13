@@ -20,11 +20,13 @@
 #include "script/standard.h"
 #include "test/test_bitcoin.h"
 #include "utilstrencodings.h"
+#include "utiltime.h"
 #include "vault/template.h"
 #include "wallet/crypter.h"
 #include "wallet/db.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
+#include "yellowback/txbuilder.h"
 #include "zcash/address/zip32.h"
 
 #include <boost/test/unit_test.hpp>
@@ -209,6 +211,61 @@ BOOST_AUTO_TEST_CASE(crypto_keystore)
     BOOST_CHECK(ks.GetPQKey(a.GetID(), out) && out == a);
 }
 
+BOOST_AUTO_TEST_CASE(crypto_keystore_decrypt_cache)
+{
+    // Audit 02/PQ-4: an encrypted, unlocked store rebuilds a PQ key (pq::KeyGen) once per unlock, then
+    // serves it from mapDecryptedPQKeys; Lock() clears the cache; a re-added record is never served stale.
+    TestCryptoKeyStore ks;
+    const CPQKey a = Derived(1, 0), b = Derived(2, 0), c = Derived(2, 1);
+    BOOST_REQUIRE(ks.AddPQKey(a) && ks.AddPQKey(b) && ks.AddPQKey(c));
+    CKeyingMaterial mk = MasterKey(0x42);
+    BOOST_REQUIRE(ks.EncryptKeys(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    // the first unlock checks every key and keeps the keys it rebuilt
+    BOOST_REQUIRE(ks.Unlock(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), 3U);
+    // (b) locked: the cache is empty and no secret is served
+    BOOST_REQUIRE(ks.Lock());
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    CPQKey out;
+    BOOST_CHECK(!ks.GetPQKey(a.GetID(), out));
+    BOOST_CHECK(!ks.GetPQKey(b.GetID(), out));
+    // (c) a wrong master key leaves the cache empty
+    BOOST_CHECK(!ks.Unlock(MasterKey(0x43)));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    // a thoroughly-checked unlock rebuilds one key, which it keeps
+    BOOST_REQUIRE(ks.Unlock(mk));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 1U);
+    const uint64_t before = ks.PQKeyDecryptCount();
+    // (a) the first GetPQKey of each key rebuilds it (two of three: one came with the unlock), the second
+    // is served from the cache: equal keys, no further decryption
+    for (const CPQKey* k : {&a, &b, &c}) {
+        CPQKey first, second;
+        BOOST_CHECK(ks.GetPQKey(k->GetID(), first) && first == *k);
+        BOOST_CHECK(ks.GetPQKey(k->GetID(), second) && second == *k && first == second);
+    }
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 2);
+    const int64_t t0 = GetTimeMicros();
+    BOOST_CHECK(ks.GetPQKey(a.GetID(), out) && out == a);
+    BOOST_TEST_MESSAGE("cached GetPQKey (SLH-DSA): " << (GetTimeMicros() - t0) << " us");
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 2);
+    // (d) a key added while unlocked is served; re-adding a record drops its cached copy
+    const CPQKey d = Derived(2, 2);
+    BOOST_REQUIRE(ks.AddPQKey(d));
+    BOOST_CHECK(ks.GetPQKey(d.GetID(), out) && out == d);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 3);
+    BOOST_REQUIRE(ks.AddPQKey(b));
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 3U);
+    BOOST_CHECK(ks.GetPQKey(b.GetID(), out) && out == b);
+    BOOST_CHECK_EQUAL(ks.PQKeyDecryptCount(), before + 4);
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 4U);
+    BOOST_REQUIRE(ks.Lock());
+    BOOST_CHECK_EQUAL(ks.DecryptedPQKeyCount(), 0U);
+    BOOST_CHECK(!ks.GetPQKey(d.GetID(), out));
+}
+
 BOOST_AUTO_TEST_CASE(pqpkh_sign_and_size)
 {
     // TX_PQPKH through ProduceSignature/SignSignature: the pushes of spec §2.1, verified under the vault
@@ -308,6 +365,35 @@ BOOST_AUTO_TEST_CASE(pq_size_fee)
     BOOST_CHECK_EQUAL(PQSizeFee(DEFAULT_FEE, 8100), 8100);
     BOOST_CHECK_EQUAL(PQSizeFee(10000, 8100), 10000);
     pqFeeRate = saved;
+}
+
+BOOST_AUTO_TEST_CASE(pq_conventional_fee)
+{
+    // Audit 04/N-1: the 6.20.0 line's ZIP-317 conventional fee, 500 x max(2, max(ceil(in/150), ceil(out/34)) + shielded).
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(0, 0), 1000);
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 34), 1000);           // 1 action, the grace of 2
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(451, 34), 2000);           // ceil(451/150) = 4
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 35 * 34), 17500);     // outputs dominate
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 34, 3), 2000);        // + shielded actions
+    // A one-input transaction spending a TX_PQPKH output: its vin bytes are PQSpendInputSize (the exact scriptSig size).
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        CMutableTransaction mtx;
+        mtx.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+        mtx.vin[0].scriptSig = PQScriptSig(valtype(pq::SigSize(scheme) + 1, 0), valtype(pq::PubKeySize(scheme), 0));
+        mtx.vout.push_back(CTxOut(1000, GetScriptForDestination(CKeyID())));
+        const size_t inBytes = PQSpendInputSize(scheme);
+        BOOST_CHECK_EQUAL(::GetSerializeSize(mtx.vin[0], SER_NETWORK, PROTOCOL_VERSION), inBytes);
+        const CAmount conventional = Zip317ConventionalFee(CTransaction(mtx));
+        BOOST_CHECK_EQUAL(conventional, 500 * (CAmount)((inBytes + 149) / 150));
+        BOOST_TEST_MESSAGE("scheme " << (int)scheme << ": input " << inBytes << " bytes, conventional fee " << conventional << " zat");
+        // the YED builders' pre-signing estimate never falls below it (the owner's spend, or a PQ YED/YEC input)
+        BOOST_CHECK_GE(yellowback::YedConventionalFeeEstimate({}, scheme), conventional);
+        BOOST_CHECK_GE(yellowback::YedNetworkFee({}, scheme), conventional);
+        BOOST_CHECK_GE(yellowback::YedConventionalFeeEstimate({GetScriptForPQKey(Derived(scheme, 0).GetID())}, std::nullopt), conventional);
+    }
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(PQSpendInputSize(pq::SCHEME_SLH_DSA_SHA2_128S), 34), 27000);   // ~53-54 actions
+    // no PQ input: the estimate stands aside (the flat and size fees apply)
+    BOOST_CHECK_EQUAL(yellowback::YedConventionalFeeEstimate({GetScriptForDestination(CKeyID())}, std::nullopt), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
