@@ -11,6 +11,7 @@
 #include "coincontrol.h"
 #include "core_io.h"
 #include "crypto/pq/scheme.h"
+#include "vault/act.h"
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
@@ -3158,6 +3159,8 @@ void CWallet::SyncTransaction(const CTransaction& tx, const CBlock* pblock, cons
         return;
     }
 #endif // YCASH_WR
+
+    VaultCheckJoins(tx, pblock);   // S3: an imported key's SET_JOIN sets the restore marker (07/F-5)
 
     if (!AddToWalletIfInvolvingMe(tx, pblock, nHeight, true))
         return; // Not one of ours
@@ -7661,8 +7664,8 @@ bool IsVaultSetMemberKey(const CPubKey& key)
     return false;
 }
 
-bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, bool clearRestored, int& added,
-                        int& present, std::string& conflict)
+bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, int& added, int& present,
+                        std::string& conflict)
 {
     added = present = 0;
     CWalletDB walletdb(wallet.strWalletFile);
@@ -7695,11 +7698,37 @@ bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& r
         }
         added++;
     }
-    if (clearRestored && walletdb.ReadVaultSignRestored() && !walletdb.EraseVaultSignRestored()) {
-        conflict = "cannot clear the vault sign-once restore marker";
-        return false;
-    }
     return true;
+}
+
+bool MarkVaultKeyImported(CWallet& wallet, const CPubKey& key)
+{
+    CWalletDB walletdb(wallet.strWalletFile);
+    if (IsVaultSetMemberKey(key)) return walletdb.WriteVaultSignRestored();
+    LOCK(wallet.cs_wallet);
+    const CKeyID id = key.GetID();
+    if (wallet.setVaultPendingKeys.count(id)) return true;
+    wallet.setVaultPendingKeys.insert(id);
+    return walletdb.WriteVaultPendingKey(id);
+}
+
+void CWallet::VaultCheckJoins(const CTransaction& tx, const CBlock* pblock)
+{
+    AssertLockHeld(cs_wallet);
+    if (!pblock || setVaultPendingKeys.empty()) return;
+    for (const CTxOut& o : tx.vout) {
+        if (!vault::IsActOutput(o.scriptPubKey)) continue;
+        vault::Act act;
+        if (vault::DecodeAct(o.scriptPubKey, act) || act.type != vault::ACT_SET_JOIN) continue;
+        const CKeyID id = act.join.memberKey.GetID();
+        if (!setVaultPendingKeys.count(id)) continue;
+        CWalletDB walletdb(strWalletFile);
+        walletdb.WriteVaultSignRestored();
+        walletdb.EraseVaultPendingKey(id);
+        setVaultPendingKeys.erase(id);
+        LogPrintf("vault: an imported key joined set %s (tx %s): the wallet has no sign-once history for it; restore marker set "
+                  "(set_signunlock / set_signcancel refuse until set_acknowledgerestore)\n", act.join.setId.GetHex(), tx.GetHash().GetHex());
+    }
 }
 
 bool WalletHoldsVaultMemberKey(const CWallet& wallet)

@@ -293,6 +293,10 @@ public:
     bool WriteVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx);
     bool EraseVaultBuild(const COutPoint& templ);
     bool WriteVaultRecipient(const uint256& recipientHash, const CScript& script);
+    // Imported keys that were not a vault set member at the tip when imported (S3): a SET_JOIN of one in a connected
+    // block sets the restore marker. Loaded with the wallet ("vaultpendingkey").
+    bool WriteVaultPendingKey(const CKeyID& id);
+    bool EraseVaultPendingKey(const CKeyID& id);
 
     static void IncrementUpdateCounter();
     static unsigned int GetUpdateCounter();

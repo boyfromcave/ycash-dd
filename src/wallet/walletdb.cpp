@@ -993,6 +993,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> mtx;
             pwallet->LoadVaultBuild(templ, mtx);
         }
+        else if (strType == "vaultpendingkey")
+        {
+            CKeyID id;
+            ssKey >> id;
+            pwallet->setVaultPendingKeys.insert(id);
+        }
         else if (strType == "vaultrecipient")
         {
             uint256 recipientHash;
@@ -1596,6 +1602,18 @@ bool CWalletDB::EraseVaultBuild(const COutPoint& templ)
 {
     nWalletDBUpdateCounter++;
     return Erase(std::make_pair(std::string("vaultbuild"), templ));
+}
+
+bool CWalletDB::WriteVaultPendingKey(const CKeyID& id)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("vaultpendingkey"), id), (uint8_t)1);
+}
+
+bool CWalletDB::EraseVaultPendingKey(const CKeyID& id)
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::make_pair(std::string("vaultpendingkey"), id));
 }
 
 bool CWalletDB::WriteVaultRecipient(const uint256& recipientHash, const CScript& script)
