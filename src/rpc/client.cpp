@@ -213,6 +213,9 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_revive", 0 },
     { "yed_revive", 1 },
     { "yed_reportequivocation", 2 },   // wait
+    { "yed_buildcancel", 1 },
+    { "yed_signcancelcosign", 1 },
+    { "yed_signcancelcosign", 2 },
     { "yed_signattestation", 0 },
     { "yed_signattestation", 1 },
     { "yed_signattestation", 2 },
