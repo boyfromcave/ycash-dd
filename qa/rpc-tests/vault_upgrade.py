@@ -349,7 +349,7 @@ class VaultUpgradeTest(BitcoinTestFramework):
         assert_vault_alone_refused(os.getenv("BITCOIND", "bitcoind"), os.path.join(self.options.tmpdir, 'node1'), [])
         assert_start_raises_init_error(1, self.options.tmpdir, ['-nuparams=76b809bb:20', nuparams(VAULT_BRANCH_ID, 10)],
                                        'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3')
-        self.nodes[1] = start_node(1, self.options.tmpdir, [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=mempool'])
+        self.nodes[1] = start_node(1, self.options.tmpdir, list(YCASH_UPGRADE_ARGS) + [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=mempool'])
         connect_nodes_bi(self.nodes, 0, 1)
         sync_blocks(self.nodes)
         print('vault_upgrade OK')
