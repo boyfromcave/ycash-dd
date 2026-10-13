@@ -239,7 +239,8 @@ leg_skip_scripts() {
   local f n rc=0
   while read -r f; do
     n=$(basename "$f" .py)
-    if grep -v -E '^  [A-Z_]+: ' "$WF" | grep -qw "$n"; then echo "guarded by name: $n"
+    # grep -c, not -q: under pipefail an early-exiting grep -q would SIGPIPE the first one.
+    if [ "$(grep -v -E '^  [A-Z_]+: ' "$WF" | grep -cw -- "$n")" -gt 0 ]; then echo "guarded by name: $n"
     else echo "no by-name guard in $WF: $n (--fail-on-skip still fails its SKIP)"; rc=1; fi
   done < <(grep -l "^[[:space:]]*print(['\"]SKIP" qa/rpc-tests/*.py)
   return $rc
