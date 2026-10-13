@@ -1688,6 +1688,16 @@ public:
     /**
      * Atomic Swap Methods
      */
+    /**
+     * Vault spends this wallet built for set signatures (vault_buildunlock / vault_buildcancel / vault_refee), keyed
+     * by the template outpoint, and the recipient scripts of the intents it built (01/V-2, 07/N-2). Persisted as
+     * "vaultbuild" / "vaultrecipient" records; a build's fee inputs are re-locked at load (LoadVaultBuild).
+     */
+    std::map<COutPoint, CMutableTransaction> mapVaultBuilds;
+    std::map<uint256, CScript> mapVaultRecipients;
+    //! Remember a loaded vault build and lock its fee inputs (every input but the template input).
+    void LoadVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx);
+
     //! Add atomic swap info to wallet and save to database
     bool AddAtomicSwap(const CAtomicSwapInfo& swapInfo);
     //! Update existing atomic swap info
@@ -1963,5 +1973,15 @@ public:
     KeyAddResult operator()(const libzcash::InvalidEncoding& no) const;
 };
 
+
+/** True when key is a member (any status) of a vault signer set at the tip (07/F-5). */
+bool IsVaultSetMemberKey(const CPubKey& key);
+/** True when the wallet holds the private key of a vault signer set member at the tip (07/F-5). */
+bool WalletHoldsVaultMemberKey(const CWallet& wallet);
+/** Import set sign-once records (07/F-5: set_importsigned, a wallet dump's vaultsetsig= lines). A record that differs
+ *  from one the wallet holds for the same (setId, prevout) refuses the whole import (conflict names it); identical
+ *  ones are skipped. When clearRestored, the restore marker is erased after the import. */
+bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& recs, bool clearRestored, int& added,
+                        int& present, std::string& conflict);
 
 #endif // BITCOIN_WALLET_WALLET_H
