@@ -485,6 +485,21 @@ leg_naming() {
   ! printf '%s\n' "$added" | grep -E '[Dd]igi[Dd]ollar|DIGIDOLLAR|\bDD\b' | grep -Ev '^\+[[:space:]]*(//|\*|/\*)' || return 1
 }
 
+leg_pq_wipes() {
+  # Wallet-side secret residue in the vendored PQ C (audit 02/PQ-1, 02/PQ-2; src/crypto/pq/README.md
+  # "Local patches" P3): the Falcon keygen/sign done: blocks wipe their SHAKE256 DRBG state, and every
+  # slh_var_t built from a secret key in slh_dsa.c is wiped before its function returns. The frame layout
+  # is compiler-dependent, so the proof is the source, not a runtime scan.
+  local fs=src/crypto/pq/falcon/ycash_falcon_sign.c sd=src/crypto/pq/slhdsa/slh_dsa.c rc=0 n
+  if [ ! -d src/crypto/pq ]; then echo "no src/crypto/pq on this line"; return 0; fi
+  n=$(grep -c 'wipe(&rng, sizeof rng)' "$fs"); echo "  $fs: wipe(&rng) x$n (want 1)"; [ "$n" = 1 ] || rc=1
+  n=$(grep -c 'wipe(&sc, sizeof sc)' "$fs"); echo "  $fs: wipe(&sc) x$n (want 1)"; [ "$n" = 1 ] || rc=1
+  n=$(grep -c 'slh_wipe_var(&var);' "$sd")
+  local secret; secret=$(grep -c 'mk_var(&var, NULL, sk, prm)' "$sd")
+  echo "  $sd: slh_wipe_var(&var) x$n (want one per secret slh_var_t: $secret)"; [ "$n" -ge 2 ] && [ "$n" = "$secret" ] || rc=1
+  return $rc
+}
+
 # ── upgrade line only ─────────────────────────────────────────────────────────────────────────
 
 leg_cross_line() {
@@ -507,6 +522,17 @@ leg_cross_line() {
     other=$(show "$f" | sha256 | cut -c1-64)
     if [ "$mine" = "$other" ]; then echo "  $f  $mine  identical"; else echo "  $f  this $mine, other $other  DIFFERENT"; rc=1; fi
   done
+  # src/crypto/pq (the PQ schemes and their vendored C, local patches P1-P3) is byte-identical on both lines
+  # (src/crypto/pq/README.md; audit 02/PQ-1..PQ-3): compared file by file over the committed tree.
+  if [ -d src/crypto/pq ]; then
+    local pqrc=0
+    for f in $(git ls-files src/crypto/pq); do
+      mine=$(sha256 < "$f" | cut -c1-64)
+      other=$(show "$f" 2>/dev/null | sha256 | cut -c1-64)
+      [ "$mine" = "$other" ] || { echo "  $f  this $mine, other $other  DIFFERENT"; pqrc=1; rc=1; }
+    done
+    [ $pqrc = 1 ] || echo "  src/crypto/pq  $(git ls-files src/crypto/pq | wc -l | tr -d ' ') files  identical"
+  fi
   return $rc
 }
 
@@ -550,6 +576,7 @@ leg block "documents (fork-local, P4)" leg_documents
 leg block "RPC contract (P7; rpcversion of this line)" leg_contract
 leg block "attribution: The Ycash developers on every fork file, no upstream notice touched" leg_attribution
 leg block "naming: no ycash6 / DigiDollar / ydollar in src/ (AGENTS.md rule 6)" leg_naming
+leg block "PQ secret wipes: Falcon DRBG state, slhdsa-c slh_var_t (local patch P3)" leg_pq_wipes
 leg block "rule -> test tags (v2 plan §7)" leg_rule_tags
 leg block "rule -> test tags, v3 identifiers (v3 plan §7)" leg_rule_tags_v3
 [ "$interm" = 0 ] || leg block "rule -> test tags, in-term identifiers (in-term plan section 4)" leg_rule_tags_interm
