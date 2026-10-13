@@ -196,7 +196,7 @@ BOOST_AUTO_TEST_CASE(vault_tx_version_v4_only)
     // transactions are valid. v4.5.0 has no v5 type: a ZIP-225 (v5) transaction is not even
     // representable (serialization throws "Unknown transaction format", so the wire rejects it
     // before any validation), and ContextualCheckTransaction rejects every non-Sapling version
-    // group once Sapling is active ("bad-sapling-tx-version-group-id"); ycash6 rejects v5 under
+    // group once Sapling is active ("bad-sapling-tx-version-group-id"); the 6.20.0 line rejects v5 under
     // Vault as "bad-vault-tx-version-group-id" (docs/mapping.md §22). The parity is the rejection.
     SelectParams(CBaseChainParams::REGTEST);
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 1);
@@ -215,10 +215,10 @@ BOOST_AUTO_TEST_CASE(vault_tx_version_v4_only)
     mtx.vout[0].scriptPubKey = CScript() << OP_TRUE;
     const CTransaction tx4(mtx);
 
-    // v5 (ZIP-225, as ycash6 defines it): not representable on this line.
+    // v5 (ZIP-225, as the 6.20.0 line defines it): not representable on this line.
     CMutableTransaction m5 = mtx;
-    m5.nVersionGroupId = 0x26A7270A;   // ZIP225_VERSION_GROUP_ID (ycash6)
-    m5.nVersion = 5;                   // ZIP225_TX_VERSION (ycash6)
+    m5.nVersionGroupId = 0x26A7270A;   // ZIP225_VERSION_GROUP_ID (6.20.0 line)
+    m5.nVersion = 5;                   // ZIP225_TX_VERSION (6.20.0 line)
     BOOST_CHECK_THROW(CTransaction{m5}, std::ios_base::failure);
 
     // A non-Sapling version group that does serialize (Overwinter v3) is invalid under Vault.
