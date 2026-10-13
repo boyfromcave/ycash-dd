@@ -26,6 +26,7 @@
 #include "wallet/db.h"
 #include "wallet/wallet.h"
 #include "wallet/walletdb.h"
+#include "yellowback/txbuilder.h"
 #include "zcash/address/zip32.h"
 
 #include <boost/test/unit_test.hpp>
@@ -364,6 +365,35 @@ BOOST_AUTO_TEST_CASE(pq_size_fee)
     BOOST_CHECK_EQUAL(PQSizeFee(DEFAULT_FEE, 8100), 8100);
     BOOST_CHECK_EQUAL(PQSizeFee(10000, 8100), 10000);
     pqFeeRate = saved;
+}
+
+BOOST_AUTO_TEST_CASE(pq_conventional_fee)
+{
+    // Audit 04/N-1: the 6.20.0 line's ZIP-317 conventional fee, 500 x max(2, max(ceil(in/150), ceil(out/34)) + shielded).
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(0, 0), 1000);
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 34), 1000);           // 1 action, the grace of 2
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(451, 34), 2000);           // ceil(451/150) = 4
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 35 * 34), 17500);     // outputs dominate
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(150, 34, 3), 2000);        // + shielded actions
+    // A one-input transaction spending a TX_PQPKH output: its vin bytes are PQSpendInputSize (the exact scriptSig size).
+    for (uint8_t scheme : {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512}) {
+        CMutableTransaction mtx;
+        mtx.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+        mtx.vin[0].scriptSig = PQScriptSig(valtype(pq::SigSize(scheme) + 1, 0), valtype(pq::PubKeySize(scheme), 0));
+        mtx.vout.push_back(CTxOut(1000, GetScriptForDestination(CKeyID())));
+        const size_t inBytes = PQSpendInputSize(scheme);
+        BOOST_CHECK_EQUAL(::GetSerializeSize(mtx.vin[0], SER_NETWORK, PROTOCOL_VERSION), inBytes);
+        const CAmount conventional = Zip317ConventionalFee(CTransaction(mtx));
+        BOOST_CHECK_EQUAL(conventional, 500 * (CAmount)((inBytes + 149) / 150));
+        BOOST_TEST_MESSAGE("scheme " << (int)scheme << ": input " << inBytes << " bytes, conventional fee " << conventional << " zat");
+        // the YED builders' pre-signing estimate never falls below it (the owner's spend, or a PQ YED/YEC input)
+        BOOST_CHECK_GE(yellowback::YedConventionalFeeEstimate({}, scheme), conventional);
+        BOOST_CHECK_GE(yellowback::YedNetworkFee({}, scheme), conventional);
+        BOOST_CHECK_GE(yellowback::YedConventionalFeeEstimate({GetScriptForPQKey(Derived(scheme, 0).GetID())}, std::nullopt), conventional);
+    }
+    BOOST_CHECK_EQUAL(Zip317ConventionalFee(PQSpendInputSize(pq::SCHEME_SLH_DSA_SHA2_128S), 34), 27000);   // ~53-54 actions
+    // no PQ input: the estimate stands aside (the flat and size fees apply)
+    BOOST_CHECK_EQUAL(yellowback::YedConventionalFeeEstimate({GetScriptForDestination(CKeyID())}, std::nullopt), 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

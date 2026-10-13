@@ -162,6 +162,25 @@ CAmount YedMaxTxFee();
  *  vault/Yellowback paths, YedMaxTxFee() -- min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee). */
 CAmount PQMaxTxFee();
 
+/**
+ * The release line's ZIP-317 conventional fee (ycash6 src/zip317.{h,cpp}: MARGINAL_FEE 500, GRACE_ACTIONS 2,
+ * P2PKH_STANDARD_INPUT_SIZE 150, P2PKH_STANDARD_OUTPUT_SIZE 34): 500 x max(2, logical actions), the logical
+ * actions being max(ceil(vin bytes / 150), ceil(vout bytes / 34)) + 2 x JoinSplits + max(Sapling spends, outputs).
+ * ycash-dd relays without it, but a 6.20.0 node started with -txunpaidactionlimit=0 refuses a transaction that
+ * pays less and every 6.20.0 node's ZIP-401 limiter evicts it first (audit 04/N-1). A post-quantum scriptSig is
+ * big (SLH-DSA ~7,938 bytes = 53 actions, ~26,500 zat; Falcon ~1,600 = 11 actions), so the wallet and the YED
+ * builders pay at least this for a transaction with a PQ input, and both lines relay and rank it identically.
+ */
+static const CAmount ZIP317_MARGINAL_FEE = 500;
+static const size_t ZIP317_GRACE_ACTIONS = 2;
+static const size_t ZIP317_INPUT_SIZE = 150;
+static const size_t ZIP317_OUTPUT_SIZE = 34;
+/** From the serialized sizes of the vin and vout fields (without their compact-size counts) and the shielded
+ *  action count (2 x JoinSplits + max(Sapling spends, outputs)). */
+CAmount Zip317ConventionalFee(size_t txInBytes, size_t txOutBytes, size_t shieldedActions = 0);
+/** Of a whole transaction (its scriptSigs as they are: sign first, or use dummy signatures of the real size). */
+CAmount Zip317ConventionalFee(const CTransaction& tx);
+
 /** max(floor, PlainPQFeeRate() x nBytes): the fee of a transaction of nBytes with a PQ input (ycash-dd:
  *  floor = DEFAULT_FEE for the wallet). */
 CAmount PQSizeFee(CAmount floor, size_t nBytes);

@@ -545,7 +545,7 @@ std::string HelpMessage(HelpMessageMode mode)
     }
     strUsage += HelpMessageOpt("-minrelaytxfee=<amt>", strprintf(_("Fees (in %s/kB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
-    strUsage += HelpMessageOpt("-pqfeerate=<amt>", strprintf(_("Fallback fee rate (in %s/kB) the wallet charges a transaction with a post-quantum input while no attested YEC price exists: max(the flat fee, this rate x size) (default: -minrelaytxfee, %s)"),
+    strUsage += HelpMessageOpt("-pqfeerate=<amt>", strprintf(_("Fallback fee rate (in %s/kB) the wallet charges a transaction with a post-quantum input while no attested YEC price exists: max(the flat fee, this rate x size), never below the 6.20.0 line's ZIP-317 conventional fee (500 zat per logical action, about 26,500 zat for an SLH-DSA input) (default: -minrelaytxfee, %s)"),
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)));
     strUsage += HelpMessageOpt("-pqfeeusdperkb=<usd>", strprintf(_("Dollars per kB the wallet charges a transaction with a post-quantum input at the attested YEC price (floor %d zat/kB; 0 = the -pqfeerate behaviour) (default: %s)"),
         (int)DEFAULT_ATTESTED_FEE_FLOOR_PER_KB, "0.02"));

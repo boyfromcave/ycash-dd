@@ -438,6 +438,21 @@ CAmount PQMaxTxFee()
     return YedMaxTxFee();
 }
 
+CAmount Zip317ConventionalFee(size_t txInBytes, size_t txOutBytes, size_t shieldedActions)
+{
+    const size_t in = (txInBytes + ZIP317_INPUT_SIZE - 1) / ZIP317_INPUT_SIZE;
+    const size_t out = (txOutBytes + ZIP317_OUTPUT_SIZE - 1) / ZIP317_OUTPUT_SIZE;
+    return ZIP317_MARGINAL_FEE * (CAmount)std::max(ZIP317_GRACE_ACTIONS, std::max(in, out) + shieldedActions);
+}
+
+CAmount Zip317ConventionalFee(const CTransaction& tx)
+{
+    const size_t inBytes = GetSerializeSize(tx.vin, SER_NETWORK, PROTOCOL_VERSION) - GetSizeOfCompactSize(tx.vin.size());
+    const size_t outBytes = GetSerializeSize(tx.vout, SER_NETWORK, PROTOCOL_VERSION) - GetSizeOfCompactSize(tx.vout.size());
+    const size_t shielded = 2 * tx.vJoinSplit.size() + std::max(tx.vShieldedSpend.size(), tx.vShieldedOutput.size());
+    return Zip317ConventionalFee(inBytes, outBytes, shielded);
+}
+
 CAmount PQSizeFee(CAmount floor, size_t nBytes)
 {
     return std::max(floor, PlainPQFeeRate().GetFee(nBytes));

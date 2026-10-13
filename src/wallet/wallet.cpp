@@ -5913,6 +5913,8 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 }
 
                 unsigned int nBytes = ::GetSerializeSize(txNew, SER_NETWORK, PROTOCOL_VERSION);
+                // The 6.20.0 line's ZIP-317 conventional fee (audit 04/N-1), from the scriptSigs as signed (or dummy).
+                const CAmount nConventionalFee = fPQInput ? Zip317ConventionalFee(CTransaction(txNew)) : 0;
 
                 // Remove scriptSigs if we used dummy signatures for fee calculation
                 if (!sign) {
@@ -5950,8 +5952,12 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                 // quantum plan §4.5, D-Q-23 (b): a transaction with a PQ input pays max(DEFAULT_FEE, the plain PQ $/KB
                 // rate at the attested price x size) (-pqfeerate without a price; policy.h AttestedFeePolicy), capped at
                 // PQMaxTxFee() = min(max(-maxtxfee, $2 at the price), -yellowbackmaxtxfee) (owner D-Q-26: the Yellowback cap).
+                // Never below the 6.20.0 line's ZIP-317 conventional fee (audit 04/N-1, as ycash6's wallet): a PQ input is
+                // ~53 (SLH-DSA) or ~11 (Falcon) logical actions, which a -txunpaidactionlimit=0 node refuses unpaid and
+                // the ZIP-401 limiter evicts first.
                 if (fPQInput)
-                    nFeeNeeded = std::min(std::max(nFeeNeeded, PQSizeFee(DEFAULT_FEE, nBytes)), PQMaxTxFee());
+                    nFeeNeeded = std::max(std::min(std::max(nFeeNeeded, PQSizeFee(DEFAULT_FEE, nBytes)), PQMaxTxFee()),
+                                          nConventionalFee);
 
                 // If we made it here and we aren't even able to meet the relay fee on the next pass, give up
                 // because we must be at the maximum allowed fee.
