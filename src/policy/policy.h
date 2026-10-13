@@ -15,6 +15,8 @@
 #include <optional>
 #include <string>
 
+namespace vault { class SetSnapshot; }
+
 class CChainParams;
 class CCoinsViewCache;
 class CFeeRate;
@@ -82,9 +84,12 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason, const CChainParam
     /**
      * Check for standard transaction types
      * @param[in] mapInputs    Map of previous transactions that have outputs we're spending
+     * @param[in] vaultSnapshot  The set state at the tip (UPGRADE_VAULT), for the exact signature count of a
+     *                           set-signed template input; null = only the signature size is checked (audit 01/V-4)
      * @return True if all inputs (scriptSigs) use only standard transaction forms
      */
-bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, uint32_t consensusBranchId);
+bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, uint32_t consensusBranchId,
+                       const vault::SetSnapshot* vaultSnapshot = nullptr);
 
 /**
  * Policy sigops of OP_CHECKPQSIG (docs/plans/yellowback-quantum-plan.md §4.1, D-Q-7):

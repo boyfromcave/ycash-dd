@@ -1763,7 +1763,7 @@ bool AcceptToMemoryPool(
         view.SetBackend(dummy);
 
         // Check for non-standard pay-to-script-hash in inputs
-        if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId))
+        if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId, vaultSnapshot.get()))
             return error("AcceptToMemoryPool: nonstandard transaction input");
 
         // Check that the transaction doesn't have an excessive number of
