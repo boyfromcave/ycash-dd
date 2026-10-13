@@ -227,6 +227,7 @@ bool CCryptoKeyStore::Lock()
         if (!SetCrypted())
             return false;
         vMasterKey.clear();
+        mapDecryptedPQKeys.clear();
     }
 
     NotifyStatusChanged(this);
@@ -242,6 +243,7 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn)
 
         bool keyPass = false;
         bool keyFail = false;
+        PQKeyMap decryptedPQKeys; // the PQ keys this check decrypts, cached if the unlock succeeds
         if (!cryptedHDSeed.first.IsNull()) {
             HDSeed seed;
             if (!DecryptHDSeed(vMasterKeyIn, cryptedHDSeed.second, cryptedHDSeed.first, seed))
@@ -269,11 +271,13 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn)
         for (const auto& mi : mapCryptedPQKeys)
         {
             CPQKey key;
+            ++nPQKeyDecrypts;
             if (!DecryptPQKey(vMasterKeyIn, mi.first, mi.second, key))
             {
                 keyFail = true;
                 break;
             }
+            decryptedPQKeys[mi.first] = key;
             keyPass = true;
             if (fDecryptionThoroughlyChecked)
                 break;
@@ -317,6 +321,9 @@ bool CCryptoKeyStore::Unlock(const CKeyingMaterial& vMasterKeyIn)
             return false;
         vMasterKey = vMasterKeyIn;
         fDecryptionThoroughlyChecked = true;
+        // The keys the check above already rebuilt are kept (free hits for GetPQKey).
+        for (auto& entry : decryptedPQKeys)
+            mapDecryptedPQKeys[entry.first] = entry.second;
     }
     NotifyStatusChanged(this);
     return true;
@@ -473,6 +480,8 @@ bool CCryptoKeyStore::AddCryptedPQKey(const CPQKeyID& id, const CCryptedPQKey& c
         return false;
 
     mapCryptedPQKeys[id] = crypted;
+    // A re-added record replaces the key: never serve a stale decrypted copy.
+    mapDecryptedPQKeys.erase(id);
     return true;
 }
 
@@ -485,7 +494,20 @@ bool CCryptoKeyStore::GetPQKey(const CPQKeyID& id, CPQKey& keyOut) const
     CryptedPQKeyMap::const_iterator mi = mapCryptedPQKeys.find(id);
     if (mi == mapCryptedPQKeys.end())
         return false;
-    return DecryptPQKey(vMasterKey, id, mi->second, keyOut);
+    if (vMasterKey.empty())
+        return false;
+    PQKeyMap::const_iterator ci = mapDecryptedPQKeys.find(id);
+    if (ci != mapDecryptedPQKeys.end()) {
+        keyOut = ci->second;
+        return true;
+    }
+    ++nPQKeyDecrypts;
+    CPQKey key;
+    if (!DecryptPQKey(vMasterKey, id, mi->second, key))
+        return false;
+    mapDecryptedPQKeys[id] = key;
+    keyOut = key;
+    return true;
 }
 
 bool CCryptoKeyStore::GetPQKeyInfo(const CPQKeyID& id, std::vector<unsigned char>& pkOut, uint32_t& indexOut) const
@@ -621,6 +643,8 @@ bool CCryptoKeyStore::EncryptKeys(CKeyingMaterial& vMasterKeyIn)
         LOCK(cs_KeyStore);
         if (!mapCryptedKeys.empty() || fUseCrypto)
             return false;
+        // A plain store has never cached a decrypted PQ key (only an unlocked crypted store does).
+        assert(mapDecryptedPQKeys.empty());
 
         fUseCrypto = true;
         if (!hdSeed.IsNull()) {
