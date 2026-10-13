@@ -35,6 +35,7 @@ from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_util import conventional_fee
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
@@ -304,7 +305,11 @@ class VaultRpcTest(BitcoinTestFramework):
         assert_equal(os_['selector'], 2)
         assert_equal(len(n0.getrawtransaction(os_['txid'], 1)['vin'][0]['scriptSig']['hex']) // 2, 7939)
         self.mine(1)
-        assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal('0.0001'))
+        # audit 04/N-1: the fee is max(VAULT_RPC_FEE, rate x size, the 6.20.0 line's ZIP-317 conventional fee) (rpc/vault.cpp
+        # vault_ownerspend); at the default rate that is the conventional fee of the SLH-DSA owner spend (~27,000 zat)
+        conv = conventional_fee(n0.getrawtransaction(os_['txid'], 1))
+        assert conv > 10000, conv
+        assert_equal(n0.getreceivedbyaddress(dest), Decimal('2') - Decimal(max(10000, conv)) / 100000000)
         assert_equal(len(n0.vault_list({'kind': 'vault'})), 1)
         assert_equal(n0.set_getinfo(setid)['lockedvalue'], Decimal('4'))
 
