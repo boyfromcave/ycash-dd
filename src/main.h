@@ -78,6 +78,11 @@ static const CAmount HIGH_TX_FEE_PER_KB = 0.01 * COIN;
 static const CAmount HIGH_MAX_TX_FEE = 100 * HIGH_TX_FEE_PER_KB;
 /** Default for -maxorphantx, maximum number of orphan transactions kept in memory */
 static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 100;
+/** The largest orphan transaction kept, in bytes, before UPGRADE_VAULT is active at the next block ... */
+static const unsigned int MAX_ORPHAN_TX_SIZE = 5000;
+/** ... and once it is: below 100,000 bytes, the 6.20.0 line's bound, so SLH-DSA spends (one input ~8 KB, a
+ *  consolidation of several more) that arrive before their parent are parked (audit 07/F-6 and its review). */
+static const unsigned int MAX_ORPHAN_TX_SIZE_VAULT = 99999;
 /** Default for -txexpirydelta, in number of blocks */
 static const unsigned int DEFAULT_PRE_BLOSSOM_TX_EXPIRY_DELTA = 20;
 static const unsigned int DEFAULT_POST_BLOSSOM_TX_EXPIRY_DELTA = DEFAULT_PRE_BLOSSOM_TX_EXPIRY_DELTA * Consensus::BLOSSOM_POW_TARGET_SPACING_RATIO;

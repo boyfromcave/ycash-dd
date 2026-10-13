@@ -1,4 +1,5 @@
 // Copyright (c) 2011-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -12,6 +13,7 @@
 #include "keystore.h"
 #include "main.h"
 #include "net.h"
+#include "policy/policy.h"
 #include "pow.h"
 #include "script/sign.h"
 #include "serialize.h"
@@ -121,6 +123,28 @@ CTransaction RandomOrphan()
     return it->second.tx;
 }
 
+// An orphan of exactly `size` serialized bytes: one input whose scriptSig is a single push (the shape of a
+// post-quantum spend; signature validity is irrelevant to orphan parking) spending a missing parent.
+static CTransaction SizedOrphan(unsigned int size)
+{
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+    tx.vin[0].prevout = COutPoint(GetRandHash(), 0);
+    tx.vout.resize(1);
+    tx.vout[0].nValue = 1*CENT;
+    tx.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    // the push and the script length grow their own length prefixes past 255 / 65,535 bytes: converge
+    size_t push = 1000;
+    for (int i = 0; i < 4; i++) {
+        tx.vin[0].scriptSig = CScript() << std::vector<unsigned char>(push, 0x42);
+        push += (int64_t)size - (int64_t)GetSerializeSize(CTransaction(tx), SER_NETWORK, tx.nVersion);
+    }
+    tx.vin[0].scriptSig = CScript() << std::vector<unsigned char>(push, 0x42);
+    CTransaction out(tx);
+    assert(GetSerializeSize(out, SER_NETWORK, out.nVersion) == size);
+    return out;
+}
+
 // Parameterized testing over consensus branch ids
 BOOST_DATA_TEST_CASE(DoS_mapOrphans, boost::unit_test::data::xrange(static_cast<int>(Consensus::MAX_NETWORK_UPGRADES)))
 {
@@ -203,6 +227,55 @@ BOOST_DATA_TEST_CASE(DoS_mapOrphans, boost::unit_test::data::xrange(static_cast<
     LimitOrphanTxSize(0);
     BOOST_CHECK(mapOrphanTransactions.empty());
     BOOST_CHECK(mapOrphanTransactionsByPrev.empty());
+}
+
+// Audit 07/F-6: before UPGRADE_VAULT the orphan bound stays 5,000 bytes; once it is active at the next block an
+// SLH-DSA-sized orphan (a 7,938-byte scriptSig, ~8 KB) and a two-input consolidation (~16 KB) are parked, up to
+// MAX_ORPHAN_TX_SIZE_VAULT (99,999) bytes, the 6.20.0 line's bound.
+BOOST_AUTO_TEST_CASE(DoS_pq_sized_orphans)
+{
+    BOOST_CHECK(MAX_ORPHAN_TX_SIZE_VAULT >= MAX_STANDARD_PQ_SCRIPTSIG + 1000);
+    SelectParams(CBaseChainParams::REGTEST);
+    LOCK(cs_main);
+    LimitOrphanTxSize(0);
+    CMutableTransaction slh;
+    slh.vin.resize(1);
+    slh.vin[0].prevout = COutPoint(GetRandHash(), 0);
+    slh.vin[0].scriptSig = CScript() << std::vector<unsigned char>(7935, 0x42);   // PUSHDATA2 + 7,935 = 7,938 bytes
+    BOOST_CHECK_EQUAL(slh.vin[0].scriptSig.size(), 7938U);
+    slh.vout.resize(1);
+    slh.vout[0].nValue = 1*CENT;
+    slh.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    const CTransaction slhTx(slh);
+    BOOST_CHECK(GetSerializeSize(slhTx, SER_NETWORK, slhTx.nVersion) > MAX_ORPHAN_TX_SIZE);
+
+    // before activation: unchanged (5,000 bytes)
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    BOOST_CHECK(!AddOrphanTx(slhTx, 1));
+    BOOST_CHECK(AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE), 1));
+    BOOST_CHECK(!AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE + 1), 1));
+    BOOST_CHECK_EQUAL(mapOrphanTransactions.size(), 1U);
+
+    // UPGRADE_VAULT active at chainActive.Height() + 1
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, chainActive.Height() + 1);
+    BOOST_CHECK(AddOrphanTx(slhTx, 2));
+    BOOST_CHECK_EQUAL(MAX_ORPHAN_TX_SIZE_VAULT, 99999U);
+    BOOST_CHECK(AddOrphanTx(SizedOrphan(16100), 2));                     // two SLH-DSA inputs
+    BOOST_CHECK(AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE_VAULT), 2));
+    BOOST_CHECK(!AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE_VAULT + 1), 2));
+    BOOST_CHECK_EQUAL(mapOrphanTransactions.size(), 4U);
+    LimitOrphanTxSize(DEFAULT_MAX_ORPHAN_TRANSACTIONS);
+    BOOST_CHECK(mapOrphanTransactions.count(slhTx.GetHash()));
+
+    // active only from the block after next: still 5,000 bytes
+    LimitOrphanTxSize(0);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, chainActive.Height() + 2);
+    BOOST_CHECK(!AddOrphanTx(slhTx, 3));
+
+    LimitOrphanTxSize(0);
+    BOOST_CHECK(mapOrphanTransactionsByPrev.empty());
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    SelectParams(CBaseChainParams::MAIN);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
