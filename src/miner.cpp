@@ -385,6 +385,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddre
         if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
             vaultRunning.reset(new vault::VaultState(*vault::g_vaultdb));
             vaultRunning->SetBlockHashes(vault::AncestorHashes(pindexPrev));
+            vaultRunning->SetActivationHeight(chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight);
         }
 
         SaplingMerkleTree sapling_tree;
