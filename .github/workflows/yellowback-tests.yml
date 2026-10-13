@@ -11,6 +11,10 @@ name: yellowback tests
 #   nightly 03:00 UTC     nightly (make check, stock baseline, stock parity against a ycash-legacy
 #   (dispatch nightly)      build, attest agent, devnet role presets, lightwalletd devnet, fuzz smoke),
 #                         lockorder, sanitizers, coverage                     -- never block; open an issue
+#   pull_request on       lockorder-pr (DEBUG_LOCKORDER build over LOCKORDER_PR_SCRIPTS + the lockorder
+#   overlay/hook paths      check) and sanitizers-pr (ASan/UBSan test_bitcoin, the overlay unit suites):
+#   (OVERLAY_PATHS)         gating once the owner lists them as required checks (audit 07/F-11); a PR
+#                           that touches no overlay path passes them in seconds. Full variants stay nightly.
 #   weekly Sunday 04:00   weekly-fuzz (30 min per fuzz target, corpus PR)    -- never blocks
 #   (dispatch weekly)
 #   schedule              GitHub runs `schedule` on the default branch only (upgrade/vault), which runs
@@ -31,6 +35,9 @@ name: yellowback tests
 # qa/pull-tester/rpc-tests.py, or in no list. qa/yellowback-ci-shard.py splits YELLOWBACK_SCRIPTS +
 # STOCK_BASELINE across the functional matrix (longest first, by measured weight); a new script lands
 # in some shard automatically.
+# Fail, never skip (audit 04/F-1, 04/N-4): every rpc-tests.py run passes --fail-on-skip, so a script
+# that prints a line starting with SKIP fails the run; the sidecar/agent `test -x` guards and the Falcon
+# signer probe are the early, named message. qa/yellowback-audit.sh fails a run without the flag.
 on:
   push:
     # The node lines' branches; feature/yellowback-price-attest is the branch of record they return to.
@@ -89,6 +96,11 @@ env:
   NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity
   # The subset the sanitizers job runs under ASan/UBSan.
   SANITIZER_SCRIPTS: yellowback_index vault_upgrade
+  # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
+  # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
+  # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
+  OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-check\.py)'
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live
   # The inherited Ycash suite that must keep passing against the fork binary (P5); the names recorded
   # as passing in Phase 0 are in doc/yellowback.md "Build and test baseline". getblocktemplate_proposals,
   # getblocktemplate_longpoll and invalidateblock abort ycashd at the pin (a stock regtest node
@@ -362,6 +374,12 @@ jobs:
         # imports asyncore, which 3.12 removed.
         with:
           python-version: '3.11'
+      - name: Install a C compiler (the Falcon signer of test_framework/pq.py; audit 04/F-1)
+        # vault_pq_reorg's Falcon spends come from the framework's signer, compiled with $CC on the fly;
+        # without a compiler the script would SKIP. Installed explicitly, never inherited from the image.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev
       - name: Install Python test prerequisites
         # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports simplejson
         # and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a one-line shim stands in
@@ -408,7 +426,17 @@ jobs:
           # rpc-tests.py with no name runs its whole default suite: an empty shard runs nothing.
           if [ -z "$names" ]; then echo "shard $SHARD/$SHARDS is empty"; exit 0; fi
           echo "shard $SHARD/$SHARDS: $names"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $names
+          case " $names " in
+            *" vault_pq_reorg "*)
+              # Audit 04/F-1: the early, named failure for the shard whose script needs the Falcon signer.
+              python3 - <<'PY' || { echo "the Falcon signer does not build (test_framework/pq.py _falcon_load); vault_pq_reorg would SKIP"; exit 1; }
+          import sys; sys.path.insert(0, 'qa/rpc-tests')
+          from test_framework import pq
+          sys.exit(0 if pq.falcon_signer_available() else 1)
+          PY
+              ;;
+          esac
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j4 --nozmq --nocleanup $names
       - name: Upload node logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -602,15 +630,22 @@ jobs:
           mkdir -p "$site"
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+      - name: Install a C compiler (the Falcon signer test_pq.py exercises; audit 04/F-1)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc libc6-dev
       - name: Quote agent and price-feed unit tests (Phase 7)
         run: python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py
       - name: Calibration scripts' unit tests (v3 Phase A4; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/attest/calibrate/test_calibrate.py
+      - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
+        if: ${{ !cancelled() }}
+        run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: pyflakes (functional tests and the shared helpers)
         if: ${{ !cancelled() }}
         run: |
-          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py qa/yellowback-ci-shard.py"
+          files="qa/rpc-tests/yellowback_*.py qa/rpc-tests/test_framework/yellowback_util.py qa/yellowback-ci-shard.py qa/pull-tester/test_rpc_tests_classify.py qa/yellowback-lockorder-check.py"
           for f in qa/rpc-tests/test_framework/yellowback_attest.py qa/rpc-tests/test_framework/test_yellowback_attest.py; do
             test -f "$f" && files="$files $f"
           done
@@ -636,6 +671,9 @@ jobs:
         run: |
           if [ ! -f qa/rpc-tests/test_framework/test_pq.py ]; then echo "no PQ framework on this line"; exit 0; fi
           python3 -m pyflakes qa/rpc-tests/test_framework/pq.py qa/rpc-tests/test_framework/test_pq.py
+          # test_pq's Falcon signer cases are skipUnless(falcon_signer_available()): refuse the skip.
+          (cd qa/rpc-tests && python3 -c 'import sys; from test_framework import pq; sys.exit(0 if pq.falcon_signer_available() else 1)') \
+            || { echo "the Falcon signer does not build (test_framework/pq.py _falcon_load); test_pq's signer cases would skip"; exit 1; }
           cd qa/rpc-tests && python3 -m unittest test_framework.test_pq -v
       - name: pyflakes (contrib; blocking from Phase 7)
         if: ${{ !cancelled() }}
@@ -651,6 +689,203 @@ jobs:
           python3 src/test/gen_yellowback_corpus.py --check
           if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
           if [ -f src/test/gen_pq_corpus.py ]; then python3 src/test/gen_pq_corpus.py --check; fi
+
+  # ── pull_request legs on overlay paths (audit 07/F-11) ──────────────────────────────────────────
+  # The nightly lockorder and sanitizers variants never block a merge (GitHub cannot gate a merge on
+  # a scheduled run). These two run on every pull_request, build only when the PR touches
+  # OVERLAY_PATHS (vault/, yellowback/, their RPCs and the hook files), and then fail the PR on a
+  # lock-order report naming the overlay or on an ASan/UBSan error in the overlay unit suites. They
+  # gate once listed as required checks (repository settings, an owner act).
+
+  lockorder-pr:
+    name: lockorder (PR, overlay paths)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          # The PR's merge commit and its first parent (the base tip): HEAD^1..HEAD is the PR's change.
+          fetch-depth: 2
+      - name: Does the PR touch an overlay or hook path?
+        id: paths
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE "$OVERLAY_PATHS"; then run=true; else run=false; echo "no overlay path changed: nothing to check"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Install build prerequisites
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
+            automake libtinfo5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: steps.paths.outputs.run == 'true'
+        with:
+          python-version: '3.11'
+      - name: Install Python test prerequisites
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          python3 -m pip install --user simplejson pyzmq
+          site=$(python3 -c 'import site; print(site.getusersitepackages())')
+          mkdir -p "$site"
+          printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
+                        'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
+          python3 -c 'import asyncore, simplejson, pyblake2, tomllib'
+      - name: Cache depends
+        if: steps.paths.outputs.run == 'true'
+        id: cache-depends
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
+      - name: Build depends
+        if: steps.paths.outputs.run == 'true' && steps.cache-depends.outputs.cache-hit != 'true'
+        run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.paths.outputs.run == 'true'
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - name: Fetch zk parameters (a no-op when restored)
+        if: steps.paths.outputs.run == 'true'
+        run: ./zcutil/fetch-params.sh
+      - name: Cache ccache (this variant's own entries; its flags differ from the push build's)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ccache
+          key: ccache-lockorder-${{ runner.os }}-${{ github.head_ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-lockorder-${{ runner.os }}-${{ github.head_ref }}-
+            ccache-lockorder-${{ runner.os }}-
+      - name: Restore the librustzcash build (target/; the push build's entry, never saved from here)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target
+          key: rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-${{ hashFiles('src/rust/**', 'Cargo.toml') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-
+      - name: Build with --enable-debug and DEBUG_LOCKORDER_LOGONLY (as the nightly lockorder job)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          ./autogen.sh
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-debug CPPFLAGS=-DDEBUG_LOCKORDER_LOGONLY
+          make -C src -j"$(nproc)" ycashd ycash-cli
+      - name: The lockorder check's self-test (a vault inversion must fail it)
+        if: steps.paths.outputs.run == 'true'
+        run: python3 qa/yellowback-lockorder-check.py --selftest
+      - name: LOCKORDER_PR_SCRIPTS under DEBUG_LOCKORDER
+        if: steps.paths.outputs.run == 'true'
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $LOCKORDER_PR_SCRIPTS
+      - name: No potential deadlock naming the overlay in any debug.log
+        if: always() && steps.paths.outputs.run == 'true'
+        run: python3 qa/yellowback-lockorder-check.py "$RUNNER_TEMP/yellowback-tests"
+      - name: Upload node logs on failure
+        if: failure() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yellowback-lockorder-pr-logs
+          path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
+          if-no-files-found: ignore
+
+  sanitizers-pr:
+    name: sanitizers (PR, overlay unit suites)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Does the PR touch an overlay or hook path?
+        id: paths
+        run: |
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE "$OVERLAY_PATHS"; then run=true; else run=false; echo "no overlay path changed: nothing to check"; fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+      - name: Install build prerequisites
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+            autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
+            automake libtinfo5 clang
+      - name: Cache depends
+        if: steps.paths.outputs.run == 'true'
+        id: cache-depends
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            depends/x86_64-pc-linux-gnu
+            depends/built
+            depends/sources
+          key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
+      - name: Build depends
+        if: steps.paths.outputs.run == 'true' && steps.cache-depends.outputs.cache-hit != 'true'
+        run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: steps.paths.outputs.run == 'true'
+        with:
+          path: ~/.zcash-params
+          key: zcash-params-${{ hashFiles('zcutil/fetch-params.sh') }}
+      - name: Fetch zk parameters (a no-op when restored)
+        if: steps.paths.outputs.run == 'true'
+        run: ./zcutil/fetch-params.sh
+      - name: Cache ccache (this variant's own entries)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ccache
+          key: ccache-sanitizers-${{ runner.os }}-${{ github.head_ref }}-${{ github.sha }}
+          restore-keys: |
+            ccache-sanitizers-${{ runner.os }}-${{ github.head_ref }}-
+            ccache-sanitizers-${{ runner.os }}-
+      - name: Restore the librustzcash build (target/; the push build's entry, never saved from here)
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target
+          key: rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-${{ hashFiles('src/rust/**', 'Cargo.toml') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain', 'depends/packages/native_rust.mk') }}-
+      - name: address + undefined test_bitcoin, the overlay unit suites
+        # The nightly sanitizers job's configure (its comments say why each flag is there); only
+        # test_bitcoin is built and only the overlay suites run, so this stays inside the push tier's
+        # wall clock. The functional and thread-sanitizer runs stay nightly.
+        if: steps.paths.outputs.run == 'true'
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          ./autogen.sh
+          rt=$(ls -d depends/x86_64-pc-linux-gnu/native/lib/clang/*/lib | head -1)
+          test -e "$rt/x86_64-pc-linux-gnu" || ln -s x86_64-unknown-linux-gnu "$rt/x86_64-pc-linux-gnu"
+          CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure \
+            CXXFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+            LDFLAGS='-fsanitize=address,undefined' \
+            || { grep -n -A30 'compiler works\|linker accepts -fsanitize' config.log | tail -160; exit 1; }
+          make -C src -j"$(nproc)" test/test_bitcoin
+          src/test/test_bitcoin --run_test='vault_*,pq_*,yellowback_*'
 
   # ── schedule fan-out ─────────────────────────────────────────────────────────────────────────────
 
@@ -751,7 +986,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}/yellowback-tests
         run: |
           mkdir -p "$TMPDIR"
-          qa/pull-tester/rpc-tests.py -j4 --nozmq --nocleanup $STOCK_BASELINE
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j4 --nozmq --nocleanup $STOCK_BASELINE
       - name: Build ycash-legacy (v4.5.0) for the stock-parity check
         # A git worktree of the pristine baseline sharing this checkout's depends tree (depends/ is
         # byte-identical between ycash-legacy and the fork; a difference fails here).
@@ -774,7 +1009,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$REF_YCASHD" || { echo "no ycash-legacy build: the script would run the weaker fork-only check"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_stockparity
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_stockparity
       - name: Read the agent crate's toolchain pin (rust-toolchain.toml)
         if: ${{ !cancelled() }}
         id: toolchain
@@ -802,7 +1037,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_attest_agent
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_attest_agent
       - name: Devnet role presets end to end (extended)
         # The role-based regtest plan's regression suite (R7): brings up each preset through the devnet
         # script itself -- heartbeat, price walk, six personas, a shock, a liquidation -- and asserts the
@@ -813,7 +1048,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_roles
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_roles
       - name: Devnet on the vault upgrade end to end (extended)
         # upgrade-walk's core through the devnet script (upgrade plan §4, §5, §15.10): attestor set
         # membership and S15 dormancy, mint on the V template, transfer, redeem and renew, a claim
@@ -825,7 +1060,7 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
-          qa/pull-tester/rpc-tests.py -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet, the
         # lightwalletd fork (LWD_COMMIT) and the lightwalletd-legacy baseline both served from node 0, then
@@ -984,7 +1219,7 @@ jobs:
               *) variant="$variant $n" ;;
             esac
           done
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $variant $STOCK_BASELINE
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $variant $STOCK_BASELINE
       - name: No potential deadlock involving Yellowback in any debug.log
         if: always()
         # qa/yellowback-lockorder-check.py groups every report; the inherited getpeerinfo/SendMessages
@@ -1073,7 +1308,7 @@ jobs:
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
           make -C src -j"$(nproc)" ycashd ycash-cli test/test_bitcoin
           src/test/test_bitcoin --run_test='yellowback_*,vault_*'
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $SANITIZER_SCRIPTS
       - name: thread
         run: |
           make -C src clean
@@ -1162,7 +1397,7 @@ jobs:
               *) variant="$variant $n" ;;
             esac
           done
-          qa/pull-tester/rpc-tests.py -j2 --nozmq --nocleanup $variant
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j2 --nozmq --nocleanup $variant
       - name: lcov over src/yellowback, src/vault and their RPCs, the floors of qa/yellowback-coverage-floor.sh
         run: |
           set -e
