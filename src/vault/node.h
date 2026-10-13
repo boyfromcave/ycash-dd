@@ -85,6 +85,10 @@ bool IsVaultRelevant(const CTransaction& tx, const CCoinsViewCache& view);
  *  inputs of every transaction with an OP_CHECKPQSIG at `nextHeight`'s flags and evicts failures. */
 void RecheckMempool(CTxMemPool& pool, int nextHeight, const Consensus::Params& params);
 
+/** The block whose vault undo record connecting `pindex` prunes (UNDO_KEEP below it, audit 07/F-7):
+ *  its ancestor at pindex->nHeight - UNDO_KEEP when that is at or above the activation height. */
+std::optional<uint256> UndoToPrune(const CBlockIndex* pindex, const Consensus::Params& params);
+
 /** Start-up reconciliation (U-18): disconnect the database back to chainActive using its own
  *  undo, then replay chainActive's blocks from disk up to the tip. False with `err` set when
  *  the database cannot be brought to the tip (a missing block or undo file). */
