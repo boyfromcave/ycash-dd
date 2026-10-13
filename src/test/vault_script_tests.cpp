@@ -190,6 +190,59 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_regtest_activation)
     SelectParams(CBaseChainParams::MAIN);
 }
 
+BOOST_AUTO_TEST_CASE(vault_tx_version_v4_only)
+{
+    // Quantum spec R-A3 (audit 04/F-2): under UPGRADE_VAULT only v4 (Sapling version group)
+    // transactions are valid. v4.5.0 has no v5 type: a ZIP-225 (v5) transaction is not even
+    // representable (serialization throws "Unknown transaction format", so the wire rejects it
+    // before any validation), and ContextualCheckTransaction rejects every non-Sapling version
+    // group once Sapling is active ("bad-sapling-tx-version-group-id"); ycash6 rejects v5 under
+    // Vault as "bad-vault-tx-version-group-id" (docs/mapping.md §22). The parity is the rejection.
+    SelectParams(CBaseChainParams::REGTEST);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, 10);
+    const CChainParams& chainparams = Params();
+
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = SAPLING_VERSION_GROUP_ID;
+    mtx.nVersion = SAPLING_TX_VERSION;
+    mtx.vin.resize(1);
+    mtx.vin[0].prevout = COutPoint(uint256S("01"), 0);
+    mtx.vout.resize(1);
+    mtx.vout[0].nValue = 1;
+    mtx.vout[0].scriptPubKey = CScript() << OP_TRUE;
+    const CTransaction tx4(mtx);
+
+    // v5 (ZIP-225, as ycash6 defines it): not representable on this line.
+    CMutableTransaction m5 = mtx;
+    m5.nVersionGroupId = 0x26A7270A;   // ZIP225_VERSION_GROUP_ID (ycash6)
+    m5.nVersion = 5;                   // ZIP225_TX_VERSION (ycash6)
+    BOOST_CHECK_THROW(CTransaction{m5}, std::ios_base::failure);
+
+    // A non-Sapling version group that does serialize (Overwinter v3) is invalid under Vault.
+    CMutableTransaction m3 = mtx;
+    m3.nVersionGroupId = OVERWINTER_VERSION_GROUP_ID;
+    m3.nVersion = OVERWINTER_TX_VERSION;
+    const CTransaction tx3(m3);
+
+    for (bool isMined : {false, true}) {
+        for (int h : {9, 10, 11}) {
+            CValidationState s3;
+            BOOST_CHECK(!ContextualCheckTransaction(tx3, s3, chainparams, h, isMined));
+            BOOST_CHECK_EQUAL(s3.GetRejectReason(), "bad-sapling-tx-version-group-id");
+            CValidationState s4;
+            BOOST_CHECK(ContextualCheckTransaction(tx4, s4, chainparams, h, isMined));
+        }
+    }
+
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    SelectParams(CBaseChainParams::MAIN);
+}
+
 BOOST_AUTO_TEST_CASE(vault_opnames)
 {
     BOOST_CHECK_EQUAL(std::string(GetOpName(OP_CHECKSETSIG)), "OP_CHECKSETSIG");
