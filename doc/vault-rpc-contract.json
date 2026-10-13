@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "5eaa4477f3ff78dfb4bb90e6171dad70b6b5ceb2912d4798fa33337ab78d3db2"
+    "sha256": "03cf0aa8d75e992b5af39797ddfd145d1fd68a73332ab33e62c48c08ef9c8192"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -768,6 +768,19 @@
           },
           "height": {
             "type": "height"
+          },
+          "attestorsetid": {
+            "oneOf": [
+              {
+                "type": "hash"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "moduleactive": {
+            "type": "bool"
           },
           "dbtip": {
             "oneOf": [
