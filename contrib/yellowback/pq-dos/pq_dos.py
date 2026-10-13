@@ -18,7 +18,10 @@ Scenarios (``--scenarios``, comma-separated; default all):
   p2pkh    a block of P2PKH ECDSA inputs (the baseline)
   slh      a block of SLH-DSA-SHA2-128s TX_PQPKH spends
   falcon   a block of FN-DSA-512 TX_PQPKH spends (-pqfalconheight)
-  invalid  garbage PQ signatures under a correct key hash: RPC accept/reject cost and P2P ban score
+  invalid  garbage PQ signatures under a correct key hash: RPC accept/reject cost and P2P ban score;
+           and on transactions spending a V (audit 07/F-1): a V owner spend with a garbage SLH-DSA or
+           Falcon signature and a wrong ECDSA signature on a sibling P2PKH input (ban score 100), an
+           UNLOCK with a bad set signature (ban score 0: the set state is the receiver's tip's)
   staged   the R-B1 residual: a bare non-standard output carrying an SLH-DSA key and a (necessarily
            wrong) signature, ``... OP_CHECKPQSIG OP_NOT``, spent by ~41-byte inputs; a full block
            of such spends (the outputs are mined first, ~194 blocks of 2 MB)
@@ -536,18 +539,23 @@ class PQDoS(BitcoinTestFramework):
         res['p2pkh_atmp_valid_ms_median'] = self.median(tp) * 1e3
         print('  p2pkh: accept valid %.2f ms' % res['p2pkh_atmp_valid_ms_median'])
         res['p2p'] = self.p2p_ban()
+        res['vault'] = self.vault_template_cases()
         self.results['invalid'] = res
         self.save()
 
     def p2p_ban(self):
         """A mininode relays one transaction with a garbage SLH-DSA signature: ban score."""
+        signer = Signer(self.lib, 1, bytes(range(3, 51)))
+        outs = self.fanout(signer.spk, 1, 200000)
+        bad = self.pq_spend_txs(signer, outs, 200000, 1, bad=True)[0]
+        return self.p2p_relay(bad)
+
+    def p2p_relay(self, bad, expect_ban=True):
+        """A fresh mininode peer relays ``bad``: Misbehaving lines, ban score, still connected?"""
         from test_framework.mininode import NodeConn, NetworkThread, msg_tx
         sys.path.insert(0, os.path.join(TREE, 'qa', 'rpc-tests'))
         from tx_expiry_helper import TestNode
         n = self.n0
-        signer = Signer(self.lib, 1, bytes(range(3, 51)))
-        outs = self.fanout(signer.spk, 1, 200000)
-        bad = self.pq_spend_txs(signer, outs, 200000, 1, bad=True)[0]
         off = os.path.getsize(self.log_path(0))
         node = TestNode()
         conn = NodeConn('127.0.0.1', p2p_port(0), n, node, 'regtest', 270013)
@@ -557,7 +565,10 @@ class PQDoS(BitcoinTestFramework):
         before = [p for p in n.getpeerinfo()]
         assert_equal(len(before), 1)
         node.send_message(msg_tx(bad))
-        time.sleep(3)
+        if expect_ban:
+            time.sleep(3)
+        else:
+            node.sync_with_ping()     # the tx message was processed; a ban would have disconnected us
         after = n.getpeerinfo()
         banned = n.listbanned()
         with open(self.log_path(0), 'rb') as f:
@@ -576,7 +587,106 @@ class PQDoS(BitcoinTestFramework):
             conn.disconnect_node()
         except Exception:
             pass
+        deadline = time.time() + 30
+        while n.getpeerinfo() and time.time() < deadline:
+            time.sleep(0.1)
         return out
+
+    def rpc_reject_times(self, txs):
+        times, msg = [], None
+        for tx in txs:
+            t0 = time.time()
+            try:
+                self.n0.sendrawtransaction(v.tx_hex(tx))
+                raise AssertionError('an invalid vault spend was accepted')
+            except JSONRPCException as e:
+                msg = e.error['message']
+            times.append(time.time() - t0)
+        return times, msg
+
+    def make_set(self):
+        """A set created from a coinbase and mined (a lock must name an existing set,
+        bad-txns-vault-noset); returns its setId (the creating txid's internal bytes)."""
+        n = self.n0
+        act = v.act_set_create(1, 1, 1, 1, v.pubkey_of(v.fixed_secret('pq-dos admit')), maturity=2,
+                               bond_lock_min=20)
+        txid, amt, secret, cbspk = self.coinbase()
+        tx, _p = v.build_set_create_tx([(txid, 0, 0xffffffff)], act, (amt - 10000, cbspk))
+        v.sign_p2pkh_input(tx, 0, secret, amt, signing_branch_id(n))
+        n.sendrawtransaction(v.tx_hex(tx))
+        self.mine()
+        return v.txid_internal(v.tx_txid(tx))
+
+    def vault_template_cases(self):
+        """Audit 07/F-1: the mempool scores a failed script check of a transaction spending a V or I
+        DoS 0 only for the set-state errors (main.cpp IsVaultSetStateFailure). (a) A V owner spend
+        (selector 2) with a garbage SLH-DSA signature (random bytes: no early exit) or a well-formed
+        wrong Falcon signature, (b) a wrong ECDSA signature on a P2PKH input beside a V input: the RPC
+        reject time per message and per KB, and the P2P score (expected 100, disconnected). (c) An
+        UNLOCK (selector 1) with a bad 65-byte set signature: P2P score 0, still connected. The V
+        coins name a fresh memberless set (the owner branch never reads it)."""
+        n = self.n0
+        k, value, fee = 30, 200000, 10000
+        unknown = self.make_set()
+        res = {}
+
+        def summary(label, txs, expect_ban):
+            times, msg = self.rpc_reject_times(txs[:k])
+            size = len(v.tx_hex(txs[0])) // 2
+            med = self.median(times)
+            r = {'tx_bytes': size, 'reject_reason': msg, 'atmp_reject_ms_median': med * 1e3,
+                 'atmp_reject_ms_per_kb': med * 1e3 / (size / 1024.0), 'p2p': self.p2p_relay(txs[k], expect_ban)}
+            print('  %s: %d B, reject %.2f ms (%.3f ms/KB), reason %r, p2p banscore %r, connected %r' % (
+                label, size, r['atmp_reject_ms_median'], r['atmp_reject_ms_per_kb'], msg,
+                r['p2p']['banscore_after'], r['p2p']['connected_after']))
+            return r
+
+        signers = {}
+        for label, scheme, seed in [('v_owner_slh', 1, bytes(range(7, 55))), ('v_owner_falcon', 2, bytes(range(8, 56)))]:
+            signer = signers[scheme] = Signer(self.lib, scheme, seed)
+            vp = v.VaultParams(b'TEST', unknown, unknown, 5, 1, 0, v.pq_owner_id(scheme, signer.pk))
+            outs = self.fanout(v.vault_script(vp), k + 1, value)
+            lock_time = n.getblockcount()
+            txs = []
+            for t, j in outs:
+                tx = v.make_tx([(t, j, v.SEQUENCE_FINAL - 1)], [(value - fee, self.dest_spk)], lock_time)
+                bad = os.urandom(pq.sig_size(scheme)) if scheme == 1 else signer.sign(os.urandom(32))
+                tx.vin[0].scriptSig = pq.pq_scriptsig(signer.pk, bad + bytes([pq.SIGHASH_ALL]), extra=bytes([0x52]))
+                txs.append(tx)
+            res[label] = summary(label, txs, True)
+
+        # (b) and (c) spend V coins of the SLH-DSA owner
+        vp = v.VaultParams(b'TEST', unknown, unknown, 5, 1, 0, v.pq_owner_id(1, signers[1].pk))
+        vouts = self.fanout(v.vault_script(vp), 2 * (k + 1), value)
+        addr = n.getnewaddress()
+        secret = wif_to_secret(n.dumpprivkey(addr))
+        pouts = self.fanout(v.node_spk(n, addr), k + 1, value)
+        lock_time = n.getblockcount()
+        sib = []
+        for (pt, pj), (vt, vj) in zip(pouts, vouts[:k + 1]):
+            tx = v.make_tx([(pt, pj, v.SEQUENCE_FINAL), (vt, vj, v.SEQUENCE_FINAL - 1)],
+                           [(2 * value - fee, self.dest_spk)], lock_time)
+            wrong = v.ecdsa_sign_der(secret, os.urandom(32)) + bytes([pq.SIGHASH_ALL])
+            tx.vin[0].scriptSig = v.push(wrong) + v.push(v.pubkey_of(secret))
+            tx.vin[1].scriptSig = bytes([0x52])
+            sib.append(tx)
+        res['p2pkh_sibling_of_v'] = summary('p2pkh_sibling_of_v', sib, True)
+        # (c) UNLOCK: the V's value into one intent, the fee from a P2PKH input, a set signature by a
+        # key that is no member (well-formed, 65 bytes)
+        fouts = self.fanout(v.node_spk(n, addr), k + 1, value)
+        branch = signing_branch_id(n)
+        outsider = v.fixed_secret('pq-dos outsider')
+        unl = []
+        for (vt, vj), (ft, fj) in zip(vouts[k + 1:], fouts):
+            tx = v.build_unlock_tx((vt, vj), vp, value, [(self.dest_spk, value)], 0, [(ft, fj, v.SEQUENCE_FINAL)],
+                                   (value - fee, self.dest_spk))
+            v.sign_p2pkh_input(tx, 1, secret, value, branch)
+            sigs = v.set_sigs_for(tx, 0, v.vault_script(vp), value, vp.set_id, v.ROLE_UNLOCK, [outsider], branch)
+            tx.vin[0].scriptSig = v.vault_unlock_scriptsig(sigs)
+            unl.append(tx)
+        res['v_unlock_bad_set_sig'] = summary('v_unlock_bad_set_sig', unl, False)
+        self.mine()
+        return res
 
     def sc_staged(self, label, scheme, seed):
         signer = Signer(self.lib, scheme, seed)

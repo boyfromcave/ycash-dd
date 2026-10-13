@@ -186,17 +186,52 @@ Non-ruling follow-ups, both policy or performance work:
 - **(b) The template's 1,000-check cap.** It makes a node's own Falcon blocks size-bound at 1,000 spends rather than
   1,200. That is harmless, and the yb-calibration study already models it.
 
-### Unverified, from code reading only
+### Transactions that spend a V or I (audit 07/F-1, measured 2026-10-12)
 
-`AcceptToMemoryPool` scores every script failure **DoS 0** for a transaction with any vault or intent input
-(`main.cpp:1869`, upgrade plan finding 25). So a peer that adds any V/I outpoint can send invalid PQ signatures
-without being banned. Each such message costs the receiver three verifications. Per byte of attacker bandwidth:
+Until 2026-10-12 `AcceptToMemoryPool` scored **every** script failure of a transaction with a V or I input DoS 0
+(upgrade plan finding 25), so a peer could add any template outpoint and relay invalid PQ or ECDSA signatures
+without being scored. The rule is now narrowed (`main.cpp` `IsVaultSetStateFailure`, both node lines): DoS 0 only
+for the failures that depend on the set state at the receiver's tip, which the relaying peer's tip need not share:
 
-- SLH-DSA: ≈ 94 µs/KB.
-- ECDSA, the same trick with a P2PKH input: ≈ 400 µs/KB.
-- Falcon: ≈ 40 µs/KB.
+- `SCRIPT_ERR_SETSIG` / `SCRIPT_ERR_SETSIG_COUNT`, raised only by `OP_CHECKSETSIG` / `OP_CHECKSETDORMANT`;
+- `SCRIPT_ERR_VERIFY` when an input spends a V or I with selector 3: the templates' one `OP_VERIFY` follows
+  `OP_CHECKSETDORMANT`, which pushes false while the set is not released.
 
-So PQ does not worsen this existing exemption per byte. The exemption itself predates this line.
+Every other failure keeps the stock score of `ContextualCheckInputs`: 100 for a mandatory-flag failure, 10 for
+`old-consensus-branch-id`, 0 for a non-mandatory flag. Measured with `pq_dos.py --scenarios=invalid` on 2026-10-12
+against the ycash-dd binary at `f2d812c8e` and the ycash6 binary at `caca5755d` (raw output
+[`results-20261012-vault-dd.json`](../contrib/yellowback/pq-dos/results-20261012-vault-dd.json),
+[`results-20261012-vault-ycash6.json`](../contrib/yellowback/pq-dos/results-20261012-vault-ycash6.json)). The
+machine's 1-minute load was 27 to 40 during the runs, so the times are upper bounds:
+
+| Transaction (one per message, from a mininode peer) | Bytes | RPC reject, median of 30 (dd / ycash6) | Per KB (dd / ycash6) | P2P result (both lines) |
+|---|---:|---:|---:|---|
+| V owner spend (selector 2), garbage SLH-DSA signature | 8,045 | 3.37 / 2.92 ms | 0.43 / 0.37 ms | Misbehaving 0 → 100, disconnected |
+| V owner spend (selector 2), well-formed wrong Falcon signature | 1,684 | 1.05 / 0.74 ms | 0.64 / 0.45 ms | Misbehaving 0 → 100, disconnected |
+| Wrong ECDSA signature on a P2PKH input beside a V input | 252 | 0.74 / 0.73 ms | 3.0 / 3.0 ms | Misbehaving 0 → 100, disconnected |
+| UNLOCK (selector 1) with a non-member's 65-byte set signature | 523 | 0.75 / 0.72 ms | 1.5 / 1.4 ms | banscore 0, still connected |
+
+Before the change the first three rows were banscore 0 (`qa/rpc-tests/vault_dos.py` fails at the first row against
+the earlier binary). The fourth row is the cheap case the exemption exists for: the set check fails before any
+signature is verified. `vault_dos.py` (merge gate, both lines) also covers an OWNER-RELEASED spend while the set
+is not released (0) and an UNLOCK signed by a member whose JOIN block the receiver does not have (0).
+
+**Residual, accepted.** The reject reason does not say which input failed. A non-template script that does
+expensive work (an `OP_CHECKSIG` or `OP_CHECKPQSIG` whose result it drops) and then raises one of the errors above
+still scores 0. That is the class stock already has: a transaction whose last input fails only a non-mandatory
+flag scores 0 after every earlier input was verified. Both are bounded per message by the standard size and sigop
+limits, and per byte they stay below the Sapling-proof cost Ycash already accepts (§2).
+
+### Orphans (audit 07/F-6)
+
+A transaction whose parent the node has not seen is parked in the orphan map. v4.5.0 parked orphans up to 5,000
+bytes, so an SLH-DSA spend (≈ 8 KB) that arrived before its parent was dropped and never re-announced. On
+ycash-dd the bound is now `MAX_ORPHAN_TX_SIZE_VAULT` = 10,000 bytes (one `MAX_STANDARD_PQ_SCRIPTSIG` plus a
+skeleton) once `UPGRADE_VAULT` is active at the next block, 5,000 before. The count bound `-maxorphantx`
+(default 100) is unchanged, so the orphan map holds at most 100 × 10 KB = 1 MB (0.5 MB before); eviction stays
+random (`LimitOrphanTxSize`). ycash6 (6.20.0) already parks orphans below 100,000 bytes (10 MB at the default
+count). A transaction with two SLH-DSA inputs (≈ 16 KB) is still not parked on ycash-dd, the same as any large
+legacy transaction. `qa/rpc-tests/vault_pq_relay.py` covers both sides of the activation.
 
 ## Reproduce
 

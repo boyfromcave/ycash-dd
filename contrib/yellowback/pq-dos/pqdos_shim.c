@@ -37,7 +37,7 @@ int pqdos_verify(int scheme, const uint8_t *pk, const uint8_t *sig, const uint8_
     if (scheme == 1)
         return slh_verify(msg32, 32, sig, 7856, &no_ctx, 0, pk, &slh_dsa_sha2_128s) == 1;
     if (scheme == 2)
-        return ycash_falcon512_verify(sig, 666, msg32, 32, pk) == 0;
+        return ycash_falcon512_verify(sig, 666, msg32, 32, pk, 897) == 0;
     return 0;
 }
 

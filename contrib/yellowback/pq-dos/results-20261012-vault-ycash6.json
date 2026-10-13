@@ -1,0 +1,114 @@
+{
+ "config": {
+  "activation": 105,
+  "block_target": 1990000,
+  "cores": 10,
+  "par": {
+   "1": 1,
+   "2": 1,
+   "3": 1,
+   "4": 1,
+   "5": 0,
+   "6": 0,
+   "7": 0
+  }
+ },
+ "invalid": {
+  "falcon": {
+   "atmp_garbage_ms_median": 0.4417896270751953,
+   "atmp_valid_ms_median": 0.5128383636474609,
+   "atmp_wellformed_wrong_ms_median": 0.6089210510253906,
+   "micro": {
+    "random_bytes_us": 0.0,
+    "valid_us": 28.46,
+    "wrong_message_us": 24.33
+   },
+   "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)"
+  },
+  "p2p": {
+   "banscore_after": null,
+   "banscore_before": 0,
+   "connected_after": 0,
+   "listbanned": [],
+   "log": [
+    "2026-10-13T07:27:10.035022Z  INFO main: Misbehaving: 127.0.0.1:65475 (0 -> 100) BAN THRESHOLD EXCEEDED",
+    "2026-10-13T07:27:10.035046Z  INFO main: Warning: not banning local peer 127.0.0.1:65475!"
+   ]
+  },
+  "p2pkh_atmp_valid_ms_median": 0.44083595275878906,
+  "slh": {
+   "atmp_garbage_ms_median": 2.6772022247314453,
+   "atmp_valid_ms_median": 1.2218952178955078,
+   "atmp_wellformed_wrong_ms_median": null,
+   "micro": {
+    "random_bytes_us": 305.1,
+    "valid_us": 304.21,
+    "wrong_message_us": 339.25
+   },
+   "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)"
+  },
+  "vault": {
+   "p2pkh_sibling_of_v": {
+    "atmp_reject_ms_median": 0.7312297821044922,
+    "atmp_reject_ms_per_kb": 2.959601963932806,
+    "p2p": {
+     "banscore_after": null,
+     "banscore_before": 0,
+     "connected_after": 0,
+     "listbanned": [],
+     "log": [
+      "2026-10-13T07:27:20.240898Z  INFO main: Misbehaving: 127.0.0.1:49206 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "2026-10-13T07:27:20.240919Z  INFO main: Warning: not banning local peer 127.0.0.1:49206!"
+     ]
+    },
+    "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
+    "tx_bytes": 253
+   },
+   "v_owner_falcon": {
+    "atmp_reject_ms_median": 0.7381439208984375,
+    "atmp_reject_ms_per_kb": 0.4488476098574822,
+    "p2p": {
+     "banscore_after": null,
+     "banscore_before": 0,
+     "connected_after": 0,
+     "listbanned": [],
+     "log": [
+      "2026-10-13T07:27:16.795480Z  INFO main: Misbehaving: 127.0.0.1:49186 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "2026-10-13T07:27:16.795501Z  INFO main: Warning: not banning local peer 127.0.0.1:49186!"
+     ]
+    },
+    "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
+    "tx_bytes": 1684
+   },
+   "v_owner_slh": {
+    "atmp_reject_ms_median": 2.9168128967285156,
+    "atmp_reject_ms_per_kb": 0.3712636925108763,
+    "p2p": {
+     "banscore_after": null,
+     "banscore_before": 0,
+     "connected_after": 0,
+     "listbanned": [],
+     "log": [
+      "2026-10-13T07:27:13.409089Z  INFO main: Misbehaving: 127.0.0.1:65526 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "2026-10-13T07:27:13.409115Z  INFO main: Warning: not banning local peer 127.0.0.1:65526!"
+     ]
+    },
+    "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
+    "tx_bytes": 8045
+   },
+   "v_unlock_bad_set_sig": {
+    "atmp_reject_ms_median": 0.720977783203125,
+    "atmp_reject_ms_per_kb": 1.4089336832061068,
+    "p2p": {
+     "banscore_after": 0,
+     "banscore_before": 0,
+     "connected_after": 1,
+     "listbanned": [],
+     "log": []
+    },
+    "reject_reason": "16: mandatory-script-verify-flag-failed (OP_CHECKSETSIG or OP_CHECKSETDORMANT failed)",
+    "tx_bytes": 524
+   }
+  }
+ }
+}
