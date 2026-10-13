@@ -6,12 +6,14 @@
 """
 UPGRADE_VAULT activation on regtest (docs/plans/yellowback-upgrade-plan.md §15.1, §15.2):
 
-- getblockchaininfo lists Vault (6d5b7a31) pending, then active; the consensus branch id moves
-  from Sapling to Vault at the activation height. The harness activates Overwinter and Sapling
-  only (util.py start_node), so this also shows Vault activating without Ycash, Blossom,
-  Heartwood, Canopy or NU5.
+- The mainnet topology (audit 04/F-5): Ycash, Blossom, Heartwood and Canopy active from height 1
+  (YCASH_UPGRADE_ARGS), NU5 never scheduled, Vault at ACTIVATION. getblockchaininfo lists Vault
+  (6d5b7a31) pending, then active; the consensus branch id moves from Canopy to Vault at the
+  activation height, so PrevEpochBranchId's walk-back skips the unactivated NU5 exactly as it will on
+  mainnet. (The Sapling-direct topology, Vault over Overwinter + Sapling only, is the unit test
+  vault_script_tests/vault_upgrade_regtest_activation.)
 - A wallet send signed for the activation block confirms in it (the wallet signs with the new
-  branch id); a Python-signed spend bound to the Sapling branch id is accepted before activation
+  branch id); a Python-signed spend bound to the Canopy branch id is accepted before activation
   and rejected after ("old-consensus-branch-id"), the same spend bound to Vault's is accepted.
 - A P2SH OP_CHECKSEQUENCEVERIFY script is OP_NOP3 before activation (a block spending it with a
   failing CSV is valid) and enforced after.
@@ -41,7 +43,6 @@ from test_framework.script import (
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
-    SAPLING_BRANCH_ID,
     VAULT_BRANCH_ID,
     assert_equal,
     bytes_to_hex_str,
@@ -56,11 +57,12 @@ from test_framework.util import (
 from test_framework import yellowback_model as ym
 from test_framework import yellowback_util as yu
 from test_framework.yellowback_attest import der_encode, ecdsa_sign
-from test_framework.yellowback_util import mine_block_raw
+from test_framework.yellowback_util import YCASH_CANOPY_BRANCH_ID, YCASH_UPGRADE_ARGS, mine_block_raw
 
 # Below regtest's first halving (150): past it, getblocktemplate on a node without the Ycash
 # upgrade aborts in GetFoundersRewardAddressAtHeight (a defect at the pin, recorded in the
-# workflow's STOCK_BASELINE note), and mine_block_raw uses getblocktemplate.
+# workflow's STOCK_BASELINE note), and mine_block_raw uses getblocktemplate. The suite runs with
+# the Ycash upgrades active since audit 04/F-5 and keeps the bound.
 ACTIVATION = 115
 FEE = 10000
 SEQUENCE_FINAL = 0xffffffff
@@ -91,7 +93,8 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.setup_clean_chain = True
 
     def setup_network(self, split=False):
-        args = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=mempool']
+        # Canopy below Vault, NU5 unscheduled: the transition every public network will make (04/F-5).
+        args = list(YCASH_UPGRADE_ARGS) + [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=mempool']
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir, extra_args=[args] * self.num_nodes)
         connect_nodes_bi(self.nodes, 0, 1)
         self.is_network_split = False
@@ -185,25 +188,27 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.pubkey = yu.secret_to_pubkey(self.secret)
         self.addr = yu.pubkey_to_address(self.pubkey)
 
-        print('pending: Vault listed with its height, the next block still Sapling')
+        print('pending: Vault listed with its height, the next block still Canopy')
         up = self.upgrade()
         assert_equal(up['name'], 'Vault')
         assert_equal(up['activationheight'], ACTIVATION)
         assert_equal(up['status'], 'pending')
         bci = node.getblockchaininfo()
-        assert_equal(bci['consensus']['nextblock'], '%08x' % SAPLING_BRANCH_ID)
-        assert_equal(signing_branch_id(node), SAPLING_BRANCH_ID)
-        # Ycash, Blossom, Heartwood, Canopy and NU5 are not active (not even listed).
-        for bid in ('374d694f', '8e471bd6', '66314da3', '19bd2d2f', 'f919a198'):
-            assert bid not in bci['upgrades'], bid
+        assert_equal(bci['consensus']['nextblock'], '%08x' % YCASH_CANOPY_BRANCH_ID)
+        assert_equal(signing_branch_id(node), YCASH_CANOPY_BRANCH_ID)
+        # Ycash, Blossom, Heartwood and Canopy are active; NU5 is not scheduled (not even listed),
+        # so it sits unactivated between Canopy and Vault in the upgrade index, as on mainnet.
+        for bid in ('374d694f', '8e471bd6', '66314da3', '19bd2d2f'):
+            assert_equal(bci['upgrades'][bid]['status'], 'active')
+        assert 'f919a198' not in bci['upgrades'], bci['upgrades']
 
         print('fund the coins both halves of the test spend')
         csv_redeem = CScript([CSV_DELAY, OP_CHECKSEQUENCEVERIFY, OP_DROP, OP_TRUE])
         dormant_redeem = CScript([b'\x01' * 32, OP_CHECKSETDORMANT, OP_DROP, OP_TRUE])
         setsig_spk = CScript([b'\x02' * 32, OP_1, OP_CHECKSETSIG])
         coins = {
-            'sapling-pre': self.fund(self.addr),
-            'sapling-post': self.fund(self.addr),
+            'canopy-pre': self.fund(self.addr),
+            'canopy-post': self.fund(self.addr),
             'bip68-pre': self.fund(self.addr),
             'csv-pre': self.fund(csv_redeem),
             'csv-post': self.fund(csv_redeem),
@@ -215,12 +220,12 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.mine(1)
 
         print('before activation')
-        print('  a spend signed with the Sapling branch id is accepted and mined')
-        txid = node.sendrawtransaction(self.p2pkh_spend(coins['sapling-pre'], SAPLING_BRANCH_ID))
+        print('  a spend signed with the Canopy branch id is accepted and mined')
+        txid = node.sendrawtransaction(self.p2pkh_spend(coins['canopy-pre'], YCASH_CANOPY_BRANCH_ID))
         self.assert_in_block(txid, self.mine(1)[0])
 
         print('  a relative lock (nSequence = 50) is ignored: accepted at once')
-        txid = node.sendrawtransaction(self.p2pkh_spend(coins['bip68-pre'], SAPLING_BRANCH_ID, sequence=50))
+        txid = node.sendrawtransaction(self.p2pkh_spend(coins['bip68-pre'], YCASH_CANOPY_BRANCH_ID, sequence=50))
         self.assert_in_block(txid, self.mine(1)[0])
 
         print('  OP_CHECKSEQUENCEVERIFY is OP_NOP3: a failing CSV (input sequence final) is valid in a block')
@@ -244,7 +249,7 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.mine_to(ACTIVATION - 1)
         assert_equal(self.upgrade()['status'], 'pending')
         bci = node.getblockchaininfo()
-        assert_equal(bci['consensus']['chaintip'], '%08x' % SAPLING_BRANCH_ID)
+        assert_equal(bci['consensus']['chaintip'], '%08x' % YCASH_CANOPY_BRANCH_ID)
         assert_equal(bci['consensus']['nextblock'], '%08x' % VAULT_BRANCH_ID)
         # The wallet signs with CurrentEpochBranchId(tip + 1), Vault's, valid in the next block.
         send = node.sendtoaddress(self.nodes[1].getnewaddress(), 2)
@@ -262,12 +267,12 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.assert_in_block(send2, self.mine(1)[0])
 
         print('after activation')
-        print('  the Sapling branch id is refused; the Vault branch id is accepted')
-        old = self.p2pkh_spend(coins['sapling-post'], SAPLING_BRANCH_ID)
+        print('  the Canopy branch id is refused (old-consensus-branch-id names Canopy, not NU5); Vault\'s is accepted')
+        old = self.p2pkh_spend(coins['canopy-post'], YCASH_CANOPY_BRANCH_ID)
         msg = assert_raises_rpc('old-consensus-branch-id', node.sendrawtransaction, old)
-        assert '6d5b7a31' in msg and '76b809bb' in msg, msg
-        self.assert_block_rejected([old], 'Sapling-bound signature after activation')
-        txid = node.sendrawtransaction(self.p2pkh_spend(coins['sapling-post'], VAULT_BRANCH_ID))
+        assert '6d5b7a31' in msg and '19bd2d2f' in msg, msg
+        self.assert_block_rejected([old], 'Canopy-bound signature after activation')
+        txid = node.sendrawtransaction(self.p2pkh_spend(coins['canopy-post'], VAULT_BRANCH_ID))
         self.assert_in_block(txid, self.mine(1)[0])
 
         print('  OP_CHECKSEQUENCEVERIFY is enforced')
