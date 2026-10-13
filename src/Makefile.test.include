@@ -50,7 +50,8 @@ JSON_TEST_FILES = \
   test/data/vault_vectors.json \
   test/data/pq_acvp_slhdsa.json \
   test/data/pq_falcon_kat.json \
-  test/data/pq_vectors.json
+  test/data/pq_vectors.json \
+  test/data/pq_wallet_vectors.json
 
 RAW_TEST_FILES = test/data/alertTests.raw
 
