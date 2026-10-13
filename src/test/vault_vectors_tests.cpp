@@ -388,7 +388,7 @@ BOOST_AUTO_TEST_CASE(template_spends)
         CScript code = Script(sp[i]["scriptCode"]);
         CAmount amount = sp[i]["amount"].get_int64();
         uint32_t branch = sp[i]["branchId"].get_int64();
-        uint256 sighash = SignatureHash(code, tx, nIn, SIGHASH_ALL, amount, branch);
+        uint256 sighash = SignatureHash(code, tx, nIn, SIGHASH_ALL | SIGHASH_ANYONECANPAY, amount, branch); // 01/V-2
         BOOST_CHECK_MESSAGE(Hex(sighash) == sp[i]["sighash"].get_str(), "ZIP-243 sighash under the vault branch " + name);
         uint256 msg = SetSigMsg(U256(sp[i]["setId"]), sp[i]["role"].get_int(), tx.vin[nIn].prevout, sighash);
         BOOST_CHECK_EQUAL(Hex(msg), sp[i]["setSigMsg"].get_str());
