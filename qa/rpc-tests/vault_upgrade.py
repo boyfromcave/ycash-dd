@@ -20,6 +20,7 @@ UPGRADE_VAULT activation on regtest (docs/plans/yellowback-upgrade-plan.md §15.
   time-based lock is "bad-txns-vault-timelock", and a reorg evicts a spend that became early.
 - Scripts executing OP_CHECKSETSIG (0xc0) or OP_CHECKSETDORMANT (0xc1) are invalid before
   activation.
+- Quantum spec R-A3: a node refuses Vault scheduled below Sapling (InitError).
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/vault_upgrade.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -44,12 +45,15 @@ from test_framework.util import (
     SAPLING_BRANCH_ID,
     VAULT_BRANCH_ID,
     assert_equal,
+    assert_start_raises_init_error,
     bytes_to_hex_str,
     connect_nodes_bi,
     hex_str_to_bytes,
     nuparams,
     signing_branch_id,
+    start_node,
     start_nodes,
+    stop_node,
     sync_blocks,
     sync_mempools,
 )
@@ -322,6 +326,14 @@ class VaultUpgradeTest(BitcoinTestFramework):
         self.sync_all()
         assert_equal(self.nodes[1].getbestblockhash(), node.getbestblockhash())
         assert node.getblockcount() < 150, node.getblockcount()
+
+        print('quantum spec R-A3: a node refuses Vault scheduled below Sapling')
+        stop_node(self.nodes[1], 1)
+        assert_start_raises_init_error(1, self.options.tmpdir, ['-nuparams=76b809bb:20', nuparams(VAULT_BRANCH_ID, 10)],
+                                       'The Vault upgrade requires Sapling active at or below its height (quantum spec R-A3')
+        self.nodes[1] = start_node(1, self.options.tmpdir, [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-debug=mempool'])
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
         print('vault_upgrade OK')
 
 
