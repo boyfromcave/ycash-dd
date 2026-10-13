@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "4768e05c8db534b36c30475cbd84b8674d3c1497360e14f6c4375404c5dd5365"
+    "sha256": "f93549a35b65a25d5cb16bf36203581d0e26271d486c059088fe119e56dc5191"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2173,11 +2173,11 @@
     },
     {
       "code": -8,
-      "message": "appheight on a tag without a module",
+      "message": "appheight on a tag no module governs",
       "raisedBy": [
         "vault_lock"
       ],
-      "provokedBy": "`appheight` on tag `TEST`"
+      "provokedBy": "`appheight` on tag `TEST` (or on `YED\\0` where no attestor set is configured)"
     },
     {
       "code": -8,
