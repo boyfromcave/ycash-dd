@@ -1750,7 +1750,8 @@ bool AcceptToMemoryPool(
         if (chainparams.GetConsensus().NetworkUpgradeActive(nextBlockHeight, Consensus::UPGRADE_VAULT) && vault::g_vaultdb) {
             vaultSnapshot = vault::TipSnapshot();
             vault::ViewCoinAccessor vaultCoins(view, nextBlockHeight);
-            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip())))
+            if (auto vaultBad = vault::CheckTx(tx, vaultCoins, nextBlockHeight, *vaultSnapshot, vault::AncestorHashes(chainActive.Tip()),
+                                               chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight))
                 return state.DoS(0, error("AcceptToMemoryPool: vault: %s: %s", hash.ToString(), vaultBad->c_str()), REJECT_INVALID, *vaultBad);
         }
 
@@ -1762,7 +1763,7 @@ bool AcceptToMemoryPool(
         view.SetBackend(dummy);
 
         // Check for non-standard pay-to-script-hash in inputs
-        if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId))
+        if (chainparams.RequireStandard() && !AreInputsStandard(tx, view, consensusBranchId, vaultSnapshot.get()))
             return error("AcceptToMemoryPool: nonstandard transaction input");
 
         // Check that the transaction doesn't have an excessive number of
@@ -3407,6 +3408,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     if (fVaultRules) {
         vaultState.reset(new vault::VaultState(*vault::g_vaultdb));
         vaultState->SetBlockHashes(vault::AncestorHashes(pindex->pprev));
+        vaultState->SetActivationHeight(chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight);
         if (auto vaultBad = vaultState->ApplyBlock(block, pindex->nHeight, vaultCoins, vaultUndo, pindex))
             return state.DoS(100, error("ConnectBlock(): vault: %s", vaultBad->c_str()), REJECT_INVALID, *vaultBad);
     }
@@ -3495,7 +3497,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     view.SetBestBlock(pindex->GetBlockHash());
     if (yellowback::g_yellowback && !yellowback::g_yellowback->CommitConnect(block, pindex))
         return AbortNode(state, "Failed to write to the Yellowback index");
-    if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo))
+    if (vaultState && !vault::g_vaultdb->ConnectBlock(pindex->GetBlockHash(), pindex->nHeight, pindex->pprev->GetBlockHash(), *vaultState, vaultUndo,
+                                                      vault::UndoToPrune(pindex, chainparams.GetConsensus())))
         return AbortNode(state, "Failed to write to the vault database");
 
     int64_t nTime3 = GetTimeMicros(); nTimeIndex += nTime3 - nTime2;
