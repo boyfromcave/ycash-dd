@@ -230,7 +230,8 @@ BOOST_DATA_TEST_CASE(DoS_mapOrphans, boost::unit_test::data::xrange(static_cast<
 }
 
 // Audit 07/F-6: before UPGRADE_VAULT the orphan bound stays 5,000 bytes; once it is active at the next block an
-// SLH-DSA-sized orphan (a 7,938-byte scriptSig, ~8 KB) is parked, up to MAX_ORPHAN_TX_SIZE_VAULT (10,000) bytes.
+// SLH-DSA-sized orphan (a 7,938-byte scriptSig, ~8 KB) and a two-input consolidation (~16 KB) are parked, up to
+// MAX_ORPHAN_TX_SIZE_VAULT (99,999) bytes, the 6.20.0 line's bound.
 BOOST_AUTO_TEST_CASE(DoS_pq_sized_orphans)
 {
     BOOST_CHECK(MAX_ORPHAN_TX_SIZE_VAULT >= MAX_STANDARD_PQ_SCRIPTSIG + 1000);
@@ -258,9 +259,11 @@ BOOST_AUTO_TEST_CASE(DoS_pq_sized_orphans)
     // UPGRADE_VAULT active at chainActive.Height() + 1
     UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, chainActive.Height() + 1);
     BOOST_CHECK(AddOrphanTx(slhTx, 2));
+    BOOST_CHECK_EQUAL(MAX_ORPHAN_TX_SIZE_VAULT, 99999U);
+    BOOST_CHECK(AddOrphanTx(SizedOrphan(16100), 2));                     // two SLH-DSA inputs
     BOOST_CHECK(AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE_VAULT), 2));
     BOOST_CHECK(!AddOrphanTx(SizedOrphan(MAX_ORPHAN_TX_SIZE_VAULT + 1), 2));
-    BOOST_CHECK_EQUAL(mapOrphanTransactions.size(), 3U);
+    BOOST_CHECK_EQUAL(mapOrphanTransactions.size(), 4U);
     LimitOrphanTxSize(DEFAULT_MAX_ORPHAN_TRANSACTIONS);
     BOOST_CHECK(mapOrphanTransactions.count(slhTx.GetHash()));
 
