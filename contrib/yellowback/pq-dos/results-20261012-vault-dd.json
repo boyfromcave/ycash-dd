@@ -15,13 +15,13 @@
  },
  "invalid": {
   "falcon": {
-   "atmp_garbage_ms_median": 0.4837512969970703,
-   "atmp_valid_ms_median": 0.7879734039306641,
-   "atmp_wellformed_wrong_ms_median": 0.7088184356689453,
+   "atmp_garbage_ms_median": 0.5817413330078125,
+   "atmp_valid_ms_median": 0.49686431884765625,
+   "atmp_wellformed_wrong_ms_median": 0.48613548278808594,
    "micro": {
     "random_bytes_us": 0.0,
-    "valid_us": 43.61,
-    "wrong_message_us": 49.19
+    "valid_us": 41.29,
+    "wrong_message_us": 35.3
    },
    "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)"
   },
@@ -31,74 +31,74 @@
    "connected_after": 0,
    "listbanned": [],
    "log": [
-    "Oct 13 00:28:47.543  INFO main: Misbehaving: 127.0.0.1:50026 (0 -> 100) BAN THRESHOLD EXCEEDED",
-    "Oct 13 00:28:47.543  INFO main: Warning: not banning local peer 127.0.0.1:50026!"
+    "Oct 13 01:03:37.559  INFO main: Misbehaving: 127.0.0.1:57911 (0 -> 100) BAN THRESHOLD EXCEEDED",
+    "Oct 13 01:03:37.559  INFO main: Warning: not banning local peer 127.0.0.1:57911!"
    ]
   },
-  "p2pkh_atmp_valid_ms_median": 0.7638931274414062,
+  "p2pkh_atmp_valid_ms_median": 0.32901763916015625,
   "slh": {
-   "atmp_garbage_ms_median": 1.7480850219726562,
-   "atmp_valid_ms_median": 1.1661052703857422,
+   "atmp_garbage_ms_median": 2.6900768280029297,
+   "atmp_valid_ms_median": 1.7600059509277344,
    "atmp_wellformed_wrong_ms_median": null,
    "micro": {
-    "random_bytes_us": 396.15,
-    "valid_us": 294.89,
-    "wrong_message_us": 262.99
+    "random_bytes_us": 459.55,
+    "valid_us": 558.99,
+    "wrong_message_us": 357.03
    },
    "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)"
   },
   "vault": {
    "p2pkh_sibling_of_v": {
-    "atmp_reject_ms_median": 0.7359981536865234,
-    "atmp_reject_ms_per_kb": 2.99072265625,
+    "atmp_reject_ms_median": 0.8959770202636719,
+    "atmp_reject_ms_per_kb": 3.6407955109126986,
     "p2p": {
      "banscore_after": null,
      "banscore_before": 0,
      "connected_after": 0,
      "listbanned": [],
      "log": [
-      "Oct 13 00:28:58.404  INFO main: Misbehaving: 127.0.0.1:50196 (0 -> 100) BAN THRESHOLD EXCEEDED",
-      "Oct 13 00:28:58.404  INFO main: Warning: not banning local peer 127.0.0.1:50196!"
+      "Oct 13 01:03:48.017  INFO main: Misbehaving: 127.0.0.1:58135 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "Oct 13 01:03:48.017  INFO main: Warning: not banning local peer 127.0.0.1:58135!"
      ]
     },
     "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
     "tx_bytes": 252
    },
    "v_owner_falcon": {
-    "atmp_reject_ms_median": 1.046895980834961,
-    "atmp_reject_ms_per_kb": 0.6365923303889549,
+    "atmp_reject_ms_median": 0.8120536804199219,
+    "atmp_reject_ms_per_kb": 0.4937903614904988,
     "p2p": {
      "banscore_after": null,
      "banscore_before": 0,
      "connected_after": 0,
      "listbanned": [],
      "log": [
-      "Oct 13 00:28:54.698  INFO main: Misbehaving: 127.0.0.1:50149 (0 -> 100) BAN THRESHOLD EXCEEDED",
-      "Oct 13 00:28:54.698  INFO main: Warning: not banning local peer 127.0.0.1:50149!"
+      "Oct 13 01:03:44.446  INFO main: Misbehaving: 127.0.0.1:58075 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "Oct 13 01:03:44.446  INFO main: Warning: not banning local peer 127.0.0.1:58075!"
      ]
     },
     "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
     "tx_bytes": 1684
    },
    "v_owner_slh": {
-    "atmp_reject_ms_median": 3.3690929412841797,
-    "atmp_reject_ms_per_kb": 0.42883171807022996,
+    "atmp_reject_ms_median": 3.1387805938720703,
+    "atmp_reject_ms_per_kb": 0.39951663494406464,
     "p2p": {
      "banscore_after": null,
      "banscore_before": 0,
      "connected_after": 0,
      "listbanned": [],
      "log": [
-      "Oct 13 00:28:51.106  INFO main: Misbehaving: 127.0.0.1:50107 (0 -> 100) BAN THRESHOLD EXCEEDED",
-      "Oct 13 00:28:51.106  INFO main: Warning: not banning local peer 127.0.0.1:50107!"
+      "Oct 13 01:03:41.138  INFO main: Misbehaving: 127.0.0.1:57997 (0 -> 100) BAN THRESHOLD EXCEEDED",
+      "Oct 13 01:03:41.138  INFO main: Warning: not banning local peer 127.0.0.1:57997!"
      ]
     },
     "reject_reason": "16: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)",
     "tx_bytes": 8045
    },
    "v_unlock_bad_set_sig": {
-    "atmp_reject_ms_median": 0.7491111755371094,
-    "atmp_reject_ms_per_kb": 1.4667109823135756,
+    "atmp_reject_ms_median": 0.35691261291503906,
+    "atmp_reject_ms_per_kb": 0.6974780832538168,
     "p2p": {
      "banscore_after": 0,
      "banscore_before": 0,
@@ -107,7 +107,7 @@
      "log": []
     },
     "reject_reason": "16: mandatory-script-verify-flag-failed (OP_CHECKSETSIG or OP_CHECKSETDORMANT failed)",
-    "tx_bytes": 523
+    "tx_bytes": 524
    }
   }
  }
