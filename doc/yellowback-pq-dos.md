@@ -227,10 +227,13 @@ OWNER-RELEASED spend relayed from a tip one block past the release (0, then acce
 
 **What a peer can still force at DoS 0, accepted.** Only the template input's own evaluation up to its
 state-dependent failure: for selector 3 the dormancy check, which comes before any signature; for `OP_CHECKSETSIG`
-up to `k` recoveries of garbage 65-byte set signatures. The latter cannot be told apart from honest relay: a
-membership change on the peer's tip produces the same `SCRIPT_ERR_SETSIG`. The price of exact attribution is one
-extra evaluation of the template input on every valid template spend (one SLH-DSA verification or `k`
-recoveries, ≈ 0.3 ms).
+**one** recovery of a garbage 65-byte set signature (`CheckSetSigs` returns at the first bad signature). That
+cannot be told apart from honest relay: a membership change on the peer's tip produces the same
+`SCRIPT_ERR_SETSIG`. The isolated check runs before `Consensus::CheckTxInputs`, so a transaction that is also
+value-invalid but fails `OP_CHECKSETSIG` scores 0, at the same cost of at most one recovery. The price of exact
+attribution on valid spends: an owner spend's second SLH-DSA or Falcon verification hits the signature cache
+(the isolated check stores), so it costs no extra verification; a set-signature spend (UNLOCK, CANCEL) pays `k`
+extra recoveries, which are not cached.
 
 **Regtest-only boundary.** A Falcon owner spend relayed one block ahead of `-pqfalconheight` now scores 100, as a
 Falcon `TX_PQPKH` spend does; on mainnet and testnet Falcon activates with `UPGRADE_VAULT`.
