@@ -514,6 +514,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-fuzzmessagestest=<n>", "Randomly fuzz 1 of every <n> network messages");
         strUsage += HelpMessageOpt("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", DEFAULT_STOPAFTERBLOCKIMPORT));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
+        strUsage += HelpMessageOpt("-acceptnonstdtxn", "Accept non-standard transactions into the mempool (regtest-only) (default: 1; 0 enforces the standardness policy)");
         strUsage += HelpMessageOpt("-pqfalcon", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from the vault upgrade, as -pqfalconheight=0 (regtest-only) (default: 0)");
         strUsage += HelpMessageOpt("-pqfalconheight=<h>", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from height <h> once the vault upgrade is active (regtest-only)");
         strUsage += HelpMessageOpt("-eqparams=hexBranchId:N:K", "Use given equihash parameters for specified network upgrade");
@@ -1302,6 +1303,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 #endif
 
+    // -acceptnonstdtxn (regtest only; chainparams read it): =0 enforces relay policy on regtest (audit 01/V-4 tests).
+    if (mapArgs.count("-acceptnonstdtxn") && chainparams.NetworkIDString() != "regtest") {
+        return InitError("-acceptnonstdtxn may only be used on regtest.");
+    }
     // Falcon activation (quantum spec R-A2, R-B3): regtest only; chainparams read the value.
     if (mapArgs.count("-pqfalcon") || mapArgs.count("-pqfalconheight")) {
         if (chainparams.NetworkIDString() != "regtest") {
