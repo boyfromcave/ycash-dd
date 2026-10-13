@@ -548,7 +548,9 @@ leg_cross_line() {
     in_ci && return 1; return 0
   fi
   local rc=0
-  for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json; do
+  for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json src/test/data/yellowback_math_cases.json \
+           qa/rpc-tests/test_framework/yellowback_golden.json qa/rpc-tests/test_framework/yellowback_model.py \
+           qa/rpc-tests/test_framework/SERIALISATION.md; do
     mine=$(sha256 < "$f" | cut -c1-64)
     other=$(show "$f" | sha256 | cut -c1-64)
     if [ "$mine" = "$other" ]; then echo "  $f  $mine  identical"; else echo "  $f  this $mine, other $other  DIFFERENT"; rc=1; fi
@@ -583,6 +585,29 @@ leg_consensus_diff() {
   } > "$out/consensus-diff.txt"
   cat "$out/consensus-diff.txt"
   echo "written: $out/consensus-diff.patch ($(wc -l < "$out/consensus-diff.patch" | tr -d ' ') lines), $out/consensus-diff.txt"
+}
+
+leg_golden_separate_commit() {
+  # doc/yellowback-testing.md (audit 03/T-1): a commit that regenerates the YED golden vector touches nothing under
+  # src/yellowback/ and does not change yellowback_model.py, so the vector is never re-derived from the rule change it
+  # is meant to check (the reviewer recomputes the hash from the model commit). Report-only for one release cycle.
+  local base c files bad="" n=0
+  base=${YB_GOLDEN_BASE:-}
+  if [ -z "$base" ]; then
+    if git rev-parse --verify -q origin/upgrade/vault >/dev/null; then base=$(git merge-base origin/upgrade/vault HEAD); else base=$LEGACY; fi
+  fi
+  echo "commits $(git rev-parse --short "$base")..$(git rev-parse --short HEAD)"
+  for c in $(git rev-list "$base..HEAD"); do
+    files=$(git diff-tree --no-commit-id --name-only -r "$c")
+    printf '%s\n' "$files" | grep -qE '^(src/test/data|qa/rpc-tests/test_framework)/yellowback_golden\.json$' || continue
+    n=$((n + 1))
+    if printf '%s\n' "$files" | grep -qE '^src/yellowback/|^qa/rpc-tests/test_framework/yellowback_model\.py$'; then
+      bad="$bad
+  $(git log -1 --format='%h %s' "$c"): regenerates the golden together with $(printf '%s\n' "$files" | grep -E '^src/yellowback/|yellowback_model\.py$' | tr '\n' ' ')"
+    fi
+  done
+  echo "$n golden regeneration commit(s) in the range"
+  [ -z "$bad" ] || { echo "golden regenerated in the same commit as a rule or model change:$bad"; return 1; }
 }
 
 # ── run ───────────────────────────────────────────────────────────────────────────────────────
@@ -624,6 +649,7 @@ if [ "$mode" = upgrade ]; then
     leg block "RPC contract = the workspace generator's upgrade-line output (rpcversion 5)" leg_contract_generator
   fi
   leg block "golden vectors byte-identical on both node lines" leg_cross_line
+  leg report "golden-separate-commit: the YED golden regenerated in its own commit (doc/yellowback-testing.md)" leg_golden_separate_commit
   leg block "consensus-diff report for the two-reviewer gate (G-9)" leg_consensus_diff
 fi
 
