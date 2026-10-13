@@ -1588,3 +1588,37 @@ def cosign_and_submit(owner_node, signer_nodes, redeem_hex):
     assert sigs, 'no signer node holds a roster key of this vault'
     tx.vin[0].scriptSig = CScript([b''] + [sigs[i] for i in sorted(sigs)] + [owner_sig, vault_script])
     return owner_node.sendrawtransaction(bytes_to_hex_str(tx.serialize()))
+
+
+# --- audit 04/N-1: the 6.20.0 line's ZIP-317 conventional fee (ycash6 zip317.{h,cpp}) ----------
+# ycash-dd's wallet, vault_ownerspend and YED builders pay at least this for a transaction with a post-quantum
+# input (policy.h Zip317ConventionalFee), so a 6.20.0 node with -txunpaidactionlimit=0 relays it.
+MARGINAL_FEE = 500
+GRACE_ACTIONS = 2
+YED_OUTPUT_BYTES_ESTIMATE = 600   # txbuilder.h: the vout bytes the YED builders' pre-signing estimate assumes
+PQ_SPEND_INPUT_SLH = 7981         # PQSpendInputSize(SLH-DSA)
+
+
+def _compact_size_len(n):
+    return 1 if n < 0xfd else 3 if n <= 0xffff else 5 if n <= 0xffffffff else 9
+
+
+def conventional_fee(raw):
+    """ZIP-317's conventional fee of a decoded transaction (getrawtransaction <txid> 1 or decoderawtransaction)."""
+    tin = 0
+    for v in raw['vin']:
+        n = len(v.get('scriptSig', {}).get('hex', '')) // 2
+        tin += 32 + 4 + _compact_size_len(n) + n + 4
+    tout = sum(8 + _compact_size_len(len(o['scriptPubKey']['hex']) // 2) + len(o['scriptPubKey']['hex']) // 2 for o in raw['vout'])
+    actions = (max(-(-tin // 150), -(-tout // 34)) + 2 * len(raw.get('vjoinsplit', []))
+               + max(len(raw.get('vShieldedSpend', [])), len(raw.get('vShieldedOutput', []))))
+    return MARGINAL_FEE * max(GRACE_ACTIONS, actions)
+
+
+def yed_conventional_estimate(pq_inputs, other_inputs):
+    """YedConventionalFeeEstimate (txbuilder.cpp): the builders' pre-signing ZIP-317 floor of a YED transaction with
+    ``pq_inputs`` (sizes, PQSpendInputSize each) and ``other_inputs`` listed non-PQ inputs; 0 without a PQ input."""
+    if not pq_inputs:
+        return 0
+    tin = 150 * (other_inputs + 1) + sum(pq_inputs)
+    return MARGINAL_FEE * max(GRACE_ACTIONS, max(-(-tin // 150), -(-YED_OUTPUT_BYTES_ESTIMATE // 34)))
