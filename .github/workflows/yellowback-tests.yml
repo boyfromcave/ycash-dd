@@ -654,6 +654,9 @@ jobs:
       - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
         if: ${{ !cancelled() }}
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
+      - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
+        if: ${{ !cancelled() }}
+        run: python3 qa/test_yellowback_vault_params.py -v
       - name: pyflakes (functional tests and the shared helpers)
         if: ${{ !cancelled() }}
         run: |
