@@ -138,7 +138,8 @@ env:
   # (scripts/extract_spec.py --check-quantum, `make spec-check-quantum`, rpcversion 7) and the current
   # quantum RPC delta (docs/plans/yellowback-quantum-rpc-delta.md). Since the fee merge: 26ae6b7, which adds the
   # generator's fees mode (--check-fees, rpcversion 8) and docs/plans/yellowback-quantum-fees-rpc-delta.md.
-  WORKSPACE_COMMIT: 308eefee386b1c16df3d769dc87efc8ce8cecbc7
+  # 6ac627a records RED-5a/RED-5b in the plans the fees-line spec copy is generated from.
+  WORKSPACE_COMMIT: 6ac627a6b730504e095236e8e78da4d66af29642
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.
@@ -467,6 +468,7 @@ jobs:
         id: mode
         env:
           REF: ${{ github.base_ref || github.ref_name }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           case "$REF" in
             upgrade/vault|upgrade/vault-in-term|upgrade/quantum-vaults) m=upgrade ;;
@@ -485,8 +487,14 @@ jobs:
             other=upgrade/vault-in-term
             if grep -q '"falconActive"' src/rpc/yellowback.cpp 2>/dev/null; then other=upgrade/quantum-vaults; fi
           fi
+          # A pull request into upgrade/vault carries a rule change the other line's upgrade/vault does not
+          # have yet. When that same branch exists on the other line, compare with it (both lines land the
+          # change together). A missing branch keeps the upgrade/vault comparison above.
+          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads "https://github.com/$OTHER_LINE_REPO.git" "$HEAD_REF" >/dev/null; then
+            other=$HEAD_REF
+          fi
           echo "mode=$m" >> "$GITHUB_OUTPUT"; echo "other=$other" >> "$GITHUB_OUTPUT"
-          echo "audit mode $m (ref $REF)"
+          echo "audit mode $m (ref $REF, other $other)"
       - name: Check out the workspace's contract generator (upgrade line)
         if: steps.mode.outputs.mode == 'upgrade'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
