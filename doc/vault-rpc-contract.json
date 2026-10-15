@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "f5c405e1c7f5893ed1aee686190a8f1fb4cfea1027f26f6e0ea6bb8fc209157e"
+    "sha256": "9c05e4b81216857f6995e2e799784761791eedd0d64acae4ffa54ec574eaf21f"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2463,6 +2463,17 @@
         "set_signunlock"
       ],
       "provokedBy": "a cancel spend"
+    },
+    {
+      "code": -8,
+      "message": "no unspent vault or intent input",
+      "raisedBy": [
+        "set_signunlock",
+        "set_signcancel",
+        "vault_refee",
+        "vault_send"
+      ],
+      "provokedBy": "`vault_send` of a transaction with no template input"
     },
     {
       "code": -4,
