@@ -1230,6 +1230,8 @@ static std::string AmountErrMsg(const char * const optname, const std::string& s
     return strprintf(_("Invalid amount for -%s=<amount>: '%s'"), optname, strValue);
 }
 
+static bool g_walletSalvaged = false;
+
 bool CWallet::Verify()
 {
     std::string walletFile = GetArg("-wallet", DEFAULT_WALLET_DAT);
@@ -1276,6 +1278,7 @@ bool CWallet::Verify()
         // Recover readable keypairs:
         if (!CWalletDB::Recover(bitdb, walletFile, true))
             return false;
+        g_walletSalvaged = true;
     }
 
     if (fs::exists(GetDataDir() / walletFile))
@@ -1283,6 +1286,7 @@ bool CWallet::Verify()
         CDBEnv::VerifyResult r = bitdb.Verify(walletFile, CWalletDB::Recover);
         if (r == CDBEnv::RECOVER_OK)
         {
+            g_walletSalvaged = true;
             UIWarning(strprintf(_("Warning: Wallet file corrupt, data salvaged!"
                                          " Original %s saved as %s in %s; if"
                                          " your balance or transactions are incorrect you should"
@@ -6902,6 +6906,13 @@ bool CWallet::InitLoadWallet(bool clearWitnessCaches)
         }
         else
             return UIError(strprintf(_("Error loading %s"), walletFile));
+    }
+
+    if (g_walletSalvaged) {
+        // 07/NEW-1: a salvage can lose the set sign-once records; fail closed until the history is imported or acknowledged.
+        if (!CWalletDB(walletFile).WriteVaultSignRestored())
+            return UIError(_("Cannot write the vault sign-once restore marker after a wallet salvage"));
+        LogPrintf("vault: the wallet was salvaged; set sign-once history may be incomplete: restore marker set\n");
     }
 
     if (GetBoolArg("-upgradewallet", fFirstRun))
