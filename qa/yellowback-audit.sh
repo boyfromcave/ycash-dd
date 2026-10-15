@@ -580,6 +580,22 @@ leg_cross_line() {
     done
     [ $pqrc = 1 ] || echo "  src/crypto/pq  $(git ls-files src/crypto/pq | wc -l | tr -d ' ') files  identical"
   fi
+  # Every Vault chain parameter must agree with the other line (audit W3-P-1).
+  local vp_tmp
+  vp_tmp=$(mktemp -d)
+  for f in src/chainparams.cpp src/consensus/params.h src/version.h src/yellowback/params.cpp; do
+    mkdir -p "$vp_tmp/other/$(dirname "$f")"
+    show "$f" > "$vp_tmp/other/$f" || rc=1
+  done
+  if python3 qa/yellowback-vault-params.py extract --root . > "$vp_tmp/mine.json" \
+     && python3 qa/yellowback-vault-params.py extract --root "$vp_tmp/other" > "$vp_tmp/other.json" \
+     && python3 qa/yellowback-vault-params.py compare "$vp_tmp/mine.json" "$vp_tmp/other.json" > "$vp_tmp/cmp.txt"; then
+    sed 's/^/  /' "$vp_tmp/cmp.txt"
+  else
+    [ ! -f "$vp_tmp/cmp.txt" ] || sed 's/^/  /' "$vp_tmp/cmp.txt"
+    rc=1
+  fi
+  rm -rf "$vp_tmp"
   return $rc
 }
 
