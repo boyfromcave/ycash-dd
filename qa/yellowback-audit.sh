@@ -552,7 +552,19 @@ leg_cross_line() {
   local rc=0
   for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json src/test/data/yellowback_math_cases.json \
            qa/rpc-tests/test_framework/yellowback_golden.json qa/rpc-tests/test_framework/yellowback_model.py \
-           qa/rpc-tests/test_framework/SERIALISATION.md; do
+           qa/rpc-tests/test_framework/SERIALISATION.md \
+           src/test/data/pq_vectors.json \
+           src/test/data/pq_wallet_vectors.json \
+           src/test/data/yellowback_attest_vectors.json \
+           src/test/data/yellowback_pq_vectors.json \
+           src/test/data/pq_acvp_slhdsa.json \
+           src/test/data/pq_falcon_kat.json \
+           qa/rpc-tests/test_framework/yellowback_pq_vectors.json \
+           qa/rpc-tests/test_framework/pq.py \
+           qa/rpc-tests/test_framework/vault.py \
+           qa/rpc-tests/test_framework/yellowback_attest.py \
+           src/pqkey.h \
+           src/pqkey.cpp; do
     mine=$(sha256 < "$f" | cut -c1-64)
     other=$(show "$f" | sha256 | cut -c1-64)
     if [ "$mine" = "$other" ]; then echo "  $f  $mine  identical"; else echo "  $f  this $mine, other $other  DIFFERENT"; rc=1; fi
