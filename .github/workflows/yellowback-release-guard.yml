@@ -1,0 +1,54 @@
+# Pairing-tag guard for the vault release line (audit W3-P-1 part C, 04/NEW-1).
+# The release itself is cut on ycash6; the procedure is doc/yellowback-release.md there.
+# This workflow refuses a vault-params/v6.22.* tag whose mainnet UPGRADE_VAULT activation
+# height, pqFalconHeight or nVaultMinSetMaturity would ship unset, or that diverges from
+# ycash6 on those parameters (v<version> when that tag already exists, otherwise
+# upgrade/vault). A workflow_dispatch run only warns.
+#
+# Order: tag ycash-dd vault-params/v6.22.N first (this guard must pass), then tag ycash6 v6.22.N.
+name: yellowback release guard
+
+on:
+  push:
+    tags:
+      - 'vault-params/*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Vault parameters set and aligned with ycash6
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Refuse an off-line pairing tag and compare Vault parameters
+        run: |
+          set -euo pipefail
+          url="https://github.com/boyfromcave/ycash6.git"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            ver="${GITHUB_REF_NAME#vault-params/v}"
+            set +e
+            git ls-remote --exit-code --tags "$url" "refs/tags/v${ver}"
+            lrc=$?
+            set -e
+            if [ "$lrc" -eq 0 ]; then
+              git fetch --depth 1 "$url" "+refs/tags/v${ver}:refs/remotes/ycash6/release"
+              ref=refs/remotes/ycash6/release
+            elif [ "$lrc" -eq 2 ]; then
+              git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash6/upgrade-vault"
+              ref=refs/remotes/ycash6/upgrade-vault
+            else
+              echo "refusing to release: could not look up ycash6 v${ver} (ls-remote exit $lrc)"
+              exit 1
+            fi
+            python3 qa/yellowback-vault-params.py extract --git-ref "$ref" > "$RUNNER_TEMP/vault-params-other.json"
+            qa/yellowback-release-heights.sh --release-version "$ver" --other-json "$RUNNER_TEMP/vault-params-other.json"
+          else
+            git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash6/upgrade-vault"
+            python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash6/upgrade-vault > "$RUNNER_TEMP/vault-params-other.json"
+            qa/yellowback-release-heights.sh --warn --other-json "$RUNNER_TEMP/vault-params-other.json"
+          fi
