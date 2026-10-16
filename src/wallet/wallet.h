@@ -1562,7 +1562,13 @@ public:
 #else
     void UpdateSaplingNullifierNoteMapForBlock(const CBlock* pblock);
 #endif // YCASH_WR    
-    bool AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletDB* pwalletdb);
+    /**
+     * `pblockTime`, when set, is the header time of the block `wtxIn.hashBlock` names.
+     * ThreadNotifyWallets passes it so nTimeSmart does not look the hash up in
+     * mapBlockIndex: that map's bucket array is freed by a rehash on the HTTP
+     * worker that is mining, while this runs on the notifier thread without cs_main.
+     */
+    bool AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletDB* pwalletdb, const int64_t* pblockTime = nullptr);
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock, const int nHeight);
     bool AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pblock, const int nHeight, bool fUpdate);
     void EraseFromWallet(const uint256 &hash);

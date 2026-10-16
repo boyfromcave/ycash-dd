@@ -2906,9 +2906,33 @@ void CWallet::UpdateSaplingNullifierNoteMapForBlock(const CBlock *pblock) {
     }
 }
 
-bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletDB* pwalletdb)
+bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletDB* pwalletdb, const int64_t* pblockTime)
 {
     uint256 hash = wtxIn.GetHash();
+
+    // mapBlockIndex is a boost::unordered_map. Its first insert (genesis, on the
+    // main thread) allocates a 112-byte bucket array — 13 buckets plus a sentinel,
+    // one pointer each. A later insert rehashes and frees that array. generate()
+    // does the insert on an HTTP worker while ThreadNotifyWallets is in here on
+    // zcash-txnotify with cs_wallet held and without cs_main, so a lookup of the
+    // block hash is a use-after-free of the bucket array (read at a bucket slot).
+    // The notifier already holds the block and passes its header time, which is
+    // what CBlockIndex::GetBlockTime() would return. Callers that do not pass it
+    // take cs_main before cs_wallet; CommitTransaction already holds cs_main.
+    std::optional<int64_t> blockTime;
+    bool blockUnknown = false;
+    if (!fFromLoadWallet && !wtxIn.hashBlock.IsNull()) {
+        if (pblockTime) {
+            blockTime = *pblockTime;
+        } else {
+            LOCK(cs_main);
+            BlockMap::iterator mi = mapBlockIndex.find(wtxIn.hashBlock);
+            if (mi != mapBlockIndex.end() && mi->second)
+                blockTime = mi->second->GetBlockTime();
+            else
+                blockUnknown = true;
+        }
+    }
 
     if (fFromLoadWallet)
     {
@@ -2933,50 +2957,47 @@ bool CWallet::AddToWallet(const CWalletTx& wtxIn, bool fFromLoadWallet, CWalletD
             wtx.nOrderPos = IncOrderPosNext(pwalletdb);
 
             wtx.nTimeSmart = wtx.nTimeReceived;
-            if (!wtxIn.hashBlock.IsNull())
+            if (blockTime)
             {
-                if (mapBlockIndex.count(wtxIn.hashBlock))
+                int64_t latestNow = wtx.nTimeReceived;
+                int64_t latestEntry = 0;
                 {
-                    int64_t latestNow = wtx.nTimeReceived;
-                    int64_t latestEntry = 0;
+                    // Tolerate times up to the last timestamp in the wallet not more than 5 minutes into the future
+                    int64_t latestTolerated = latestNow + 300;
+                    std::list<CAccountingEntry> acentries;
+                    TxItems txOrdered = OrderedTxItems(acentries);
+                    for (TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
                     {
-                        // Tolerate times up to the last timestamp in the wallet not more than 5 minutes into the future
-                        int64_t latestTolerated = latestNow + 300;
-                        std::list<CAccountingEntry> acentries;
-                        TxItems txOrdered = OrderedTxItems(acentries);
-                        for (TxItems::reverse_iterator it = txOrdered.rbegin(); it != txOrdered.rend(); ++it)
+                        CWalletTx *const pwtx = (*it).second.first;
+                        if (pwtx == &wtx)
+                            continue;
+                        CAccountingEntry *const pacentry = (*it).second.second;
+                        int64_t nSmartTime;
+                        if (pwtx)
                         {
-                            CWalletTx *const pwtx = (*it).second.first;
-                            if (pwtx == &wtx)
-                                continue;
-                            CAccountingEntry *const pacentry = (*it).second.second;
-                            int64_t nSmartTime;
-                            if (pwtx)
-                            {
-                                nSmartTime = pwtx->nTimeSmart;
-                                if (!nSmartTime)
-                                    nSmartTime = pwtx->nTimeReceived;
-                            }
-                            else
-                                nSmartTime = pacentry->nTime;
-                            if (nSmartTime <= latestTolerated)
-                            {
-                                latestEntry = nSmartTime;
-                                if (nSmartTime > latestNow)
-                                    latestNow = nSmartTime;
-                                break;
-                            }
+                            nSmartTime = pwtx->nTimeSmart;
+                            if (!nSmartTime)
+                                nSmartTime = pwtx->nTimeReceived;
+                        }
+                        else
+                            nSmartTime = pacentry->nTime;
+                        if (nSmartTime <= latestTolerated)
+                        {
+                            latestEntry = nSmartTime;
+                            if (nSmartTime > latestNow)
+                                latestNow = nSmartTime;
+                            break;
                         }
                     }
-
-                    int64_t blocktime = mapBlockIndex[wtxIn.hashBlock]->GetBlockTime();
-                    wtx.nTimeSmart = std::max(latestEntry, std::min(blocktime, latestNow));
                 }
-                else
-                    LogPrintf("AddToWallet(): found %s in block %s not in index\n",
-                             wtxIn.GetHash().ToString(),
-                             wtxIn.hashBlock.ToString());
+
+                int64_t blocktime = *blockTime;
+                wtx.nTimeSmart = std::max(latestEntry, std::min(blocktime, latestNow));
             }
+            else if (blockUnknown)
+                LogPrintf("AddToWallet(): found %s in block %s not in index\n",
+                         wtxIn.GetHash().ToString(),
+                         wtxIn.hashBlock.ToString());
             AddToSpends(hash);
         }
 
@@ -3138,7 +3159,15 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pbl
             // this is safe, as in case of a crash, we rescan the necessary blocks on startup through our SetBestChain-mechanism
             CWalletDB walletdb(strWalletFile, "r+", false);
 
-            return AddToWallet(wtx, false, &walletdb);
+            // Header time of the block we already hold. AddToWallet must not
+            // look hashBlock up in mapBlockIndex from this thread (see there).
+            const int64_t* pblockTime = nullptr;
+            int64_t blockTime = 0;
+            if (pblock) {
+                blockTime = pblock->GetBlockTime();
+                pblockTime = &blockTime;
+            }
+            return AddToWallet(wtx, false, &walletdb, pblockTime);
         }
     }
     return false;
