@@ -39,8 +39,12 @@ Checks that enforce it:
 - `qa/yellowback-audit.sh` leg **golden-separate-commit** (report-only for one release cycle, then blocking): over the
   branch's commits (`YB_GOLDEN_BASE..HEAD`, default the merge base with `origin/upgrade/vault`), a commit that touches
   either golden file must touch nothing under `src/yellowback/` and must not change `yellowback_model.py`.
-- The audit leg **golden vectors byte-identical on both node lines** compares the golden, the vault vectors and the
-  arithmetic cases across `ycash-dd` and `ycash6`.
+- The audit leg **golden vectors and src/vault src/yellowback byte-identical on both node lines** compares the
+  golden, the vault vectors, the arithmetic cases and the shared PQ and model sources across `ycash-dd` and
+  `ycash6`, and every git-tracked file under `src/vault` and `src/yellowback`. A file under those trees may
+  differ only when `qa/yellowback-cross-line-allow.txt` pins both sha256 hashes (the reviewed 6.20.0 shims).
+  Editing a pinned file, or letting any other file in those trees diverge, fails until both lines update the
+  allow-list together.
 
 The state hash lives in two places with distinct roles: the C++ `GOLDEN_HASH` (the reviewer-recomputed pin) and the
 file's `stateHash` (the artifact). The Python tests read the file; they keep no third copy.
