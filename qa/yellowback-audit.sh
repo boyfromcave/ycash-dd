@@ -550,41 +550,13 @@ leg_cross_line() {
     in_ci && return 1; return 0
   fi
   local rc=0
-  for f in src/test/data/vault_vectors.json src/test/data/yellowback_golden.json src/test/data/yellowback_math_cases.json \
-           qa/rpc-tests/test_framework/yellowback_golden.json qa/rpc-tests/test_framework/yellowback_model.py \
-           qa/rpc-tests/test_framework/SERIALISATION.md \
-           src/test/data/pq_vectors.json \
-           src/test/data/pq_wallet_vectors.json \
-           src/test/data/yellowback_attest_vectors.json \
-           src/test/data/yellowback_pq_vectors.json \
-           src/test/data/pq_acvp_slhdsa.json \
-           src/test/data/pq_falcon_kat.json \
-           qa/rpc-tests/test_framework/yellowback_pq_vectors.json \
-           qa/rpc-tests/test_framework/pq.py \
-           qa/rpc-tests/test_framework/vault.py \
-           qa/rpc-tests/test_framework/yellowback_attest.py \
-           src/pqkey.h \
-           src/pqkey.cpp; do
-    mine=$(sha256 < "$f" | cut -c1-64)
-    other=$(show "$f" | sha256 | cut -c1-64)
-    if [ "$mine" = "$other" ]; then echo "  $f  $mine  identical"; else echo "  $f  this $mine, other $other  DIFFERENT"; rc=1; fi
-  done
-  # src/crypto/pq (the PQ schemes and their vendored C, local patches P1-P3) is byte-identical on both lines
-  # (src/crypto/pq/README.md; audit 02/PQ-1..PQ-3): compared file by file over the committed tree.
-  if [ -d src/crypto/pq ]; then
-    local pqrc=0
-    for f in $(git ls-files src/crypto/pq); do
-      mine=$(sha256 < "$f" | cut -c1-64)
-      other=$(show "$f" 2>/dev/null | sha256 | cut -c1-64)
-      [ "$mine" = "$other" ] || { echo "  $f  this $mine, other $other  DIFFERENT"; pqrc=1; rc=1; }
-    done
-    [ $pqrc = 1 ] || echo "  src/crypto/pq  $(git ls-files src/crypto/pq | wc -l | tr -d ' ') files  identical"
-  fi
-  # src/vault and src/yellowback (MEDIUM-W3-P-2): byte-identical, except the 6.20.0 shims pinned by
-  # both sha256 hashes in qa/yellowback-cross-line-allow.txt. The same checker runs on ycash6.
+  # Vectors, qa goldens, pqkey, the spec and the three overlay trees (audit W3-P-2).
+  # The manifest is the list; this leg has no path list of its own.
   if [ -n "${YB_OTHER_LINE_REF:-}" ]; then
+    python3 qa/yellowback-cross-line.py --this-line dd --other-ref "$YB_OTHER_LINE_REF" || rc=1
     python3 qa/yellowback-cross-line-trees.py --this-line dd --other-ref "$YB_OTHER_LINE_REF" || rc=1
   else
+    python3 qa/yellowback-cross-line.py --this-line dd --other-dir "$YB_OTHER_LINE_DIR" --other-rev "$YB_OTHER_LINE_REV" || rc=1
     python3 qa/yellowback-cross-line-trees.py --this-line dd --other-dir "$YB_OTHER_LINE_DIR" --other-rev "$YB_OTHER_LINE_REV" || rc=1
   fi
   # Every Vault chain parameter must agree with the other line (audit W3-P-1).
@@ -685,7 +657,7 @@ if [ "$mode" = upgrade ]; then
   else
     leg block "RPC contract = the workspace generator's upgrade-line output (rpcversion 5)" leg_contract_generator
   fi
-  leg block "golden vectors and src/vault src/yellowback byte-identical on both node lines" leg_cross_line
+  leg block "cross-line identity (manifest)" leg_cross_line
   leg report "golden-separate-commit: the YED golden regenerated in its own commit (doc/yellowback-testing.md)" leg_golden_separate_commit
   leg block "consensus-diff report for the two-reviewer gate (G-9)" leg_consensus_diff
 fi
