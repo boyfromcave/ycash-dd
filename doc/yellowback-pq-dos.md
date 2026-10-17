@@ -237,6 +237,8 @@ attribution on valid spends: an owner spend's second SLH-DSA or Falcon verificat
 (the isolated check stores), so it costs no extra verification; a set-signature spend (UNLOCK, CANCEL) pays `k`
 extra recoveries, which are not cached.
 
+An act output is a separate path. `DecodeAct` stores at most 16 signatures (`MAX_ACT_SIGS = 1 + MAX_SET_SEATS`, §15.5) and `ApplyAct` compares the count the act type already requires before it recovers any signature, so a wrong count recovers none and no path recovers more than 16. In `AcceptToMemoryPool` that check runs after the input-standardness, sigop, fee and free-relay checks. A byte-level act failure scores DoS 10 only when the act output is longer than 83 bytes; every other vault failure in the mempool, including a count that depends on set state, stays DoS 0.
+
 **Regtest-only boundary.** A Falcon owner spend relayed one block ahead of `-pqfalconheight` now scores 100, as a
 Falcon `TX_PQPKH` spend does; on mainnet and testnet Falcon activates with `UPGRADE_VAULT`.
 

@@ -275,7 +275,10 @@ leg_dos_upgrade() {
   # block; a peer relaying such a transaction is not misbehaving), in a block path DoS(100) (the
   # primitive and the module are consensus at UPGRADE_VAULT), and in a shared helper either 0, or
   # `fMempool ? 0 : 100`, or a 100 that follows the helper's `if (fMempool)` early return. No inserted
-  # Misbehaving( anywhere. Every changed C++ file under src/ (tests and fuzz harnesses aside).
+  # Misbehaving( anywhere. One mempool exception (W3-N-4): a byte-level act failure whose act output
+  # is longer than 83 bytes may be DoS(vault::IsByteLevelActFailure(*vaultBad, tx) ? 10 : 0). The
+  # plan text that states U-21 lives in the workspace upgrade plan; this gate is the node copy.
+  # Every changed C++ file under src/ (tests and fuzz harnesses aside).
   local files
   files=$(git diff --name-only --diff-filter=AM "$LEGACY...HEAD" -- 'src/*.cpp' 'src/*.h' ':!src/test' ':!src/gtest' ':!src/fuzzing' ':!src/bench')
   python3 - "$LEGACY" $files <<'PY'
@@ -285,7 +288,28 @@ MEMPOOL = {"AcceptToMemoryPool"}
 BLOCK = {"ConnectBlock", "CheckBlock", "ContextualCheckBlock", "CheckBlockHeader", "ContextualCheckBlockHeader",
          "AcceptBlock", "AcceptBlockHeader", "ConnectTip", "DisconnectBlock"}
 FUNC = re.compile(r'^(?![#/ \t{}])(?!(?:if|for|while|switch|return|else|do|case|namespace|class|struct|enum|typedef|using)\b)[A-Za-z_].*?\b([A-Za-z_][A-Za-z0-9_:~]*)\s*\(')
-DOS = re.compile(r'\bDoS\(\s*([^,]+?)\s*,')
+BYTELEVEL = "vault::IsByteLevelActFailure(*vaultBad, tx) ? 10 : 0"
+
+def dos_level(code):
+    """The first argument of DoS(, commas inside parentheses included."""
+    i = code.find("DoS(")
+    if i < 0:
+        return None
+    i += 4
+    depth, start = 1, i
+    while i < len(code):
+        c = code[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return None
+        elif c == "," and depth == 1:
+            return re.sub(r"\s+", " ", code[start:i].strip())
+        i += 1
+    return None
+
 bad, seen = [], 0
 for path in files:
     diff = subprocess.run(["git", "diff", "-U0", base + "...HEAD", "--", path], capture_output=True, text=True, check=True).stdout
@@ -303,11 +327,10 @@ for path in files:
         code = text.split("//")[0]
         if "Misbehaving(" in code:
             bad.append("%s:%d: inserted Misbehaving(: %s" % (path, n, text.strip())); continue
-        m = DOS.search(code)
-        if not m:
+        level = dos_level(code)
+        if level is None:
             continue
         seen += 1
-        level = re.sub(r'\s+', ' ', m.group(1))
         fn, sig = None, ""
         for k in range(n - 1, -1, -1):
             fm = FUNC.match(src[k])
@@ -321,7 +344,8 @@ for path in files:
         prev = next((src[k].strip() for k in range(n - 2, -1, -1) if src[k].strip()), "")
         where = "%s:%d (%s)" % (path, n, fn)
         if fn in MEMPOOL:
-            ok, rule = level == "0", "mempool path: DoS(0)"
+            ok = level == "0" or level == BYTELEVEL
+            rule = "mempool path: DoS(0), or DoS 10 for a byte-level act failure above 83 bytes"
         elif fn in BLOCK:
             ok, rule = level == "100", "block path: DoS(100)"
         elif "fMempool" in sig:
