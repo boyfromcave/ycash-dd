@@ -165,6 +165,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "set_signunlock", 1 },
     { "set_signcancel", 1 },
     { "set_importsigned", 0 },
+    { "set_sendact", 1 },
+    { "vault_send", 1 },
     { "vault_app", 1 },
     { "yed_getstatehash", 0 },
     { "yed_getprice", 0 },
