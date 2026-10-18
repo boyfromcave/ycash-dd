@@ -15,7 +15,7 @@ name: yellowback tests
 #   overlay/hook paths      check) and sanitizers-pr (ASan/UBSan test_bitcoin, the overlay unit suites):
 #   (OVERLAY_PATHS)         gating once the owner lists them as required checks (audit 07/F-11); a PR
 #                           that touches no overlay path passes them in seconds. Full variants stay nightly.
-#   weekly Sunday 04:00   weekly-fuzz (30 min per fuzz target, corpus PR)    -- never blocks
+#   weekly Sunday 04:00   weekly-fuzz (one job per target, 30 min, corpus PR) -- never blocks
 #   (dispatch weekly)
 #   schedule              GitHub runs `schedule` on the default branch only (upgrade/vault), which runs
 #                         its own nightly/weekly tier. schedule-fanout dispatches the same tier on the
@@ -57,7 +57,7 @@ on:
   workflow_dispatch:
     inputs:
       tier:
-        description: 'Which tier to run: all (push + nightly), push, nightly or weekly (fuzz, ~4.5 hours)'
+        description: 'Which tier to run: all (push + nightly), push, nightly or weekly (fuzz, one job per target)'
         type: choice
         options: [all, push, nightly, weekly]
         default: all
@@ -725,6 +725,11 @@ jobs:
           if [ -f src/test/gen_vault_corpus.py ]; then python3 src/test/gen_vault_corpus.py --check; fi
           if [ -f src/test/gen_pq_corpus.py ]; then python3 src/test/gen_pq_corpus.py --check; fi
           if [ -f src/test/gen_vault_state_corpus.py ]; then python3 src/test/gen_vault_state_corpus.py --check; fi
+      - name: Weekly fuzz sharding self-test
+        # The per-target runner and the artifact assembler. A hosted runner that dies mid-fuzz must
+        # not be the only place those two are exercised.
+        if: ${{ !cancelled() }}
+        run: qa/yellowback-fuzz-target.sh --self-test
 
   # ── pull_request legs on overlay paths (audit 07/F-11) ──────────────────────────────────────────
   # The nightly lockorder and sanitizers variants never block a merge (GitHub cannot gate a merge on
@@ -1491,22 +1496,47 @@ jobs:
             --body "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" || true
 
   # ── weekly tier ──────────────────────────────────────────────────────────────────────────────────
+  #
+  # One job per fuzz target. Run 36377015194 died at GitHub's six-hour hosted-runner cap in its third
+  # two-hour target, with nothing committed. Run 39111185611 died the other way: at 3 h 35 min, still
+  # inside the single fuzz step (nine targets now; the old budget assumed seven), the runner lost
+  # communication and the log blob was never uploaded, so the corpus upload and the corpus PR never
+  # ran. A lost runner now costs one target. Finished targets still upload, and weekly-fuzz-publish
+  # opens the corpus PR from whatever arrived, then fails the run if any target is missing, crashed,
+  # or exited non-zero.
 
-  weekly-fuzz:
-    # Thirty minutes per fuzz target with corpus minimisation, then a PR with the new corpus files and the
-    # regenerated C++ replay table (plan §6.0 item 6, §7 "Fuzzing"). Never blocks. GitHub-hosted runners
-    # cancel every job at six hours whatever timeout-minutes says (run 36377015194 died in its third
-    # two-hour target), so targets x 30 min + relinks must stay under the cap: seven targets are ~4.3 h.
+  weekly-fuzz-list:
     if: (github.event_name == 'schedule' && github.event.schedule == '0 4 * * 0') || (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
     runs-on: ubuntu-22.04
-    timeout-minutes: 340
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        # No credentials left in .git/config (artipacked): the corpus push below passes the token itself.
+        with:
+          persist-credentials: false
+      - id: targets
+        run: |
+          json=$(qa/yellowback-fuzz-target.sh --list)
+          echo "fuzz targets: $json"
+          test "$json" != "[]"
+          echo "targets=$json" >> "$GITHUB_OUTPUT"
+
+  weekly-fuzz:
+    needs: weekly-fuzz-list
+    if: needs.weekly-fuzz-list.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        target: ${{ fromJson(needs.weekly-fuzz-list.outputs.targets) }}
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install build prerequisites
@@ -1522,7 +1552,9 @@ jobs:
             depends/sources
           key: depends-${{ runner.os }}-${{ hashFiles('depends/Makefile', 'depends/funcs.mk', 'depends/config.site.in', 'depends/packages/**', 'depends/patches/**', 'depends/hosts/**', 'depends/builders/**') }}
       - run: BUILD_STAGE=depends ./zcutil/build.sh -j"$(nproc)"
-      - name: Fuzz every target for thirty minutes and minimise the corpus
+      - name: Fuzz ${{ matrix.target }} for thirty minutes and minimise its corpus
+        env:
+          FUZZ_SECONDS: "1800"
         run: |
           set -e
           # The fuzzer-no-link configure and the compiler-rt triple link: see the nightly fuzz step.
@@ -1534,84 +1566,85 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          # An unmatched glob (no Vault* on harden/yellowback) leaves the literal pattern, whose test fails as the
-          # loop's last command; under `set -e` that status would end the step, so the subshell ends with true.
-          targets=$(cd src/fuzzing && for d in Yellowback* Vault* PQ*; do [ -f "$d/fuzz.cpp" ] && echo "$d"; done; true)
-          echo "fuzz targets:" $targets
-          for t in $targets; do
-            # Retargeting the symlink does not rebuild; remove every product of bitcoind.cpp (see nightly).
-            ln -sfn "fuzzing/$t/fuzz.cpp" src/fuzz.cpp
-            rm -f src/ycashd-bitcoind.o src/bitcoind.o src/bitcoind.lo src/.libs/bitcoind.o src/ycashd src/.libs/ycashd
-            make -C src -j"$(nproc)" ycashd ycashd_LDFLAGS='$(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) -fsanitize=fuzzer,address'
-            mkdir -p "src/fuzzing/$t/output" "src/fuzzing/$t/merged" "src/fuzzing/$t/input" "src/fuzzing/$t/crashes"
-            ASAN_OPTIONS=detect_leaks=0 src/ycashd "src/fuzzing/$t/output" "src/fuzzing/$t/input" -max_len=4096 -max_total_time=1800 || true
-            # Crashes become permanent replay cases (yellowback_fuzz_tests / vault_fuzz_tests replay crashes/); the minimised corpus (seeds + new coverage) replaces input/.
-            for c in "src/fuzzing/$t"/output/crash-*; do [ -f "$c" ] && cp "$c" "src/fuzzing/$t/crashes/$(date +%Y%m%d)-$(basename "$c")"; done
-            ASAN_OPTIONS=detect_leaks=0 src/ycashd -merge=1 "src/fuzzing/$t/merged" "src/fuzzing/$t/input" "src/fuzzing/$t/output"
-            i=0; for f in "src/fuzzing/$t"/merged/*; do [ -f "$f" ] || continue; case "$(basename "$f")" in *.bin) ;; *) mv "$f" "src/fuzzing/$t/input/fuzz-$(date +%Y%m%d)-$i.bin"; i=$((i+1));; esac; done
-            git add -f "src/fuzzing/$t/input" "src/fuzzing/$t/crashes"
-          done
-          python3 src/test/gen_yellowback_corpus.py --write || true
-          git add -f src/test/yellowback_fuzz_tests.cpp
-          if [ -f src/test/gen_vault_corpus.py ]; then
-            python3 src/test/gen_vault_corpus.py --write || true
-            git add -f src/test/vault_fuzz_tests.cpp
-          fi
-          if [ -f src/test/gen_pq_corpus.py ]; then
-            python3 src/test/gen_pq_corpus.py --write || true
-            git add -f src/test/vault_fuzz_tests.cpp
-          fi
-          if [ -f src/test/gen_vault_state_corpus.py ]; then
-            python3 src/test/gen_vault_state_corpus.py --write || true
-            git add -f src/test/vault_fuzz_tests.cpp
-          fi
+          qa/yellowback-fuzz-target.sh "${{ matrix.target }}"
       - name: Upload corpus and crashes
-        # Also on cancellation: a run that hits the six-hour cap keeps what the finished targets found.
+        # Also when this target's step failed: a crash file or a non-zero exit code is what the
+        # publisher reads. A runner that dies never reaches this step; that target is then missing
+        # and the publisher fails the run.
+        # One directory, so the artifact root is src/fuzzing/<target>/{input,crashes,weekly-result}.
+        # Several upload paths would be stored relative to their common parent instead.
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        run: |
+          t="${{ matrix.target }}"
+          # Inside the workspace: upload-artifact v4 refuses paths under RUNNER_TEMP.
+          rm -rf weekly-fuzz-stage
+          stage="weekly-fuzz-stage/src/fuzzing/$t"
+          mkdir -p "$stage"
+          for d in input crashes weekly-result; do
+            if [ -d "src/fuzzing/$t/$d" ]; then cp -a "src/fuzzing/$t/$d" "$stage/"; fi
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
         with:
-          name: yellowback-weekly-fuzz
-          path: |
-            src/fuzzing/Yellowback*/input
-            src/fuzzing/Yellowback*/crashes
-            src/fuzzing/Yellowback*/output/crash-*
-            src/fuzzing/Vault*/input
-            src/fuzzing/Vault*/crashes
-            src/fuzzing/PQ*/input
-            src/fuzzing/PQ*/crashes
-            src/fuzzing/Vault*/output/crash-*
-            src/fuzzing/PQ*/output/crash-*
+          name: yellowback-weekly-fuzz-${{ matrix.target }}
+          path: weekly-fuzz-stage
           if-no-files-found: ignore
+
+  weekly-fuzz-publish:
+    needs: [weekly-fuzz-list, weekly-fuzz]
+    if: always() && needs.weekly-fuzz-list.result == 'success' && needs.weekly-fuzz.result != 'cancelled'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # No credentials left in .git/config (artipacked): the corpus push below passes the token itself.
+        with:
+          persist-credentials: false
+      - name: Download per-target corpora
+        # No artifact at all (every runner died) is still a publish failure, named per target below.
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: yellowback-weekly-fuzz-*
+          path: ${{ runner.temp }}/fuzz-artifacts
+      - name: Assemble the corpus
+        env:
+          YB_ARTIFACT_DIR: ${{ runner.temp }}/fuzz-artifacts
+          YB_FUZZ_STATUS: ${{ runner.temp }}/weekly-fuzz-status
+        run: qa/yellowback-fuzz-target.sh --assemble
       - name: Open a PR with the new corpus files
         env:
           GH_TOKEN: ${{ github.token }}
           # The corpus PR targets the branch this run fuzzed (one of the push branches above).
           BASE: ${{ github.ref_name }}
+          YB_FUZZ_STATUS: ${{ runner.temp }}/weekly-fuzz-status
         run: |
-          if git diff --cached --quiet; then echo "no new corpus files"; exit 0; fi
-          branch="weekly-fuzz/$(date +%Y%m%d)-${BASE//\//-}"
-          git config user.name "yellowback-weekly-fuzz"
-          git config user.email "weekly-fuzz@users.noreply.github.com"
-          git checkout -b "$branch"
-          git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d), $BASE)"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
-          gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" \
-            --title "fuzz: weekly corpus update $(date +%Y-%m-%d) ($BASE)" \
-            --body "$(printf '%s\n' \
-              '## 1. What and why' '' \
-              "Weekly libFuzzer run (30 min per target, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/*/input/ and the C++ replay tables src/test/yellowback_fuzz_tests.cpp (and src/test/vault_fuzz_tests.cpp where present) were regenerated by gen_yellowback_corpus.py / gen_vault_corpus.py --write. Maintenance; no code change." '' \
-              '## 2. How it was verified' '' \
-              "The fuzz targets ran to their time cap in the workflow; the replay table is regenerated from the corpus. **Any file under src/fuzzing/*/crashes/ in this diff is a finding: replay it and fix before merging.** No crashes/ files = merge." '' \
-              '## 3. What this PR touches in src/' '' \
-              'n/a — no src/ change (src/test/*_fuzz_tests.cpp is generated test data, not code under review)')" || true
-      - name: Fail on a crash (the input is already in the artifact, crashes/ and the corpus PR)
-        # Each target runs with || true so one crash does not cost the others their 30 minutes; this step
-        # turns the run red afterwards instead of reporting a crash as a green run.
-        if: always()
-        run: |
-          if ls src/fuzzing/*/output/crash-* >/dev/null 2>&1; then
-            ls -l src/fuzzing/*/output/crash-*
-            echo "::error::a fuzz target crashed: replay the input from the artifact (or crashes/ in the corpus PR) and fix"
+          set -e
+          status=$(cat "$YB_FUZZ_STATUS")
+          if git diff --cached --quiet; then
+            echo "no new corpus files"
+          else
+            branch="weekly-fuzz/$(date +%Y%m%d)-${BASE//\//-}"
+            git config user.name "yellowback-weekly-fuzz"
+            git config user.email "weekly-fuzz@users.noreply.github.com"
+            git checkout -b "$branch"
+            git commit -m "fuzz: weekly corpus update ($(date +%Y-%m-%d), $BASE)"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" \
+              --title "fuzz: weekly corpus update $(date +%Y-%m-%d) ($BASE)" \
+              --body "$(printf '%s\n' \
+                '## 1. What and why' '' \
+                "Weekly libFuzzer run (30 min per target, one job each, run $GITHUB_RUN_ID): the minimised corpus that reached new coverage is added under src/fuzzing/*/input/ and the C++ replay tables src/test/yellowback_fuzz_tests.cpp (and src/test/vault_fuzz_tests.cpp where present) were regenerated by gen_yellowback_corpus.py / gen_vault_corpus.py --write. Maintenance; no code change." '' \
+                '## 2. How it was verified' '' \
+                "The fuzz targets ran to their time cap in the workflow; the replay table is regenerated from the corpus. **Any file under src/fuzzing/*/crashes/ in this diff is a finding: replay it and fix before merging.** No crashes/ files = merge. A target whose runner died is not in this diff; the weekly-fuzz-publish job is red until that target is re-run." '' \
+                '## 3. What this PR touches in src/' '' \
+                'n/a — no src/ change (src/test/*_fuzz_tests.cpp is generated test data, not code under review)')" || true
+          fi
+          if [ "$status" != ok ]; then
+            echo "::error::weekly fuzz: a target crashed, the fuzzer exited non-zero, or a runner produced no artifact"
             exit 1
           fi
-          echo "no crashes"
+          echo "weekly fuzz publish ok"
