@@ -2,7 +2,7 @@
 
 Static analysis with [Semgrep](https://semgrep.dev) on every push, every PR and nightly, with its
 findings grouped by severity into **at most four PRs**, one per bucket, each with its own SLA. The same
-files are in `ycash-dd` and `ycash6`.
+files are in `ycash-dd` and `ycash6`, except `accepted.json`, which is each line's own.
 
 | File | What it is |
 |---|---|
