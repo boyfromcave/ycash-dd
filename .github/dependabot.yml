@@ -1,0 +1,50 @@
+# Dependabot: security updates only, one grouped PR per ecosystem (SECURITY-CI.md). Version updates are
+# suppressed (open-pull-requests-limit: 0): dependencies here are exact-pinned and move by deliberate PR
+# (the node's Rust graph with a librustzcash upgrade, the Semgrep lock with config.json "semgrep_version",
+# action SHAs with the shared pin list). Enable "Dependabot security updates" in Settings for these to run.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories: ["/", "/contrib/yellowback/attest"]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 14  # the two-week age rule for versions; security updates are not delayed
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directories: ["/contrib/semgrep", "/contrib/secops"]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 14  # the two-week age rule for versions; security updates are not delayed
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 14  # the two-week age rule for versions; security updates are not delayed
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories: ["/docker", "/contrib/docker", "/contrib/docker/ycashd"]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 14  # the two-week age rule for versions; security updates are not delayed
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]

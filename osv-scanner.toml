@@ -1,0 +1,159 @@
+# OSV-Scanner policy (.github/workflows/secops.yml, SECURITY-CI.md). An advisory that is not fixed by a
+# lockfile bump within this repository's pin rules is listed here with its reason and an ignoreUntil at
+# most 90 days out; on that date it fails CI again and is re-triaged. Triaged 2026-10-23 (osv-scanner 2.6.0).
+# The same reasons are in contrib/secops/deny-node.toml for cargo-deny.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0060"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0059"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0064"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0139"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2020-0025"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2020-0168"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Unmaintained/renamed-crate notice, no vulnerability. Pulled in by the v4.5.0 librustzcash graph (src/rust, Cargo.lock); it leaves with the next librustzcash upgrade of this line, which is a node-dependency change of its own, not a lockfile bump."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0020"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0078"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0079"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2022-0022"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0072"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0124"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0005"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0023"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0019"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0113"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Metrics exporter only (metrics-exporter-prometheus 0.3 on hyper =0.14.2/tokio 1.4, exact-pinned by upstream Zcash in Cargo.toml). Off unless -prometheusport is set, bound to -metricsallowip addresses, serving GET /metrics; the request-smuggling/data-race classes need a fronting proxy or API use the exporter does not make. Tracked for the librustzcash/metrics upgrade (owner follow-up)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0093"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0204"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2022-0041"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2022-0006"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2021-0089"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0045"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Soundness issue whose trigger this node does not reach: 32-bit Atomic*64 arithmetic, fmt::Pointer of crossbeam Atomic, Iter of thread_local under data races, custom rand loggers, raw-cpuid Deserialize, memoffset on uninitialised types; all transitive through bellman/rayon/tracing in the v4.5.0 graph. Leaves with the librustzcash upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2020-0159"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "localtime_r segfault (chrono 0.4.19, time 0.1.44) needs a concurrent setenv; ycashd sets no environment variables after start. Via tracing-subscriber/tracing-appender of the v4.5.0 graph."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2020-0071"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "localtime_r segfault (chrono 0.4.19, time 0.1.44) needs a concurrent setenv; ycashd sets no environment variables after start. Via tracing-subscriber/tracing-appender of the v4.5.0 graph."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2022-0013"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "regex 1.4.5 parse-time DoS and tracing-subscriber ANSI log poisoning: both read only the operator's own -debug filter and the node's own log lines, not network input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0055"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "regex 1.4.5 parse-time DoS and tracing-subscriber ANSI log poisoning: both read only the operator's own -debug filter and the node's own log lines, not network input."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0344"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "curve25519-dalek 3.0.2 Scalar sub timing: used through ed25519-zebra for JoinSplit signature verification, i.e. public inputs only; no secret scalar is processed."
+
+[[IgnoredVulns]]
+id = "GHSA-ww9q-8r59-xv46"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "Halo2/Orchard advisory (halo2_gadgets) matched on the crate name only: this Cargo.lock's zcash_primitives 0.5.0 is the ycashfoundation git fork (rev cc26e791) with no Orchard and no halo2 crate in the graph."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-01-21T00:00:00Z
+reason = "contrib/yellowback/attest only: build-time proc-macro via iroh, no runtime code; the same acceptance as its deny.toml."
