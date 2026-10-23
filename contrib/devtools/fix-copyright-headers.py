@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 The Ycash developers
 '''
 Run this script inside of src/ and it will look for all the files
 that were changed this year that still have the last year in the
