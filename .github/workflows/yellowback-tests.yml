@@ -1556,6 +1556,7 @@ jobs:
       - name: Fuzz ${{ matrix.target }} for thirty minutes and minimise its corpus
         env:
           FUZZ_SECONDS: "1800"
+          FUZZ_TARGET: ${{ matrix.target }}
         run: |
           set -e
           # The fuzzer-no-link configure and the compiler-rt triple link: see the nightly fuzz step.
@@ -1567,7 +1568,7 @@ jobs:
           CONFIG_SITE="$PWD/depends/x86_64-pc-linux-gnu/share/config.site" ./configure --enable-fuzz-main \
             CXXFLAGS='-fsanitize=fuzzer-no-link,address -DFUZZ_WITH_LIBFUZZER=1' LDFLAGS='-fsanitize=address' \
             || { grep -n -A30 'compiler works\|linker accepts -fsanitize\|accepts --coverage\|accepts -Wl,-z,relro' config.log | tail -160; exit 1; }
-          qa/yellowback-fuzz-target.sh "${{ matrix.target }}"
+          qa/yellowback-fuzz-target.sh "$FUZZ_TARGET"
       - name: Upload corpus and crashes
         # Also when this target's step failed: a crash file or a non-zero exit code is what the
         # publisher reads. A runner that dies never reaches this step; that target is then missing
@@ -1575,8 +1576,10 @@ jobs:
         # One directory, so the artifact root is src/fuzzing/<target>/{input,crashes,weekly-result}.
         # Several upload paths would be stored relative to their common parent instead.
         if: always()
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
         run: |
-          t="${{ matrix.target }}"
+          t="$FUZZ_TARGET"
           # Inside the workspace: upload-artifact v4 refuses paths under RUNNER_TEMP.
           rm -rf weekly-fuzz-stage
           stage="weekly-fuzz-stage/src/fuzzing/$t"

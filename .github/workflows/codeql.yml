@@ -1,0 +1,65 @@
+name: codeql
+
+# CodeQL static analysis (SECURITY-CI.md). The same shape in every Yellowback repo; the language list is
+# what this repository holds:
+#
+#   c-cpp    the node (src/), build-mode none: CodeQL reads the sources without compiling them, so no
+#            multi-hour depends build is needed (some precision is lost to unresolved macros).
+#   python   qa/ (functional tests, CI tooling) and contrib/ scripts.
+#   rust     src/rust (the librustzcash glue) and contrib/yellowback/attest (the attestor agent).
+#   actions  the workflows under .github/workflows.
+#
+# queries: security-extended. Results go to GitHub code scanning (one category per language); a run never
+# fails on an alert, so pre-existing alerts never block a PR: code scanning shows the PR's new alerts on
+# the PR itself. pull_request + push to upgrade/vault + weekly (Mondays 04:41 UTC).
+on:
+  push:
+    branches: ['upgrade/vault']
+  pull_request:
+  schedule:
+    - cron: '41 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    # A fork's PR token cannot upload to code scanning; the push / schedule runs cover forks' code once merged.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      security-events: write
+      actions: read   # the actions language reads workflow metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [c-cpp, python, rust, actions]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config: |
+            paths-ignore:
+              # Third-party trees kept byte-for-byte from upstream (the same list as .semgrepignore).
+              - src/leveldb
+              - src/secp256k1
+              - src/univalue
+              - src/crc32c
+              - src/crypto/ctaes
+              - depends
+              - src/fuzzing
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: codeql-${{ matrix.language }}

@@ -1,0 +1,138 @@
+# gitleaks accepted findings (.github/workflows/secops.yml, SECURITY-CI.md). One fingerprint per line,
+# commit:file:rule:line. Only test vectors, public constants and documentation examples are accepted here,
+# each group with its reason; a real secret is rotated, never listed. Triaged 2026-10-23 (gitleaks 8.30.1,
+# full history).
+
+# src/test/data/: Golden test vectors (vault, post-quantum, attestor): deterministic test keys and digests published as vectors, CLAUDE.md byte-exactness rule.
+45c14b42388198ad947a8d38b027edd2c0edbdb0:src/test/data/vault_vectors.json:generic-api-key:717
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:12
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:17
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:189
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:199
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:209
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:219
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:22
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:229
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:239
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:249
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:259
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:27
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:319
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:32
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:330
+4fc8e961bf827942b84d95c5c0a1a644ec6fe5d4:src/test/data/yellowback_attest_vectors.json:generic-api-key:7
+686a30b5e4c1fef7ab89a2136a369a536bcb2abb:src/test/data/vault_vectors.json:generic-api-key:1119
+686a30b5e4c1fef7ab89a2136a369a536bcb2abb:src/test/data/vault_vectors.json:generic-api-key:18
+7838d66ce0d03f2b8338b40cf39aaf3a4b68fbbd:src/test/data/pq_vectors.json:generic-api-key:11
+7838d66ce0d03f2b8338b40cf39aaf3a4b68fbbd:src/test/data/pq_vectors.json:generic-api-key:22
+7838d66ce0d03f2b8338b40cf39aaf3a4b68fbbd:src/test/data/pq_vectors.json:generic-api-key:33
+7838d66ce0d03f2b8338b40cf39aaf3a4b68fbbd:src/test/data/pq_vectors.json:generic-api-key:44
+7838d66ce0d03f2b8338b40cf39aaf3a4b68fbbd:src/test/data/pq_vectors.json:generic-api-key:55
+93c8ea2f6eff7eb2a642f85248d488f86abebee7:src/test/data/pq_wallet_vectors.json:generic-api-key:32
+93c8ea2f6eff7eb2a642f85248d488f86abebee7:src/test/data/pq_wallet_vectors.json:generic-api-key:64
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:101
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:114
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:127
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:13
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:140
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:153
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:166
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:179
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:18
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:192
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:23
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:28
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:289
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:304
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:319
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:33
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:355
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:361
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:367
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:38
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:43
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:476
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:48
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:502
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:518
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:545
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:575
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:597
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:62
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:623
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:75
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:88
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:924
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:932
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:940
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:948
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:956
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:964
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:972
+f3ae6cced07d39d2045c399e85ffa3491c7e5015:src/test/data/vault_vectors.json:generic-api-key:980
+
+# src/test/: Unit-test fixtures: fixed regtest/test keys and payload hex.
+07444da1dbd1dc1817ce614fd1c1d54929cc124c:src/test/key_tests.cpp:generic-api-key:24
+07444da1dbd1dc1817ce614fd1c1d54929cc124c:src/test/key_tests.cpp:generic-api-key:25
+07444da1dbd1dc1817ce614fd1c1d54929cc124c:src/test/key_tests.cpp:generic-api-key:26
+07444da1dbd1dc1817ce614fd1c1d54929cc124c:src/test/key_tests.cpp:generic-api-key:27
+3d8ad2bbf839e12f21f9c4f20b48bee449d67a1a:src/test/yellowback_fuzz_tests.cpp:generic-api-key:85
+a018ac1dcad336b20601d989c6d0d50f88b698c0:src/test/yellowback_fuzz_tests.cpp:generic-api-key:88
+a018ac1dcad336b20601d989c6d0d50f88b698c0:src/test/yellowback_fuzz_tests.cpp:generic-api-key:96
+a018ac1dcad336b20601d989c6d0d50f88b698c0:src/test/yellowback_payload_tests.cpp:generic-api-key:47
+aa52f76788279325141814b31c210029f2e3e9aa:src/test/yellowback_payload_tests.cpp:generic-api-key:44
+c63d8760477467568fe549d09e1f40bac5ba670d:src/test/pq_wallet_tests.cpp:generic-api-key:57
+
+# src/gtest/: Unit-test fixtures: the regtest spending key upstream Zcash publishes for tests.
+3466b4677e3f3f868d397b3d341d70482d2a4317:src/gtest/test_transaction_builder.cpp:generic-api-key:13
+
+# src/wallet/gtest/: Unit-test fixtures: the regtest spending key upstream Zcash publishes for tests.
+52d162319d72d2e67e7730196f43eea4981febc3:src/wallet/gtest/test_wallet.cpp:generic-api-key:28
+
+# src/utiltest.h: Test helper: the regtest transparent secret upstream Zcash publishes for tests.
+275bd8f67a79eb3130b6c5a943fb437c858fcefe:src/utiltest.h:generic-api-key:30
+
+# src/alert.cpp: Public keys (the alert system's mainnet/testnet verification pubkeys), not secrets.
+286dbba2d238f523b45f5649345ae89b64cbba2f:src/alert.cpp:generic-api-key:19
+286dbba2d238f523b45f5649345ae89b64cbba2f:src/alert.cpp:generic-api-key:20
+
+# src/chainparams.cpp: Public consensus constants (founders'/dev-fund script addresses), not secrets.
+6c54e9fc0b34238c18f5ea24e3e5d62004f7a44f:src/chainparams.cpp:generic-api-key:237
+
+# qa/rpc-tests/: Functional-test fixtures: regtest RPC passwords generated for the test (rpcauth examples) and a test key.
+86cf60b5c8b4225a2168038d0a00d65298b92cd2:qa/rpc-tests/wallet.py:generic-api-key:237
+f4d9e06a90e9380a3427e634fbf07f0256d9d186:qa/rpc-tests/multi_rpc.py:generic-api-key:49
+f4d9e06a90e9380a3427e634fbf07f0256d9d186:qa/rpc-tests/multi_rpc.py:generic-api-key:53
+
+# qa/zcash/updatecheck.py: Upstream Zcash's historical GitHub API token (zcash commit d83e8a6a4, removed upstream in 45392c221, 2019); in public upstream history, not a Ycash credential, not present at HEAD.
+49f94dbe3d740db4afdf08f971ed5fc9e962eee3:qa/zcash/updatecheck.py:generic-api-key:38
+
+# depends/packages/: sha256 hashes and file names of pinned depends tarballs, not secrets.
+1dec09b341f61836147d87656aea7f7be02aab6d:depends/packages/native_comparisontool.mk:generic-api-key:12
+1dec09b341f61836147d87656aea7f7be02aab6d:depends/packages/native_comparisontool.mk:generic-api-key:13
+a346fc00864799ac856244500784c648581ff2ce:depends/packages/native_cctools.mk:generic-api-key:17
+
+# doc/: Documentation examples: placeholder RPC password and example atomic-swap / payment-disclosure values from regtest walk-throughs.
+0c3e1019665edb6c456f9640307231863db2835f:doc/systemd.md:generic-api-key:32
+43f5d52123746e1da8166930ca898bcd04b4a103:doc/payment-disclosure.md:generic-api-key:70
+ccddd22e4e4891005d363223abb2ff31565f6697:doc/atomic-swaps.md:generic-api-key:346
+ccddd22e4e4891005d363223abb2ff31565f6697:doc/atomic-swaps.md:generic-api-key:347
+ccddd22e4e4891005d363223abb2ff31565f6697:doc/atomic-swaps.md:generic-api-key:365
+ccddd22e4e4891005d363223abb2ff31565f6697:doc/atomic-swaps.md:generic-api-key:380
+ccddd22e4e4891005d363223abb2ff31565f6697:doc/atomic-swaps.md:generic-api-key:392
+
+# README_CROSS_CHAIN_SWAP_GUIDE.md: Documentation example: an atomic-swap HTLC preimage/hash from a regtest walk-through (the preimage is revealed on-chain by design).
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:31
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:32
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:375
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:38
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:392
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:63
+ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generic-api-key:64
+
+# contrib/yellowback/devnet/: Devnet transcript: attestor/owner public keys and set ids from a throwaway regtest devnet.
+88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:125
+88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:205
+88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:50
+88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:53
+88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:61
