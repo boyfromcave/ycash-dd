@@ -115,7 +115,7 @@ bool AsyncRPCOperation_saplingconsolidation::main_impl() {
 
             std::vector<SaplingNoteEntry> fromNotes;
             CAmount amountToSend = 0;
-            int maxQuantity = rand() % 35 + 10;
+            int maxQuantity = GetRand(35) + 10;
             for (const SaplingNoteEntry& saplingEntry : saplingEntries) {
                 libzcash::SaplingIncomingViewingKey ivk;
                 pwalletMain->GetSaplingIncomingViewingKey(saplingEntry.address, ivk);
@@ -127,14 +127,14 @@ bool AsyncRPCOperation_saplingconsolidation::main_impl() {
                 }
 
                 //Only use a randomly determined number of notes between 10 and 45
-                if (fromNotes.size() >= maxQuantity)
+                if (fromNotes.size() >= (size_t)maxQuantity)
                   break;
 
             }
 
             //random minimum 2 - 12 required
-            int minQuantity = rand() % 10 + 2;
-            if (fromNotes.size() < minQuantity)
+            int minQuantity = GetRand(10) + 2;
+            if (fromNotes.size() < (size_t)minQuantity)
               continue;
 
             amountConsolidated += amountToSend;
