@@ -1,0 +1,27 @@
+{
+  "_comment": "Accepted Semgrep findings (contrib/semgrep/README.md, 'Accepting a finding'). findings: fingerprint -> {rule, path, reason, by, date}. rule_paths: [{rule (glob), paths (globs), reason, by, date}]. Every entry needs a reason a reviewer can check.",
+  "findings": {
+    "aa4514c27a5ce3be": {
+      "rule": "0xdea.rules.c.raptor-format-string-bugs",
+      "path": "src/bitcoind.cpp",
+      "reason": "The format string is _(literal) + _(literal). _() (src/util.h) returns its input unless a translation function is set, and ycashd sets none, so the format is a compile-time literal whose six arguments match its %s count.",
+      "by": "semgrep CI setup",
+      "date": "2026-10-22"
+    }
+  },
+  "rule_paths": [
+    {
+      "rule": "generic.secrets.*",
+      "paths": [
+        "src/test/**",
+        "src/gtest/**",
+        "qa/**",
+        "doc/**",
+        "*.md"
+      ],
+      "reason": "Test vectors, regtest keys and documentation examples, not real secrets (checked 2026-10-22). A secret anywhere else is still reported.",
+      "by": "semgrep CI setup",
+      "date": "2026-10-22"
+    }
+  ]
+}

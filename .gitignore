@@ -126,3 +126,4 @@ src/fuzz.cpp
 .updatecheck-token
 
 debug-ci
+semgrep-out/
