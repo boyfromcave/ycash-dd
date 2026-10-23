@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 #
 # Copyright (c) 2020 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
