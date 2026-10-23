@@ -18,36 +18,37 @@ It will do this for all the files in the folder and its children.
 Author: @gubatron
 '''
 import os
+import subprocess
 import time
 
 year = time.gmtime()[0]
 last_year = year - 1
-command = "perl -pi -e 's/%s The Bitcoin/%s The Bitcoin/' %s"
-listFilesCommand = "find . | grep %s"
+
+# Every command below is an argv list run without a shell, so a file name
+# with shell metacharacters is passed as one argument and never interpreted.
+perlRegex = "s/%s The Bitcoin/%s The Bitcoin/"
 
 extensions = [".cpp",".h"]
 
 def getLastGitModifiedDate(filePath):
-  gitGetLastCommitDateCommand = "git log " + filePath +" | grep Date | head -n 1"
-  p = os.popen(gitGetLastCommitDateCommand)
-  result = ""
-  for l in p:
-    result = l
-    break
-  result = result.replace("\n","")
-  return result
+  log = subprocess.run(["git", "log", "--", filePath],
+                       stdout=subprocess.PIPE, universal_newlines=True).stdout
+  for l in log.splitlines():
+    if "Date" in l:
+      return l
+  return ""
+
+def listFiles(extension):
+  for root, _, files in os.walk("."):
+    for name in files:
+      if name.endswith(extension):
+        yield os.path.join(os.getcwd(), os.path.relpath(os.path.join(root, name), "."))
 
 n=1
 for extension in extensions:
-  foundFiles = os.popen(listFilesCommand % extension)
-  for filePath in foundFiles:
-    filePath = filePath[1:-1]
-    if filePath.endswith(extension):
-      filePath = os.getcwd() + filePath
-      modifiedTime = getLastGitModifiedDate(filePath)
-      if len(modifiedTime) > 0 and str(year) in modifiedTime:
-        print(n,"Last Git Modified: ", modifiedTime, " - ", filePath)
-        os.popen(command % (last_year,year,filePath))
-        n = n + 1
-
-
+  for filePath in listFiles(extension):
+    modifiedTime = getLastGitModifiedDate(filePath)
+    if len(modifiedTime) > 0 and str(year) in modifiedTime:
+      print(n,"Last Git Modified: ", modifiedTime, " - ", filePath)
+      subprocess.run(["perl", "-pi", "-e", perlRegex % (last_year, year), filePath])
+      n = n + 1
