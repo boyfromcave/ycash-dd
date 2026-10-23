@@ -1006,7 +1006,7 @@ void CWallet::RunSaplingConsolidation(int blockHeight) {
         return;
     }
 
-    int consolidateInterval = rand() % 5 + 5;
+    int consolidateInterval = GetRand(5) + 5;
     if (blockHeight % consolidateInterval == 0) {
         std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
         std::shared_ptr<AsyncRPCOperation> lastOperation = q->getOperationForId(saplingConsolidationOperationId);
