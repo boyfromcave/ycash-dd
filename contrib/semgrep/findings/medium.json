@@ -1,0 +1,262 @@
+{
+ "bucket": "medium",
+ "sla_days": 90,
+ "findings": [
+  {
+   "fingerprint": "70677cd782d38469",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 22,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "50b4fcf75281545f",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 36,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "7fc7767636c97c2e",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 93,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "3637855b69a9d83c",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 107,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "bd7e5184822a1311",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/security-check.py",
+   "line": 123,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "87dda12061daf6cb",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 106,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "7a0703c069db3226",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 122,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "d3aa4d226926aa89",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/devtools/symbol-check.py",
+   "line": 150,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "dbb0b38cd61406c0",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 77,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "aef13e1600c62ce7",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/devnet/stratum-perl-check",
+   "line": 89,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "e64641506983af03",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "contrib/yellowback/pq-dos/pq_dos.py",
+   "line": 95,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "4735d663633d1096",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/test_framework/pq.py",
+   "line": 577,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "c839de498d84fefd",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/test_framework/util.py",
+   "line": 275,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "05fddd762bc732ee",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/test_framework/util.py",
+   "line": 367,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "af22856893c33f3a",
+   "rule": "trailofbits.python.tarfile-extractall-traversal",
+   "path": "qa/rpc-tests/upgrade_golden.py",
+   "line": 81,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0188e2a81c669ead",
+   "rule": "python.lang.security.audit.dangerous-subprocess-use-tainted-env-args",
+   "path": "qa/rpc-tests/yellowback_stratum.py",
+   "line": 164,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "1358f38e2b0994a2",
+   "rule": "0xdea.rules.c.raptor-insecure-api-signal",
+   "path": "src/init.cpp",
+   "line": 1035,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "1e229b6b4076c622",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/main.cpp",
+   "line": 3567,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "78d3bd506bf39c70",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/miner.cpp",
+   "line": 489,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "4c8538afb45739b3",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/policy/fees.cpp",
+   "line": 220,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0da0cca2aa3edd15",
+   "rule": "0xdea.rules.c.raptor-unchecked-ret-malloc",
+   "path": "src/pow/tromp/equi_miner.h",
+   "line": 174,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "56e35d7149015f9a",
+   "rule": "0xdea.rules.c.raptor-integer-wraparound",
+   "path": "src/prevector.h",
+   "line": 177,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "568e5c7850ebda01",
+   "rule": "0xdea.rules.c.raptor-integer-wraparound",
+   "path": "src/prevector.h",
+   "line": 181,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "034b8af301b53b5e",
+   "rule": "0xdea.rules.c.raptor-unterminated-string-strncpy",
+   "path": "src/protocol.cpp",
+   "line": 35,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ca0632a5ae448f13",
+   "rule": "0xdea.rules.c.raptor-incorrect-unsigned-comparison",
+   "path": "src/script/sigcache.cpp",
+   "line": 96,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "d35cb12a68271e38",
+   "rule": "ycash.crypto.non-crypto-rng",
+   "path": "src/wallet/asyncrpcoperation_saplingconsolidation.cpp",
+   "line": 118,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "c9f74fd6ad2028db",
+   "rule": "0xdea.rules.c.raptor-insecure-api-rand-srand",
+   "path": "src/wallet/asyncrpcoperation_saplingconsolidation.cpp",
+   "line": 118,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0a3ca32e08243c33",
+   "rule": "ycash.crypto.non-crypto-rng",
+   "path": "src/wallet/asyncrpcoperation_saplingconsolidation.cpp",
+   "line": 136,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "077e7497bf9f4b6e",
+   "rule": "0xdea.rules.c.raptor-insecure-api-rand-srand",
+   "path": "src/wallet/asyncrpcoperation_saplingconsolidation.cpp",
+   "line": 136,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ec0f8f45e3eb3fea",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 113,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "ddce43778418d7d7",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 114,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  },
+  {
+   "fingerprint": "0e5f756dc1dcac6f",
+   "rule": "python.lang.security.audit.subprocess-shell-true",
+   "path": "zcutil/release-notes.py",
+   "line": 116,
+   "first_seen": "2026-10-23",
+   "due": "2027-01-21"
+  }
+ ]
+}
