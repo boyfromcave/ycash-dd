@@ -1032,19 +1032,32 @@ jobs:
           qa/pull-tester/rpc-tests.py --fail-on-skip -j4 --nozmq --nocleanup $STOCK_BASELINE
       - name: Build ycash-legacy (v4.5.0) for the stock-parity check
         # A git worktree of the pristine baseline sharing this checkout's depends tree (depends/ is
-        # byte-identical between ycash-legacy and the fork; a difference fails here).
+        # byte-identical between ycash-legacy and the fork; a difference fails here). The crate set
+        # is not shared: depends vendors the fork's Cargo.lock into the prefix, and since #117
+        # (2026-10-23) that lock differs from v4.5.0's, so the legacy tree's `cargo build --locked
+        # --offline` no longer finds its crates there (nightly 40076042054). The legacy tree vendors
+        # its own lock with depends' cargo and configures against that directory; config.site sets
+        # RUST_VENDORED_SOURCES unconditionally, so a copy with the legacy path (and the shared
+        # prefix spelled out, because the copy no longer sits under it) stands in for it.
         if: ${{ !cancelled() }}
         run: |
           git fetch --no-tags --depth=1 origin +refs/heads/ycash-legacy:refs/heads/ycash-legacy
           git diff --quiet ycash-legacy HEAD -- depends || { echo "depends/ differs from ycash-legacy; the shared depends tree does not apply"; exit 1; }
-          git worktree add "$RUNNER_TEMP/ycash-legacy" ycash-legacy
+          legacy="$RUNNER_TEMP/ycash-legacy"
+          git worktree add "$legacy" ycash-legacy
           host=$(./depends/config.guess)
-          ln -s "$PWD/depends/$host" "$RUNNER_TEMP/ycash-legacy/depends/$host"
-          cd "$RUNNER_TEMP/ycash-legacy"
+          prefix="$PWD/depends/$host"
+          ln -s "$prefix" "$legacy/depends/$host"
+          "$prefix/native/bin/cargo" vendor --locked --manifest-path "$legacy/Cargo.toml" "$legacy/vendored-sources" >/dev/null
+          sed -e "s|^depends_prefix=.*|depends_prefix=\"$prefix\"|" \
+              -e "s|^RUST_VENDORED_SOURCES=.*|RUST_VENDORED_SOURCES=\"$legacy/vendored-sources\"|" \
+              "$prefix/share/config.site" > "$RUNNER_TEMP/ycash-legacy-config.site"
+          grep -q "^RUST_VENDORED_SOURCES=\"$legacy/vendored-sources\"" "$RUNNER_TEMP/ycash-legacy-config.site"
+          cd "$legacy"
           ./autogen.sh
-          CONFIG_SITE="$PWD/depends/$host/share/config.site" ./configure
+          CONFIG_SITE="$RUNNER_TEMP/ycash-legacy-config.site" ./configure
           make -C src -j"$(nproc)" ycashd
-          echo "REF_YCASHD=$RUNNER_TEMP/ycash-legacy/src/ycashd" >> "$GITHUB_ENV"
+          echo "REF_YCASHD=$legacy/src/ycashd" >> "$GITHUB_ENV"
       - name: Stock parity (node 0 a real ycash-legacy v4.5.0, node 1 the fork; plan section 8.4 item 21)
         if: ${{ !cancelled() }}
         env:
