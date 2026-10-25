@@ -1634,8 +1634,12 @@ jobs:
           YB_FUZZ_STATUS: ${{ runner.temp }}/weekly-fuzz-status
         run: qa/yellowback-fuzz-target.sh --assemble
       - name: Open a PR with the new corpus files
+        # A PR opened with the default GITHUB_TOKEN leaves its own workflows waiting for approval
+        # (the 2026-10-25 corpus PRs), so, like semgrep.yml, this uses the repository secret
+        # SEMGREP_PR_TOKEN (contents + pull requests: write) when it is set and falls back to the
+        # job token otherwise.
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SEMGREP_PR_TOKEN || github.token }}
           # The corpus PR targets the branch this run fuzzed (one of the push branches above).
           BASE: ${{ github.ref_name }}
           YB_FUZZ_STATUS: ${{ runner.temp }}/weekly-fuzz-status
