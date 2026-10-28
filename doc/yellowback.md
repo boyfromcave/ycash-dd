@@ -292,17 +292,15 @@ refused beyond 99 blocks (`MAX_REORG_LENGTH`); an `invalidateblock` that would d
 H − 4,095 finds no undo record and stops the node, and a plain restart stops again: restart with
 `-reindex`, which rebuilds everything from the block files (and forgets the invalidation).
 
-**Known limit on this line: do not restart while holding an `invalidateblock` across an activation.**
-If you `invalidateblock` a block *below* a network upgrade's activation height (the vault upgrade's or
-any other) whose branch contains the activation block, the stock v4.5.0 `RewindBlockIndex` at the next
-start erases the invalidated blocks but keeps the activation block, whose branch id is on disk, with a
-parent that no longer exists. Under `-checkblockindex` (on by default on regtest) the start aborts in
-`CheckBlockIndex` ("nNodes == forward.size()"); without it the node starts, but the kept entry blocks
-that branch for good (it stays marked invalid, `reconsiderblock` cannot reach it, and `getchaintips` or
-`getblock` of it read a freed parent). Recover with `-reindex`, which also forgets the invalidation.
-Invalidating the activation block itself, or reconsidering before the restart, is safe. The 6.20.0
-line (`ycash6`) keeps the whole invalidated branch across a restart and is not affected;
-`qa/rpc-tests/vault_activation_restart.py` pins both behaviours.
+**A restart forgets an `invalidateblock`, and keeps blocks it has not connected yet.** At every start
+`RewindBlockIndex` erases each block-index entry that has failed, invalid by `invalidateblock` or
+rejected, together with every block built on it, so the blocks are judged again if a peer (or
+`submitblock`) brings them back (a block to stay refused must be invalidated again after the
+restart); `reconsiderblock` after a restart finds no such block. Blocks
+stored but not yet connected (an interrupted sync) are kept and connect from disk. This is the same
+on both node lines (the 2026-10-28 fix: upstream Ycash `1770fce16` with the workspace refinement;
+before it a restart holding an invalidated branch across an activation block aborted on the v4.5.0
+line, and the 6.20.0 line kept the invalid marks). `qa/rpc-tests/vault_activation_restart.py` pins it.
 
 ## How your YED is protected from being spent as plain YEC
 
