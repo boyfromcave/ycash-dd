@@ -4,39 +4,40 @@
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 """
-A restart while the node holds an invalidated branch that crosses a network upgrade's activation
-block: a known v4.5.0 (stock Zcash 4.x) defect, pinned here so it is visible and so the day it is
-fixed this script fails and is turned round (ycash6 carries the passing form of the same script).
+What a restart keeps of the block index, the same on both node lines (byte-identical script,
+qa/yellowback-cross-line.manifest).
 
-Stock RewindBlockIndex (src/main.cpp, RewindBlockIndex) runs at every start and erases from the
-block index every entry off the active chain that is not "sufficiently validated", which needs
-nCachedBranchId. LoadBlockIndexDB only derives nCachedBranchId from the parent for an entry that
-IsValid(BLOCK_VALID_CONSENSUS), and IsValid is false for any BLOCK_FAILED_* entry; only an
-activation block (BLOCK_ACTIVATES_UPGRADE) has its branch id on disk. So after `invalidateblock`
-of a block below the activation height whose branch contains the activation block, the next start
-erases the invalidated block and every descendant except the activation block, which is kept with
-a pprev that points at a deleted entry. CheckBlockIndex then fails
-"nNodes == forward.size()" (the activation block is not reachable from genesis). Without
--checkblockindex (the default on mainnet and testnet) the node starts with that dangling entry.
+RewindBlockIndex (src/main.cpp) runs at every start and erases the entries that are not
+"sufficiently validated". On both lines (owner decision 2026-10-28) an entry that never ran
+ConnectBlock (below BLOCK_VALID_CONSENSUS) is kept unless it has failed (upstream Ycash 1770fce16
+plus the workspace upstream report's section 3.2 refinement), and LoadBlockIndexDB marks every
+descendant of a failed entry failed too, so a failed branch is erased whole and its blocks are
+judged again when they come back, as v4.5.0 always did.
 
-Cases, each on its own node:
-  - Sapling (a stock upgrade, no Yellowback or vault code involved) and UPGRADE_VAULT;
-  - invalidating the activation block itself is the control: its parent is valid and kept, the
-    restart is clean;
-  - invalidating the block below the activation: the restart aborts under -checkblockindex
-    (SIGABRT, the assertion on stderr); without it the node starts at the invalidated tip; a
-    -reindex rebuilds a consistent index (and, as on v4.5.0 generally, forgets the invalidation).
+The defect this pins as fixed: after `invalidateblock` of a block below a network upgrade's
+activation height whose branch contains the activation block, stock v4.5.0 erased the invalidated
+blocks but kept the activation block (its branch id is on disk) with a deleted parent, and
+CheckBlockIndex aborted ("nNodes == forward.size()"). Every start here runs -checkblockindex.
+
+Nodes 0-3, each its own chain: Sapling (a stock upgrade, no Yellowback or vault code involved)
+and UPGRADE_VAULT, the activation block invalidated and the block below it invalidated. The
+restart is clean, the invalidated branch is gone (getchaintips shows only the active tip,
+reconsiderblock does not know the hash), the node stays at the invalidated tip, and the same
+blocks submitted again are judged afresh and connected back to the old tip.
+
+Node 4, the upstream benefit: a never-connected side branch with its data on disk (blocks from
+node 0's chain, less work) is kept across the restart; a second one (from node 1's chain) whose
+second block is invalidated while off the active chain leaves its later blocks unmarked on disk,
+and the restart erases them with it rather than keeping them under a deleted parent.
+
+The no-checkblockindex and -reindex recovery starts of the earlier form are gone with the abort.
 """
 
-import os
-import signal
-import time
-
+from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
-    bitcoind_processes,
     nuparams,
     start_node,
     stop_node,
@@ -45,98 +46,124 @@ from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
 
 ACT = 10                     # the activation height under test
 TOP = ACT + 3                # the tip before the invalidation
+SIDE = 4                     # the length of node 4's side branches
 
 # start_node passes Overwinter and Sapling at height 1; a later -nuparams for the same branch wins
 # (as in mempool_nu_activation.py), so this moves Sapling to ACT with nothing else scheduled.
 SAPLING_ARGS = ['-nuparams=5ba81b19:1', '-nuparams=76b809bb:%d' % ACT]
 VAULT_ARGS = list(YCASH_UPGRADE_ARGS) + [nuparams(VAULT_BRANCH_ID, ACT)]
 
-# node: (upgrade arguments, the height invalidated)
+# node: (upgrade, arguments, the height invalidated)
 CASES = {
     0: ('Sapling', SAPLING_ARGS, ACT - 1),
     1: ('Sapling', SAPLING_ARGS, ACT),
     2: ('Vault', VAULT_ARGS, ACT - 1),
     3: ('Vault', VAULT_ARGS, ACT),
 }
+SIDE_NODE = 4                # node 0's and node 1's rules, so their blocks are valid here
+
+
+def node_args(i):
+    return (CASES[i][1] if i in CASES else SAPLING_ARGS) + ['-checkblockindex=1']
 
 
 class VaultActivationRestartTest(BitcoinTestFramework):
 
     def __init__(self):
         super().__init__()
-        self.num_nodes = len(CASES)
-        self.setup_clean_chain = True
+        self.num_nodes = len(CASES) + 1
+        self.setup_clean_chain = True   # v4.5.0 harness
+        self.cache_behavior = 'clean'   # 6.20.0 harness (each harness ignores the other's)
 
     def setup_network(self, split=False):
-        self.nodes = [start_node(i, self.options.tmpdir, CASES[i][1] + ['-checkblockindex=1'])
-                      for i in sorted(CASES)]
+        self.nodes = [start_node(i, self.options.tmpdir, node_args(i))
+                      for i in range(self.num_nodes)]
         self.is_network_split = True          # each node is its own chain
 
-    def start(self, i, extra):
-        self.nodes[i] = start_node(i, self.options.tmpdir, CASES[i][1] + extra)
+    def restart(self, i):
+        stop_node(self.nodes[i], i)
+        self.nodes[i] = start_node(i, self.options.tmpdir, node_args(i))
         return self.nodes[i]
 
-    def start_expect_abort(self, i, extra):
-        """Start node i and expect it to abort during init; return (exit status, stderr)."""
-        path = os.path.join(self.options.tmpdir, 'node%d' % i, 'abort-stderr.txt')
-        with open(path, 'w+b') as err:
-            try:
-                start_node(i, self.options.tmpdir, CASES[i][1] + extra, stderr=err)
-            except Exception as e:
-                assert 'exited with status' in str(e), e
-            else:
-                raise AssertionError('node %d started; an abort in CheckBlockIndex was expected' % i)
-            status = bitcoind_processes[i].returncode
-            del bitcoind_processes[i]
-            err.seek(0)
-            return status, err.read().decode('utf-8', 'replace')
+    @staticmethod
+    def raw_chain(n, first, last):
+        """(hash, serialized block) at heights first..last of n's active chain."""
+        hashes = [n.getblockhash(h) for h in range(first, last + 1)]
+        return [(h, n.getblock(h, 0)) for h in hashes]
 
-    def wait_height(self, node, height, timeout=120):
-        deadline = time.time() + timeout
-        while node.getblockcount() < height and time.time() < deadline:
-            time.sleep(0.5)
-        assert_equal(node.getblockcount(), height)
+    @staticmethod
+    def tips(n):
+        return sorted((t['height'], t['status']) for t in n.getchaintips())
 
     def run_test(self):
+        raw = {}
         for i in sorted(CASES):
-            name, _, bad = CASES[i]
             n = self.nodes[i]
             n.generate(TOP)
             assert_equal(n.getblockcount(), TOP)
-            n.invalidateblock(n.getblockhash(bad))
-            assert_equal(n.getblockcount(), bad - 1)
-            stop_node(n, i)
+            raw[i] = self.raw_chain(n, 1, TOP)
+
+        side = self.nodes[SIDE_NODE]
+        side.generate(TOP)
+        self.check_side_branches(side, raw[0][:SIDE], raw[1][:SIDE])
 
         for i in sorted(CASES):
             name, _, bad = CASES[i]
-            if bad == ACT:
-                print('%s: invalidated at the activation block: the restart is clean' % name)
-                n = self.start(i, ['-checkblockindex=1'])
-                assert_equal(n.getblockcount(), ACT - 1)
-                n.generate(2)                                  # a new branch across the activation
-                assert_equal(n.getblockcount(), ACT + 1)
-                continue
-
-            print('%s: invalidated below the activation: -checkblockindex aborts in CheckBlockIndex' % name)
-            status, err = self.start_expect_abort(i, ['-checkblockindex=1'])
-            assert_equal(status, -signal.SIGABRT)
-            assert 'nNodes == forward.size()' in err, err
-
-            # Without -checkblockindex the same start succeeds and the tip is the invalidated one.
-            # The activation block's entry is left with a dangling parent: nothing here may walk it
-            # (getchaintips, getblock/getblockheader of that hash, reconsiderblock would).
-            print('%s: the same start without -checkblockindex runs at the invalidated tip' % name)
-            n = self.start(i, ['-checkblockindex=0'])
+            n = self.nodes[i]
+            tip = n.getbestblockhash()
+            bad_hash = n.getblockhash(bad)
+            n.invalidateblock(bad_hash)
             assert_equal(n.getblockcount(), bad - 1)
-            stop_node(n, i)
+            assert_equal(self.tips(n), [(bad - 1, 'active'), (TOP, 'invalid')])
 
-            print('%s: -reindex rebuilds a consistent index (the invalidation is not kept)' % name)
-            n = self.start(i, ['-checkblockindex=1', '-reindex'])
-            self.wait_height(n, TOP)
-            stop_node(n, i)
-            n = self.start(i, ['-checkblockindex=1'])
-            assert_equal(n.getblockcount(), TOP)
+            where = 'at' if bad == ACT else 'below'
+            print('%s: invalidated %s the activation block: the restart is clean and erases the branch' % (name, where))
+            n = self.restart(i)
+            assert_equal(n.getblockcount(), bad - 1)
+            assert_equal(self.tips(n), [(bad - 1, 'active')])
+            try:
+                n.reconsiderblock(bad_hash)
+            except JSONRPCException as e:
+                assert_equal(e.error['code'], -5)        # Block not found
+            else:
+                raise AssertionError('%s: the invalidated block survived the restart' % name)
 
+            print('%s: the same blocks submitted again are judged afresh and connect' % name)
+            for _, block in raw[i][bad - 1:]:
+                assert_equal(n.submitblock(block), None)
+            assert_equal(n.getbestblockhash(), tip)
+            assert_equal(self.tips(n), [(TOP, 'active')])
+            n = self.restart(i)
+            assert_equal(n.getbestblockhash(), tip)
+
+    def check_side_branches(self, n, kept, failed):
+        assert kept[0][0] != failed[0][0], 'node 0 and node 1 mined the same first block'
+        for _, block in kept + failed:
+            assert_equal(n.submitblock(block), 'inconclusive')   # stored, not connected (less work)
+        expected = [(SIDE, 'valid-headers'), (SIDE, 'valid-headers'), (TOP, 'active')]
+        assert_equal(self.tips(n), expected)
+
+        # Invalidated off the active chain: InvalidateBlock marks that entry only (it walks
+        # chainActive), so the blocks above it are unmarked on disk.
+        n.invalidateblock(failed[1][0])
+        assert_equal(n.getblockcount(), TOP)
+
+        print('side branches: the restart keeps the never-connected branch and erases the failed one whole')
+        n = self.restart(SIDE_NODE)
+        assert_equal(n.getblockcount(), TOP)
+        assert_equal(self.tips(n), [(1, 'valid-headers'), (SIDE, 'valid-headers'), (TOP, 'active')])
+        assert_equal(n.getblock(kept[-1][0], 0), kept[-1][1])          # kept with its data
+        assert_equal(n.getblockheader(failed[0][0])['height'], 1)
+        for h, _ in failed[1:]:
+            try:
+                n.getblockheader(h)
+            except JSONRPCException as e:
+                assert_equal(e.error['code'], -5)                       # erased
+            else:
+                raise AssertionError('side branch block %s survived the restart' % h)
+        for _, block in failed[1:]:
+            assert_equal(n.submitblock(block), 'inconclusive')         # judged again, accepted
+        assert_equal(self.tips(n), expected)
 
 if __name__ == '__main__':
     VaultActivationRestartTest().main()

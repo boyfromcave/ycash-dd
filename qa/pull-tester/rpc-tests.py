@@ -78,8 +78,9 @@ BASE_SCRIPTS= [
     # The vault primitive (docs/plans/yellowback-upgrade-plan.md §15.9): UPGRADE_VAULT activation,
     # branch id in signing, CSV/BIP68 before and after, the 0xc0/0xc1 bytes before.
     'vault_upgrade.py',
-    # A restart holding an invalidated branch across an activation block (stock v4.5.0
-    # RewindBlockIndex leaves the activation block with a dangling parent; ycash6 keeps the branch).
+    # What a restart keeps of the block index (RewindBlockIndex): an invalidated branch across an
+    # activation block is erased whole and judged again; a never-connected one is kept. Byte-identical
+    # on both lines (qa/yellowback-cross-line.manifest).
     'vault_activation_restart.py',
     # The set_* / vault_* RPCs end to end on three nodes (§15.8): sets, joins, lock, unlock,
     # release, cancel, owner spend, reorg across an act, restart reconciliation.
