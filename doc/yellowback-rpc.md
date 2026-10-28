@@ -2702,7 +2702,7 @@ to a P2PKH `-mineraddress`); `-yellowbackquotemaxage=<sec>` (default
 (clamped to `≥ DEFAULT_FEE`); `-yellowbackmintlag` (`REF_LAG`, 0..36); `-debug=yellowback`;
 regtest only: `-yellowbackattestorset`, `-yellowbacksigmaref`, `-yellowbacksupplycapbps` (with
 the activation height, all four in `yed_getinfo.params` and the state hash); test only:
-`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|template`. `-prune` is refused
+`-yellowbacktestfault=storage:<check|commit|undo>[:<height>]|crash:<height>|template|schema`. `-prune` is refused
 where Yellowback is live.
 
 **v3:** `-yellowbackpreferredattestor=<seq>` (AFEE-W override when that `seq ∈ A`; reported in
