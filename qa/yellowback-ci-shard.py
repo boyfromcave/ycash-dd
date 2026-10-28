@@ -39,6 +39,9 @@ WEIGHTS = {
     "yellowback_wallet_restore": 250,   # m
     "yellowback_mint_armed": 120,       # m
     "yellowback_upgrade": 75,           # m
+    "yellowback_activation_reorg": 300,  # estimate (2026-10-28): two activations' price windows
+    "yellowback_reorg_restart": 300,     # estimate: five restarts, one -reindex-yellowback
+    "yellowback_redeem_boundary": 200,   # estimate
     "yellowback_hardening": 400,
     "yellowback_enforcement": 400,      # harden line only (retired by the upgrade)
     "yellowback_attest_enforcement": 300,  # harden line only
