@@ -188,6 +188,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "yed_gethistory", 1 },
     { "yed_listtransactions", 0 },
     { "yed_listtransactions", 1 },
+    { "yed_listaddresses", 0 },     // N8: includeEmpty
     { "yed_mint", 0 },
     { "yed_mint", 1 },
     { "yed_send", 1 },
