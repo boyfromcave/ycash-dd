@@ -30,7 +30,6 @@ Cases, each on its own node:
 
 import os
 import signal
-import tempfile
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
