@@ -98,7 +98,14 @@ static CZMQNotificationInterface* pzmqNotificationInterface = NULL;
 // anyway.
 #define MIN_CORE_FILEDESCRIPTORS 0
 #else
-#define MIN_CORE_FILEDESCRIPTORS 150
+// The stock 150 reserves the block index and coins LevelDB instances (64 open files each, dbwrapper.cpp
+// max_open_files) and the block files. The vault upgrade adds two more instances at the same 64 files each,
+// <datadir>/vaults (vault/db.cpp, every node) and <datadir>/yellowback (yellowback/db.cpp, where YED is live),
+// reserved here before the connections are assigned so a low limit cannot starve them at runtime (an index
+// storage failure stops the node, U-21; cf. DigiByte v9.26.6 test/functional/feature_file_descriptors.py).
+#define VAULT_DB_FILEDESCRIPTORS 64
+#define YELLOWBACK_DB_FILEDESCRIPTORS 64
+#define MIN_CORE_FILEDESCRIPTORS (150 + VAULT_DB_FILEDESCRIPTORS + YELLOWBACK_DB_FILEDESCRIPTORS)
 #endif
 
 /** Used to pass flags to the Bind() function */
@@ -216,13 +223,11 @@ void Shutdown()
     StopREST();
     StopRPC();
     StopHTTPServer();
-    // Yellowback (plan D2): unregister, then stop and flush under cs_yellowback; never deleted here.
-    if (yellowback::g_yellowback) {
-        UnregisterValidationInterface(yellowback::g_yellowback);
-        yellowback::g_yellowback->Stop();
-        yellowback::g_yellowback->Flush(true);
-    }
+    // The YED wallet's completion thread runs completions that take cs_main and the wallet:
+    // join it before anything it uses is torn down (cf. DigiByte v9.26.7 c9d6abdf26).
 #ifdef ENABLE_WALLET
+    if (yellowback::g_yellowbackWallet)
+        yellowback::g_yellowbackWallet->StopThread();
     if (pwalletMain)
         pwalletMain->Flush(false);
 #endif
@@ -232,6 +237,23 @@ void Shutdown()
     StopNode();
     StopTorControl();
     UnregisterNodeSignals(GetNodeSignals());
+    // Yellowback (plan D2): unregister, then stop and flush under cs_yellowback; never deleted here.
+    // Only now, with the miner, the network, RPC and the YED wallet thread stopped, so no block
+    // can connect against a stopped index (which fails closed: cf. DigiByte v9.26.7 a6a0c1690f).
+    if (yellowback::g_yellowback) {
+        UnregisterValidationInterface(yellowback::g_yellowback);
+        yellowback::g_yellowback->Stop();
+        yellowback::g_yellowback->Flush(true);
+    }
+    // The YED wallet holds raw pointers to pwalletMain and the index: detach and delete it before
+    // the coins view and the wallet go.
+#ifdef ENABLE_WALLET
+    if (yellowback::g_yellowbackWallet) {
+        yellowback::g_yellowbackWallet->Detach();
+        delete yellowback::g_yellowbackWallet;
+        yellowback::g_yellowbackWallet = nullptr;
+    }
+#endif
 
     if (fFeeEstimatesInitialized)
     {
@@ -441,7 +463,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
         strUsage += HelpMessageOpt("-yellowbackmintrequiresarmed", "Yellowback MINT_REQUIRES_ARMED: an unarmed mint is VOID (mint-halted-unarmed) (regtest only, default 0; always on mainnet and testnet)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
-        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], template or schema (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], crash:<height>, template or schema (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -1070,7 +1092,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     nMaxConnections = std::max(std::min(nMaxConnections, FD_SETSIZE - nBind - MIN_CORE_FILEDESCRIPTORS), 0);
     int nFD = RaiseFileDescriptorLimit(nMaxConnections + MIN_CORE_FILEDESCRIPTORS);
     if (nFD < MIN_CORE_FILEDESCRIPTORS)
-        return InitError(_("Not enough file descriptors available."));
+        return InitError(strprintf("%s (%d needed, %d available; macOS defaults to 256 open files per process: raise the limit with `ulimit -n`)",
+                                   _("Not enough file descriptors available."), MIN_CORE_FILEDESCRIPTORS, nFD));
     nMaxConnections = std::min(nFD - MIN_CORE_FILEDESCRIPTORS, nMaxConnections);
 
     if (nMaxConnections < nUserMaxConnections)
@@ -1989,8 +2012,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     {
         LOCK(cs_main);
         std::string vaultErr;
-        if (!fReindex && !vault::Reconcile(chainparams, vaultErr))
+        bool vaultInterrupted = false;
+        if (!fReindex && !vault::Reconcile(chainparams, vaultErr, ShutdownRequested, &vaultInterrupted)) {
+            if (vaultInterrupted) {
+                LogPrintf("Shutdown requested. Exiting.\n");
+                return false;
+            }
             return InitError(vaultErr + ". " + _("Restart with -reindex to rebuild the vault database."));
+        }
+        // The invariant audit (cf. DigiByte v9.26.7 19c8b1c272): every set's lockedValue against its unspent V outputs.
+        std::vector<std::string> vaultMismatches = vault::AuditLockedValue(*vault::g_vaultdb);
+        for (const std::string& m : vaultMismatches) LogPrintf("vault: invariant audit: %s\n", m);
+        if (!vaultMismatches.empty()) {
+            return InitError(strprintf("vault: the set-state database fails its invariant audit (%s). ", vaultMismatches.front()) +
+                             _("Restart with -reindex to rebuild the vault database."));
+        }
     }
 
     fs::path est_path = GetDataDir() / FEE_ESTIMATES_FILENAME;
@@ -2107,7 +2143,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                       cfg.payoutKey.has_value() ? yellowbackKeyIO.EncodeDestination(CTxDestination(cfg.payoutKey.value())) : std::string("none"));
         }
         // The index is consensus state (U-21): a node that cannot bring it to the tip does not start.
-        if (!yellowback::g_yellowback->SyncToChain()) {
+        if (!yellowback::g_yellowback->SyncToChain(ShutdownRequested)) {
+            if (yellowback::g_yellowback->WasInterrupted()) {
+                LogPrintf("Shutdown requested. Exiting.\n");
+                return false;
+            }
             return InitError(strprintf(_("The Yellowback index could not be brought to the tip: %s. Restart with -reindex-yellowback."), yellowback::g_yellowback->UnhealthyReason()));
         }
         RegisterValidationInterface(yellowback::g_yellowback);

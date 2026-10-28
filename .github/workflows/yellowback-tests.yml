@@ -92,7 +92,7 @@ env:
   # (2026-10-07, in-term claims IT-1..IT-6). On upgrade/quantum-vaults: vault_pq, vault_pq_wallet (2026-10-10, Q3, Q5), yellowback_pq (Q4), vault_pq_reorg (quantum review F-1), vault_pq_wallet_restore (review B I-2), wallet_pq_address (D-Q-20, sq… addresses).
   # vault_dos and vault_pq_relay joined on 2026-10-12 (remedial audit 07/F-1 mempool DoS carve-out, 07/F-6 PQ orphan size).
   # yellowback_cancel_limit joined on 2026-10-13 (the cancel-limit design: the held residual, CAN-3 round 2).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_fees yellowback_fees_reaccept yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet vault_pq_wallet_restore vault_pq_reorg vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_fees yellowback_fees_reaccept yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet vault_pq_wallet_restore vault_pq_reorg vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
   # The functional scripts the nightly job runs by name, each in its own step (they need the Rust
   # attest agent, the devnet, or a ycash-legacy build). The audit counts them as run by CI.
   NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity
@@ -448,13 +448,16 @@ jobs:
           esac
           qa/pull-tester/rpc-tests.py --fail-on-skip -j4 --nozmq --nocleanup $names
       - name: Upload node logs on failure
+        # warn, not ignore, on every failure-log upload: a path that matches nothing (a moved TMPDIR,
+        # a renamed node directory) shows as a warning on the run instead of losing the logs silently
+        # (cf. DigiByte v9.26.7 b41399e611).
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: yellowback-test-logs-shard-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   audit:
     if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && (inputs.tier == 'all' || inputs.tier == 'push'))
@@ -848,7 +851,7 @@ jobs:
         with:
           name: yellowback-lockorder-pr-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   sanitizers-pr:
     name: sanitizers (PR, overlay unit suites)
@@ -1210,7 +1213,7 @@ jobs:
         with:
           name: yellowback-nightly-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:
@@ -1304,7 +1307,7 @@ jobs:
         with:
           name: yellowback-lockorder-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:
@@ -1394,7 +1397,7 @@ jobs:
         with:
           name: yellowback-sanitizer-logs
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
-          if-no-files-found: ignore
+          if-no-files-found: warn
       - name: Open an issue on failure
         if: failure()
         env:
