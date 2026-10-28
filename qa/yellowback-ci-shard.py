@@ -63,7 +63,7 @@ WEIGHTS = {
     "wallet": 150,
     "yellowback_rpc_contract": 120,
     "vault_upgrade": 90,
-    "vault_activation_restart": 70,     # estimate: five nodes, fourteen starts
+    "vault_activation_restart": 90,     # estimate: seven nodes, eighteen starts
     "yellowback_framework_smoke": 60,
     "rawtransactions": 60,
     "mempool_reorg": 40,
