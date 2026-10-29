@@ -9,7 +9,12 @@
  * network protocol versioning
  */
 
-static const int PROTOCOL_VERSION = 270013;
+//! 270200 = the Vault-era protocol version (UPGRADE_VAULT.nProtocolVersion on
+//! every network, the same on ycash6), taken with 6.22.0-rc1 (testnet plan T-8;
+//! upgrade plan P8 part D). Before Vault activates it gates nobody: peers are
+//! held to MIN_PEER_PROTO_VERSION below. Once Vault is the current epoch, a peer
+//! below 270200 is disconnected. The live network speaks 270013 (Canopy era).
+static const int PROTOCOL_VERSION = 270200;
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;

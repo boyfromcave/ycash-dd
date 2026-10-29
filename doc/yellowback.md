@@ -130,11 +130,12 @@ and the network names its YED attestor set: on mainnet and testnet both are comp
 release that activates it (neither is set yet); on regtest they are
 `-nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>`. The release line is ycash6
 (`doc/yellowback-release.md` there, "Network parameters"). Tag this repository
-`vault-params/v6.22.N` first: `.github/workflows/yellowback-release-guard.yml` refuses the tag
-unless it is 6.22.x and `qa/yellowback-release-heights.sh` accepts R1–R7 and the same Vault
-fields on ycash6. Then tag ycash6 `v6.22.N`. Protocol version is unchanged until that release
-raises `UPGRADE_VAULT.nProtocolVersion` and `PROTOCOL_VERSION` together; R3–R5 refuse the tag
-until then. `MIN_PEER_PROTO_VERSION` stays at the live floor.
+`vault-params/v<V>` first: `.github/workflows/yellowback-release-guard.yml` refuses the tag
+unless it is a 6.22.x release version and `qa/yellowback-release-heights.sh` accepts the rules of
+its stage (a beta, an rc or a final release: testnet plan §5.1, the table in ycash6's
+`doc/yellowback-release.md`) and the same Vault fields on ycash6. Then tag ycash6 `v<V>`.
+`UPGRADE_VAULT.nProtocolVersion` and `PROTOCOL_VERSION` are both 270200 on every network (taken
+with rc1, T-8; the same on ycash6); `MIN_PEER_PROTO_VERSION` stays at the live floor.
 
 The set has to exist before the second
 flag can name it, so a regtest node starts with the vault upgrade alone, creates the set with
