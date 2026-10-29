@@ -4199,6 +4199,9 @@ static bool ActivateBestChainStep(CValidationState& state, const CChainParams& c
  */
 bool ActivateBestChain(CValidationState& state, const CChainParams& chainparams, const CBlock* pblock)
 {
+    // -stopatheight (from Bitcoin Core; testnet plan §4.3): shut down once the active chain reaches the
+    // height, and connect nothing above it. It changes no validity rule.
+    const int nStopAtHeight = GetArg("-stopatheight", DEFAULT_STOPATHEIGHT);
     CBlockIndex *pindexMostWork = NULL;
     CBlockIndex *pindexNewTip = NULL;
     do {
@@ -4213,6 +4216,11 @@ bool ActivateBestChain(CValidationState& state, const CChainParams& chainparams,
             // Whether we have anything to do at all.
             if (pindexMostWork == NULL || pindexMostWork == chainActive.Tip())
                 return true;
+
+            if (nStopAtHeight > 0 && chainActive.Height() >= nStopAtHeight) {
+                StartShutdown();
+                return true;
+            }
 
             if (!ActivateBestChainStep(state, chainparams, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : NULL))
                 return false;
@@ -4240,6 +4248,12 @@ bool ActivateBestChain(CValidationState& state, const CChainParams& chainparams,
             }
             // Notify external listeners about the new tip.
             GetMainSignals().UpdatedBlockTip(pindexNewTip);
+        }
+
+        if (nStopAtHeight > 0 && pindexNewTip && pindexNewTip->nHeight >= nStopAtHeight) {
+            LogPrintf("-stopatheight: the active chain is at height %d; shutting down\n", pindexNewTip->nHeight);
+            StartShutdown();
+            break;
         }
     } while (pindexNewTip != pindexMostWork);
     CheckBlockIndex(chainparams.GetConsensus());

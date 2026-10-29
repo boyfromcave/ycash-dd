@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -81,6 +82,8 @@ public:
     bool TestnetToBeDeprecatedFieldRPC() const { return fTestnetToBeDeprecatedFieldRPC; }
     /** Return the BIP70 network string (main, test or regtest) */
     std::string NetworkIDString() const { return strNetworkID; }
+    /** The testnet profile (fast, slow or legacy; testnet plan T-14) on "test", empty on main and regtest. */
+    const std::string& TestnetProfile() const { return strTestnetProfile; }
     const std::vector<CDNSSeedData>& DNSSeeds() const { return vSeeds; }
     const std::vector<unsigned char>& Base58Prefix(Base58Type type) const { 
         return keyConstants.Base58Prefix(type); 
@@ -119,6 +122,7 @@ protected:
     bool fRequireStandard = false;
     bool fMineBlocksOnDemand = false;
     bool fTestnetToBeDeprecatedFieldRPC = false;
+    std::string strTestnetProfile;
     CCheckpointData checkpointData;
     std::vector<std::string> vFoundersRewardAddress;
     std::vector<std::string> vYcashFoundersRewardAddress;
@@ -137,7 +141,8 @@ protected:
 const CChainParams &Params();
 
 /**
- * @returns CChainParams for the given BIP70 chain name.
+ * @returns CChainParams for the given BIP70 chain name; for "test", the selected testnet profile's
+ * (SelectTestnetProfile, chainparamsbase.h).
  */
 CChainParams& Params(const std::string& chain);
 
