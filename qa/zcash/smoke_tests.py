@@ -730,7 +730,7 @@ class ZcashNode(object):
             '-zmergetoaddress',
         ]
         if self.__testnet:
-            args.append('-testnet=1')
+            args.extend(['-testnet=1', '-testnetprofile=fast'])
         if extra_args is not None:
             args.extend(extra_args)
 
@@ -744,7 +744,7 @@ class ZcashNode(object):
             '-rpcwait',
         ]
         if self.__testnet:
-            cli_args.append('-testnet=1')
+            cli_args.extend(['-testnet=1', '-testnetprofile=fast'])
         cli_args.append('getblockcount')
 
         devnull = open('/dev/null', 'w+', encoding='utf8')
