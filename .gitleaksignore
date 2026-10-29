@@ -136,3 +136,6 @@ ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generi
 88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:50
 88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:53
 88806750b4f07124384609be8ad8337a4259a498:contrib/yellowback/devnet/upgrade-walk-transcript.txt:generic-api-key:61
+
+# contrib/yellowback/devnet/testnet_join.py (N2 join mode): the line builds ycash.conf text from a format string, "rpcpassword=%s" % password beside "rpcbind=127.0.0.1"; the password is random per devnet at run time, nothing is committed. Reshaped in the next commit.
+5d54224244cba74e721567f0e4ddbcb1bfdef5cb:contrib/yellowback/devnet/testnet_join.py:generic-api-key:99
