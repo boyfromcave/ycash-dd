@@ -1,8 +1,17 @@
-# Pairing-tag guard for the vault release line (audit W3-P-1 part C, 04/NEW-1).
+# Pairing-tag guard for the vault release line (audit W3-P-1 part C, 04/NEW-1; testnet plan §5.1).
+#
+# In plain words: the node is released from ycash6, but this repository must agree with it on the
+# network upgrade's parameters (the activation heights, the attestor sets, the protocol version).
+# Before a release, this repository is tagged vault-params/v<version>. This check refuses that tag
+# when the parameters are not ready for the kind of release the version names (a beta, a release
+# candidate or a final release), or when they differ from ycash6. Nothing here builds or publishes.
+#
 # The release itself is cut on ycash6; the procedure is doc/yellowback-release.md there.
-# This workflow refuses a vault-params/v6.22.* tag unless R1-R7 hold and every compared
-# Vault field matches ycash6 (v<version> when that tag already exists, otherwise
-# upgrade/vault). A workflow_dispatch run only warns.
+# This workflow refuses a vault-params/v6.22.* tag unless the rules of the tag's stage hold
+# (qa/yellowback-release-heights.sh --release-version: a beta needs none of the release
+# parameters, an rc R3-R6 and the testnet's R7, a final release R1-R7) and every compared Vault
+# field matches ycash6 (v<version> when that tag already exists, otherwise upgrade/vault).
+# A workflow_dispatch run only warns.
 #
 # Order: tag ycash-dd vault-params/v6.22.N first (this guard must pass), then tag ycash6 v6.22.N.
 name: yellowback release guard
@@ -13,14 +22,15 @@ on:
       - 'vault-params/*'
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   guard:
     name: Vault parameters set and aligned with ycash6
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -31,6 +41,12 @@ jobs:
           url="https://github.com/boyfromcave/ycash6.git"
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             ver="${GITHUB_REF_NAME#vault-params/v}"
+            # The version names the stage; the guard below refuses anything that is not a 6.22.x
+            # release version before any ref is built from it.
+            python3 qa/yellowback-vault-params.py stage "$ver" >/dev/null || {
+              echo "refusing to release: $GITHUB_REF_NAME does not name a release version (vault-params/v6.22.N[-rcM|-betaM])"
+              exit 1
+            }
             set +e
             git ls-remote --exit-code --tags "$url" "refs/tags/v${ver}"
             lrc=$?
