@@ -53,7 +53,10 @@ GBT_VOLATILE = {'curtime', 'longpollid', 'mintime', 'transactions', 'coinbasetxn
 GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'balance', 'walletversion',
                     'keypoololdest', 'keypoolsize', 'paytxfee', 'relayfee', 'unlocked_until',
                     # the git describe string of the build itself: v4.5.0-<commit> either way
-                    'build', 'subversion'}
+                    'build', 'subversion',
+                    # the build's protocol version: the fork speaks the Vault-era 270200 (testnet plan
+                    # T-8), stock v4.5.0 270013; peers below Vault are still accepted
+                    'protocolversion'}
 
 LEGACY, FORK = 0, 1
 

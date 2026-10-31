@@ -558,7 +558,7 @@ class PQDoS(BitcoinTestFramework):
         n = self.n0
         off = os.path.getsize(self.log_path(0))
         node = TestNode()
-        conn = NodeConn('127.0.0.1', p2p_port(0), n, node, 'regtest', 270013)
+        conn = NodeConn('127.0.0.1', p2p_port(0), n, node, 'regtest', 270200)   # UPGRADE_VAULT's nProtocolVersion (T-8)
         node.add_connection(conn)
         NetworkThread().start()
         node.wait_for_verack()
