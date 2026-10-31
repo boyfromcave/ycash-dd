@@ -46,6 +46,13 @@ NU5_BRANCH_ID = 0xF919A198
 # The Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md section 15.1): regtest
 # activates it with nuparams(VAULT_BRANCH_ID, height); signers after activation sign with it.
 VAULT_BRANCH_ID = 0x6D5B7A31
+# The testnet shadow fork's own branch IDs (docs/plans/yellowback-testnet-shadow-fork-plan.md):
+# testnet-yb-slow and testnet-legacy sign under these after their split from mainnet. A signer reads
+# the one to use from the node (signing_branch_id), never from these constants. SHADOW_BRANCH_ID is
+# also NetworkUpgradeInfo's entry for UPGRADE_SHADOW, so nuparams(SHADOW_BRANCH_ID, h) on regtest.
+SHADOW_BRANCH_ID = 0x57A24D5D          # testnet-yb-slow, UPGRADE_SHADOW
+SLOW_VAULT_BRANCH_ID = 0xE1F1CC08      # testnet-yb-slow, UPGRADE_VAULT
+LEGACY_SHADOW_BRANCH_ID = 0x35706728   # testnet-legacy, UPGRADE_SHADOW
 
 # The maximum number of nodes a single test can spawn
 MAX_NODES = 8
