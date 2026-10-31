@@ -586,7 +586,10 @@ leg_cross_line() {
   # Every Vault chain parameter must agree with the other line (audit W3-P-1).
   local vp_tmp
   vp_tmp=$(mktemp -d)
-  for f in src/chainparams.cpp src/consensus/params.h src/version.h src/yellowback/params.cpp; do
+  # The extractor's FILES (qa/yellowback-vault-params.py): the testnet shadow fork's branch IDs are
+  # read from src/consensus/upgrades.{h,cpp} too.
+  for f in src/chainparams.cpp src/consensus/params.h src/version.h src/yellowback/params.cpp \
+           src/consensus/upgrades.h src/consensus/upgrades.cpp; do
     mkdir -p "$vp_tmp/other/$(dirname "$f")"
     show "$f" > "$vp_tmp/other/$f" || rc=1
   done
