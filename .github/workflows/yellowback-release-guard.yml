@@ -1,6 +1,6 @@
 # Pairing-tag guard for the vault release line (audit W3-P-1 part C, 04/NEW-1).
 # The release itself is cut on ycash6; the procedure is doc/yellowback-release.md there.
-# This workflow refuses a vault-params/v6.22.* tag unless R1-R7 hold and every compared
+# This workflow refuses a vault-params/v6.22.* tag unless R1-R8 hold and every compared
 # Vault field matches ycash6 (v<version> when that tag already exists, otherwise
 # upgrade/vault). A workflow_dispatch run only warns.
 #
