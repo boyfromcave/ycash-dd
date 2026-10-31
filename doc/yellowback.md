@@ -131,7 +131,7 @@ release that activates it (neither is set yet); on regtest they are
 `-nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>`. The release line is ycash6
 (`doc/yellowback-release.md` there, "Network parameters"). Tag this repository
 `vault-params/v6.22.N` first: `.github/workflows/yellowback-release-guard.yml` refuses the tag
-unless it is 6.22.x and `qa/yellowback-release-heights.sh` accepts R1–R7 and the same Vault
+unless it is 6.22.x and `qa/yellowback-release-heights.sh` accepts R1–R8 and the same Vault
 fields on ycash6. Then tag ycash6 `v6.22.N`. Protocol version is unchanged until that release
 raises `UPGRADE_VAULT.nProtocolVersion` and `PROTOCOL_VERSION` together; R3–R5 refuse the tag
 until then. `MIN_PEER_PROTO_VERSION` stays at the live floor.
