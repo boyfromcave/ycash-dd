@@ -135,7 +135,9 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_info)
 {
     BOOST_CHECK_EQUAL(NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].nBranchId, VAULT_BRANCH_ID);
     BOOST_CHECK_EQUAL(std::string(NetworkUpgradeInfo[Consensus::UPGRADE_VAULT].strName), "Vault");
-    BOOST_CHECK(Consensus::UPGRADE_VAULT == Consensus::UPGRADE_NU5 + 1);
+    // After NU5 and the testnet shadow fork's upgrade (docs/plans/yellowback-testnet-shadow-fork-plan.md)
+    BOOST_CHECK(Consensus::UPGRADE_SHADOW == Consensus::UPGRADE_NU5 + 1);
+    BOOST_CHECK(Consensus::UPGRADE_VAULT == Consensus::UPGRADE_SHADOW + 1);
     BOOST_CHECK(Consensus::UPGRADE_ZFUTURE == Consensus::UPGRADE_VAULT + 1);
     BOOST_CHECK(IsConsensusBranchId(VAULT_BRANCH_ID));
     // The per-epoch Equihash row is the epoch before it (NU5's).
