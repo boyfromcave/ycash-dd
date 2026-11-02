@@ -246,6 +246,9 @@ EXTENDED_SCRIPTS = [
     'yellowback_devnet_upgrade.py',
     'yellowback_sapling.py',
     'yellowback_stockparity.py',
+    # -prune keeps every block from the vault prune floor (H_V - 288; workspace pruning assessment PR-2): two nodes,
+    # about 1.8 GB of disk and 15-30 minutes, so nightly, as pruning.py.
+    'vault_prune_floor.py',
     # These tests are not run by the travis build process.
     # Longest test should go first, to favor running tests in parallel
     'pruning.py',

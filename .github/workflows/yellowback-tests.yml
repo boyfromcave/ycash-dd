@@ -97,7 +97,7 @@ env:
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_fees yellowback_fees_reaccept yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet vault_pq_wallet_restore vault_pq_reorg vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address lightwalletd_only z_validateaddress_nowallet
   # The functional scripts the nightly job runs by name, each in its own step (they need the Rust
   # attest agent, the devnet, or a ycash-legacy build). The audit counts them as run by CI.
-  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity vault_prune_floor
   # The subset the sanitizers job runs under ASan/UBSan.
   SANITIZER_SCRIPTS: yellowback_index vault_upgrade
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
@@ -1142,6 +1142,17 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+      - name: The vault prune floor (extended)
+        # -prune=550 past the vault activation height (workspace docs/plans/kogany/research/pruning-assessment.md
+        # PR-2): the files below H_V - 288 deleted, every block from there kept, the vault and YED replays and
+        # -reindex-yellowback with only those blocks on disk, the start-up data check refusing a removed file.
+        # About 1.8 GB of disk and 15-30 minutes, so nightly only.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup vault_prune_floor
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet, the
         # lightwalletd fork (LWD_COMMIT) and the lightwalletd-legacy baseline both served from node 0, then
