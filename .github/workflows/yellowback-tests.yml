@@ -91,11 +91,14 @@ env:
   # (2026-10-07, in-term claims IT-1..IT-6). On upgrade/quantum-vaults: vault_pq, vault_pq_wallet (2026-10-10, Q3, Q5), yellowback_pq (Q4), yellowback_pq_dayone (D-Q-2: Falcon from the vault activation), vault_pq_reorg (quantum review F-1), vault_pq_wallet_restore (review B I-2).
   # (2026-10-07, in-term claims IT-1..IT-6). On upgrade/quantum-vaults: vault_pq, vault_pq_wallet (2026-10-10, Q3, Q5), yellowback_pq (Q4), vault_pq_reorg (quantum review F-1), vault_pq_wallet_restore (review B I-2), wallet_pq_address (D-Q-20, sq… addresses).
   # vault_dos and vault_pq_relay joined on 2026-10-12 (remedial audit 07/F-1 mempool DoS carve-out, 07/F-6 PQ orphan size).
+  # lightwalletd_only joined on 2026-11-01 (a -lightwalletd-only node connects blocks; ycash6 pin finding 7, the shared guard).
+  # yellowback_lightwalletd joined on 2026-11-02 (a -lightwalletd node generates, sends and generates across Vault; the kogany review's "generate hangs" gap).
+  # z_validateaddress_nowallet joined on 2026-11-01 (z_validateaddress on a -disablewallet node, kogany yewd finding).
   # yellowback_cancel_limit joined on 2026-10-13 (the cancel-limit design: the held residual, CAN-3 round 2).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_fees yellowback_fees_reaccept yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet vault_pq_wallet_restore vault_pq_reorg vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_fees yellowback_fees_reaccept yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq vault_pq_wallet vault_pq_wallet_restore vault_pq_reorg vault_undo_prune vault_policy vault_dos vault_pq_relay wallet_pq_address lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet
   # The functional scripts the nightly job runs by name, each in its own step (they need the Rust
   # attest agent, the devnet, or a ycash-legacy build). The audit counts them as run by CI.
-  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity vault_prune_floor
   # The subset the sanitizers job runs under ASan/UBSan.
   SANITIZER_SCRIPTS: yellowback_index vault_upgrade
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
@@ -492,9 +495,11 @@ jobs:
           # post-quantum line (its node also reports params.pq, marker "falconActive") always compares with
           # ycash6's upgrade/quantum-vaults -- the same rule as ycash6's cross-line step, mirrored.
           case " $SCHEDULE_REFS " in *" $REF "*) other=$REF ;; *) other=upgrade/vault ;; esac
+          # A branch both lines carry (vaults/kogany-compat, a kc/* pair) compares with its namesake.
+          if [ "$other" = upgrade/vault ] && git ls-remote --exit-code --heads "https://github.com/$OTHER_LINE_REPO.git" "$REF" >/dev/null 2>&1; then other=$REF; fi
           # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
           # with ycash6's upgrade/vault; the markers below only route the record branches.
-          if [ "$REF" != upgrade/vault ] && grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
+          if [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ] && grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
             other=upgrade/vault-in-term
             if grep -q '"falconActive"' src/rpc/yellowback.cpp 2>/dev/null; then other=upgrade/quantum-vaults; fi
           fi
@@ -1140,6 +1145,17 @@ jobs:
           mkdir -p "$TMPDIR"
           test -x "$YELLOWBACK_ATTEST_BIN" || { echo "the agent binary was not built; the script would SKIP"; exit 1; }
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup yellowback_devnet_upgrade
+      - name: The vault prune floor (extended)
+        # -prune=550 past the vault activation height (workspace docs/plans/kogany/research/pruning-assessment.md
+        # PR-2): the files below H_V - 288 deleted, every block from there kept, the vault and YED replays and
+        # -reindex-yellowback with only those blocks on disk, the start-up data check refusing a removed file.
+        # About 1.8 GB of disk and 15-30 minutes, so nightly only.
+        if: ${{ !cancelled() }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup vault_prune_floor
       - name: lightwalletd against the devnet (lightwalletd plan §6.3, Phase L2)
         # The light-client server's regtest suite: this fork's ycashd under a five-node devnet, the
         # lightwalletd fork (LWD_COMMIT) and the lightwalletd-legacy baseline both served from node 0, then
