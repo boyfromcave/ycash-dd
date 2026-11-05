@@ -458,8 +458,8 @@ const size_t MAX_SAPLING_SPENDS = 20;
 /** A funding source or collateral destination given as an address string (§4.6). */
 struct AddressChoice
 {
-    enum Kind { NONE, TRANSPARENT, SAPLING } kind;
-    CKeyID keyId;                                   //!< TRANSPARENT
+    enum Kind { NONE, TRANSPARENT_ADDR, SAPLING } kind;
+    CKeyID keyId;                                   //!< TRANSPARENT_ADDR
     libzcash::SaplingPaymentAddress sapling;        //!< SAPLING
     std::string text;
     AddressChoice() : kind(NONE) {}
@@ -474,7 +474,7 @@ AddressChoice ParseAddressChoice(const std::string& s, const char* what)
     KeyIO keyIO(::Params());
     CTxDestination dest = keyIO.DecodeDestination(s);
     if (const CKeyID* id = std::get_if<CKeyID>(&dest)) {
-        c.kind = AddressChoice::TRANSPARENT;
+        c.kind = AddressChoice::TRANSPARENT_ADDR;
         c.keyId = *id;
         return c;
     }
@@ -922,7 +922,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
                                   - (payload && shape.changeCents > 0 ? TOKEN_VALUE : 0);
         // the owner's output must not be dust either (review): a Sapling note has no dust threshold, a transparent one does
         const CAmount dust = dest.kind == AddressChoice::SAPLING ? 0
-                             : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT ? dest.keyId : CKeyID())).GetDustThreshold(::minRelayTxFee);
+                             : CTxOut(0, GetScriptForDestination(dest.kind == AddressChoice::TRANSPARENT_ADDR ? dest.keyId : CKeyID())).GetDustThreshold(::minRelayTxFee);
         // audit 04/N-1: the clamp's floor keeps the 6.20.0 ZIP-317 conventional fee, as the 6.20.0 small-vault path does
         const std::optional<uint8_t> ownerScheme(owner.scheme);
         shape.networkFee = ClampOwnerNetworkFee(shape.networkFee, spendable, dust,
@@ -981,7 +981,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
         return out;
     }
 
-    if (dest.kind == AddressChoice::TRANSPARENT) {
+    if (dest.kind == AddressChoice::TRANSPARENT_ADDR) {
         shape.collateralScript = GetScriptForDestination(dest.keyId);
         out.collateralTo = dest.text;
     } else {
@@ -1420,12 +1420,12 @@ BuiltTx BuildCarrier(YellowbackWallet& yw, const std::vector<unsigned char>& bun
     mtx.vout.push_back(carrierOut);
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
-    if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
+    if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
     const CAmount selected = ctx.SelectYec(needed, mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text);
     const CAmount change = selected - needed;
     if (change > 0) {
         // An s1... `from` keeps its change: the main transaction is funded "from this address" too.
-        if (source.kind == AddressChoice::TRANSPARENT) {
+        if (source.kind == AddressChoice::TRANSPARENT_ADDR) {
             mtx.vout.push_back(CTxOut(change, onlyScript));
         } else {
             CPubKey changeKey;
@@ -1532,7 +1532,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     mtx.vout = vout;
     std::vector<std::pair<CScript, CAmount>> prevs;
     CScript onlyScript;
-    if (source.kind == AddressChoice::TRANSPARENT) onlyScript = GetScriptForDestination(source.keyId);
+    if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
     const CAmount fee0 = follow.fee;
     const CAmount selected = ctx.SelectYec(std::max<CAmount>(needed, 0), mtx, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text, &follow);
     const CAmount change = selected - needed - (follow.fee - fee0);
@@ -1809,7 +1809,7 @@ BuiltTx BuildWithdrawBond(YellowbackWallet& yw, uint16_t seq, const std::string&
         return out;
     }
     CScript destScript;
-    if (dest.kind == AddressChoice::TRANSPARENT) {
+    if (dest.kind == AddressChoice::TRANSPARENT_ADDR) {
         destScript = GetScriptForDestination(dest.keyId);
         out.collateralTo = dest.text;
     } else {
