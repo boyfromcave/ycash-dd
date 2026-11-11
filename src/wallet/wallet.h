@@ -1087,12 +1087,11 @@ private:
     void AddToSproutSpends(const uint256& nullifier, const uint256& wtxid);
     void AddToSaplingSpends(const uint256& nullifier, const uint256& wtxid);
     void AddToSpends(const uint256& wtxid);
-#ifdef YCASH_WR
+    // Built in every configuration (not only YCASH_WR): EraseUnbroadcastTx uses them too.
     void RemoveFromTransparentSpends(const uint256& wtxid);
     void RemoveFromSproutSpends(const uint256& wtxid);
     void RemoveFromSaplingSpends(const uint256& wtxid);
     void RemoveFromSpends(const uint256& wtxid);
-#endif // YCASH_WR
 
 public:
     /*
@@ -1436,6 +1435,15 @@ public:
     void TopUpPQKeys(std::optional<uint8_t> scheme = std::nullopt);
     void MarkPQKeyUsed(const CPQKeyID& id);
     void NotePQKeysUsed(const CTransaction& tx);
+    /**
+     * Beta2 (review m7): file, once at load, the post-quantum keys of this wallet paid by a TX_PQPKH output of a wallet
+     * transaction that have no address-book entry (purpose "receive"; wallets made before NotePQKeysUsed filed them).
+     * Runs NotePQKeysUsed over every wallet transaction in wallet order; idempotent. cs_wallet held.
+     */
+    void FilePaidPQKeys();
+    //! Beta2 (review m8): keys of this wallet seen as the owner of a vault or intent, or the client of a channel, in a
+    //! wallet transaction (NotePQKeysUsed, FilePaidPQKeys): never filed in the address book on a TX_PQPKH payment.
+    std::set<CPQKeyID> pqOwnerKeysSeen;
     uint32_t PQIssued(uint8_t scheme) const;
     //! True when key was derived from this wallet's HD seed at its stored index (DerivePQSeed).
     bool IsOwnPQKey(const CPQKey& key) const;
@@ -1572,6 +1580,14 @@ public:
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock, const int nHeight);
     bool AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pblock, const int nHeight, bool fUpdate);
     void EraseFromWallet(const uint256 &hash);
+    /**
+     * Erase a wallet transaction that was recorded by CommitTransaction but never reached the mempool or a block
+     * (Yellowback: the refused post-quantum send, YellowbackWallet::RemoveOrphan), together with every index that
+     * names it, so that no later lookup recreates it as an empty entry (review H-1). The caller has established
+     * that the transaction is neither in the mempool nor in a block. Returns false, changing nothing, only when
+     * the wallet file record could not be erased. Requires cs_wallet.
+     */
+    bool EraseUnbroadcastTx(const uint256& txid);
     void WitnessNoteCommitment(
          std::vector<uint256> commitments,
          std::vector<std::optional<SproutWitness>>& witnesses,

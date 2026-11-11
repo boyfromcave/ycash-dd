@@ -1,4 +1,5 @@
 // Copyright (c) 2017 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -19,6 +20,7 @@
 #include "rpc/protocol.h"
 #include "rpc/server.h"
 #include "script/interpreter.h"
+#include "script/sign.h"
 #include "timedata.h"
 #include "transaction_builder.h"
 #include "util.h"
@@ -289,12 +291,21 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
     if (isUsingBuilder_) {
         builder_.SetFee(minersFee);
 
-
+        // A post-quantum (TX_PQPKH) input is added unsigned and signed after Build() under the vault flags
+        // (beta2 D-6; SignPQBuilderInputs); every other transparent input is signed by Build().
+        std::vector<PQBuilderInput> pqInputs;
+        size_t nIn = 0;
         for (const MergeToAddressInputUTXO& t : utxoInputs_) {
             COutPoint outPoint = std::get<0>(t);
             CAmount amount = std::get<1>(t);
             CScript scriptPubKey = std::get<2>(t);
-            builder_.AddTransparentInput(outPoint, scriptPubKey, amount);
+            if (IsPQInputScript(scriptPubKey)) {
+                pqInputs.push_back(PQBuilderInput{nIn, outPoint, scriptPubKey, amount});
+                builder_.AddTransparentInputUnsigned(outPoint, amount);
+            } else {
+                builder_.AddTransparentInput(outPoint, scriptPubKey, amount);
+            }
+            nIn++;
         }
 
         std::optional<uint256> ovk;
@@ -353,10 +364,21 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
             builder_.AddSaplingOutput(ovk.value(), *saplingPaymentAddress, sendAmount, hexMemo);
         }
 
-        // Build the transaction
+        // Build the transaction (Sapling proofs are made here, with no lock held)
         tx_ = builder_.Build().GetTxOrThrow();
 
-        UniValue sendResult = SendTransaction(tx_, std::nullopt, testmode);
+        if (!pqInputs.empty()) {
+            CMutableTransaction mtx(tx_);
+            SignPQBuilderInputs(mtx, pqInputs, builder_.GetHeight());
+            tx_ = CTransaction(mtx);
+            const CAmount needed = PQBuilderFee(minersFee, tx_);
+            if (needed > minersFee) {
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Post-quantum fee estimate %s fell short of the %s the signed transaction needs", FormatMoney(minersFee), FormatMoney(needed)));
+            }
+        }
+
+        // A post-quantum merge is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+        UniValue sendResult = pqInputs.empty() ? SendTransaction(tx_, std::nullopt, testmode) : SendPQTransaction(tx_, std::nullopt, testmode);
         set_result(sendResult);
 
         return true;

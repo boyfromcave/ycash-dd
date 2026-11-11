@@ -148,8 +148,8 @@ void YellowbackWallet::RemoveOrphan(const uint256& txid)
     LOCK(wallet->cs_wallet);
     if (!wallet->mapWallet.count(txid)) return;
     LogPrint("yellowback", "removing %s: recorded by CommitTransaction, refused by the mempool\n", txid.ToString());
-    wallet->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
-    wallet->mapWallet.erase(txid);   // and mapWallet when not file-backed; mapTxSpends entries are ignored once it is gone
+    // Review H-1: the shared erase, which drops the spend indexes too (a stale one recreated an empty entry later).
+    if (!wallet->EraseUnbroadcastTx(txid)) LogPrintf("yellowback: could not erase %s from the wallet file; kept\n", txid.ToString());
 }
 
 void YellowbackWallet::LockSpentYec(const CTransaction& tx)

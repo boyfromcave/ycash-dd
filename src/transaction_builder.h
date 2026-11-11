@@ -142,6 +142,10 @@ public:
 
     void SetExpiryHeight(uint32_t nExpiryHeight);
 
+    // Ycash (beta2 D-2): the height the builder signs for, so a caller signing inputs
+    // after Build() uses the same branch ID and script flags.
+    int GetHeight() const { return nHeight; }
+
     void SetFee(CAmount fee);
 
     // Throws if the anchor does not match the anchor used by
