@@ -715,3 +715,34 @@ def tarfile_extractall(tgz, path):
         if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
             raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
     tgz.extractall(path=path, members=members)
+
+
+# Line helpers for wallet_address_matrix.py, which is byte-identical on both C++ node lines (beta2 D-2, D-6). ycash6's
+# util.py defines the same names for 6.x: z_sendmany_opid passes the privacy policy AllowFullyTransparent and a fee of
+# None (the wallet's ZIP-317 fee) unless one is given, z_mergetoaddress_call passes NoPrivacy, a lone Sapling output is
+# padded to two (2 actions), the coinbase-only refusal reads "coinbase outputs will not be selected", z_mergetoaddress
+# takes notes only at nAnchorConfirmations (3) deep, and PRIVACY_POLICY is True.
+PRIVACY_POLICY = False                 # v4.5.0: z_sendmany and z_mergetoaddress take no privacy policy (D-5 is 6.x only)
+LONE_SAPLING_OUTPUT_ACTIONS = 1        # ZIP-317 logical actions of one Sapling output with no Sapling spend
+Z_MERGE_NOTE_DEPTH = 1                 # the depth from which z_mergetoaddress merges a Sapling note
+COINBASE_ONLY_TRANSPARENT_REFUSAL = 'Could not find any non-coinbase UTXOs to spend'
+
+
+def z_sendmany_opid(node, fromaddr, amounts, minconf=1, fee=None):
+    """z_sendmany with the documented arguments; returns the operation id. ``amounts`` is [(address, amount)]. A fee
+    of None leaves the wallet's default (v4.5.0: DEFAULT_FEE, raised to what a post-quantum input needs)."""
+    args = [fromaddr, [{'address': a, 'amount': v} for a, v in amounts], minconf]
+    if fee is not None:
+        args.append(fee)
+    return node.z_sendmany(*args)
+
+
+def z_mergetoaddress_call(node, fromaddrs, toaddr, fee=None, limit=None):
+    """z_mergetoaddress with the documented arguments (v4.5.0: no privacy policy); returns the RPC's result."""
+    assert fee is not None or limit is None, 'v4.5.0 takes the limit only after an explicit fee'
+    args = [fromaddrs, toaddr]
+    if fee is not None:
+        args.append(fee)
+    if limit is not None:
+        args.append(limit)
+    return node.z_mergetoaddress(*args)

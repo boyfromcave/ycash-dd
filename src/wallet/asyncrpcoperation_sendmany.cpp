@@ -937,6 +937,14 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
     if (coins.empty()) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
     }
+    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the send when any
+    // candidate coin is one the Yellowback index knows as a token or vault, or the wallet layer as a carrier.
+    {
+        std::vector<COutPoint> candidates;
+        for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
+        const std::string refusal = YellowbackInputRefusal(candidates);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
+    }
     // Largest first: each post-quantum input costs its full signature in size and fee.
     std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
         return i.Value() > j.Value();

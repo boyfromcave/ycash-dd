@@ -202,6 +202,19 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
   `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
   Falcon keeps its `… can be paid only once …` strings.
+- **YED is never spent as plain YEC by these paths.** The Yellowback wallet layer locks every token output
+  (`listlockunspent`; `lockunspent` will not unlock one, and `lockunspent true` re-applies the locks), so a holder
+  key's token never reaches the coin selection: a send or merge from a key that holds only tokens fails as from an
+  empty address (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds
+  to merge.`). As a second check, a post-quantum source's candidate coins (`z_sendmany`) and every input of a merge
+  with a PQ coin (`z_mergetoaddress`) are looked up in the Yellowback index, the check the YED builders make: a
+  token or vault outpoint, or a carrier of this wallet, is refused (RPC_WALLET_ERROR)
+  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…]`, and with `-yellowback` and an
+  unhealthy index every such spend is refused, since the locks are then not reconciled:
+  `refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks
+  cannot be trusted; restart with -reindex-yellowback`. This holds even after `yed_unlockcoin`: a deliberate burn
+  goes through `sendrawtransaction … allowyedburn`. `sendtoaddress`/`sendmany` and an ECC-source `z_sendmany`
+  rely on the coin lock alone, as before.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap

@@ -5206,6 +5206,12 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         if (!sproutNoteInputs.empty() || isToSproutZaddr) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
         }
+        // Defence in depth (the coin locks already keep every YED output out of the selection): no input of a merge
+        // with a post-quantum coin may be a Yellowback token, vault or carrier.
+        std::vector<COutPoint> ins;
+        for (const MergeToAddressInputUTXO& t : utxoInputs) ins.push_back(std::get<0>(t));
+        const std::string refusal = YellowbackInputRefusal(ins);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
         std::vector<std::pair<CScript, CAmount>> shapeIns;
         std::vector<CScript> prevScripts;
         for (const MergeToAddressInputUTXO& t : utxoInputs) {
