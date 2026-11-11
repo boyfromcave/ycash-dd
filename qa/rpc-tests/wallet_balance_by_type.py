@@ -24,6 +24,11 @@ unconfirmed, confirmed, the spends' block disconnected (reorg) and reconnected, 
 No address text or prefix is hard-coded: addresses come from the node and their scheme from validateaddress.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_balance_by_type.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
+
+One file on both C++ lines (ycash-dd: BITCOIND=, ycash6: ZCASHD=). What differs between them is behind test_framework/util.py
+helpers each line defines: SEED_RESTORE_OPTION (-hdseedfile / -mnemonicfile), z_sendmany_wait (the fee and privacy
+policy each line's z_sendmany takes) and assert_listaddresses_pq (6.x's listaddresses lists the PQ addresses with their
+scheme; ycash-dd has no listaddresses and its helper returns).
 """
 
 import os
@@ -32,8 +37,10 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    SEED_RESTORE_OPTION,
     VAULT_BRANCH_ID,
     assert_equal,
+    assert_listaddresses_pq,
     bitcoind_processes,
     connect_nodes_bi,
     nuparams,
@@ -41,14 +48,16 @@ from test_framework.util import (
     start_nodes,
     stop_node,
     sync_blocks,
-    wait_and_assert_operationid_status,
+    z_sendmany_wait,
 )
+from test_framework.yellowback_util import activate_yed_late, mint_to_fresh_holder
 
 ACTIVATION = 210
 SLH, FN = 1, 2
 NAMES = {SLH: 'SLH-DSA-SHA2-128s', FN: 'FN-DSA-512'}
-ZFEE = Decimal('0.0001')
 PASSPHRASE = 'balance-by-type'
+FOREIGN_TADDR = 'From address does not belong to this node, transparent or post-quantum key or watch-only script not found.'
+FOREIGN_ZADDR = 'From address does not belong to this node, spending key or viewing key not found.'
 
 
 def D(x):
@@ -77,7 +86,7 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             # a wallet of its own: the cached chain's coinbase of node 0 stays in wallet.dat
             a += ['-wallet=%s' % wallet, '-experimentalfeatures', '-developerencryptwallet',
                   '-exportdir=%s' % os.path.join(self.options.tmpdir, 'export0')]
-        return a
+        return a + getattr(self, 'yed_args', {}).get(i, [])
 
     def restart0(self, extra=(), wallet='bytype.dat'):
         stop_node(self.nodes[0], 0)
@@ -142,7 +151,7 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             assert_equal(v['z0_pq_%d' % s], v['balance_pq_%d' % s] + v['unconfirmed_pq_%d' % s] - locked[s])
         for name, addr in self.addrs.items():
             for minconf in (1, 0):
-                v['%s@%d' % (name, minconf)] = D(n0.z_getbalance(addr, minconf))
+                v['%s@%d' % (name, minconf)] = self.zbal(addr, minconf)
         # per address adds up to the totals
         for minconf in (1, 0):
             k = 'z%d_' % minconf
@@ -164,6 +173,17 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             assert 'pqscheme' not in r and 'pqschemename' not in r
             assert 'pqschemename' not in n0.validateaddress(self.addrs['ecc'])
         assert_equal(n0.z_listaddresses(), [self.addrs['z']])
+        assert_listaddresses_pq(n0, {self.addrs[name]: ('mnemonic_seed', scheme, NAMES[scheme]) for name, scheme in (('fn', FN), ('slh', SLH))})
+
+    def zbal(self, addr, minconf=1):
+        """z_getbalance of an address; a transparent address this wallet does not hold (no key, no watch-only
+        script; e.g. the ECC key after a seed-only restore) is refused (beta2, both lines) and counts as 0 here."""
+        n0 = self.nodes[0]
+        va = n0.validateaddress(addr)
+        if va['isvalid'] and not va['ismine'] and not va['iswatchonly']:
+            assert_raises_rpc(FOREIGN_TADDR, n0.z_getbalance, addr, minconf)
+            return Decimal(0)
+        return D(n0.z_getbalance(addr, minconf))
 
     # ---- the test ----------------------------------------------------------------------------------------------
 
@@ -184,7 +204,7 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         t1 = n1.getnewaddress()
         n1.sendtoaddress(t1, 10)
         self.mine(1)
-        wait_and_assert_operationid_status(n1, n1.z_sendmany(t1, [{'address': self.addrs['z'], 'amount': 1}], 1, ZFEE))
+        z_sendmany_wait(n1, t1, [{'address': self.addrs['z'], 'amount': 1}])
         n1.sendtoaddress(self.addrs['ecc'], 3)
         n1.sendtoaddress(self.addrs['fn'], 2)
         n1.sendtoaddress(self.addrs['slh'], Decimal('1.5'))
@@ -226,14 +246,15 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal(n0.listunspent(0, 9999999, [self.addrs['slh']]), [])    # the SLH coin is spent
         change_s = Decimal('1.5') - 1 - fee_s
         # ECC: z_sendmany spends every coin of the ECC address; its change goes to a new ECC key of the wallet
-        tx_e = wait_and_assert_operationid_status(n0, n0.z_sendmany(self.addrs['ecc'], [{'address': out, 'amount': 1}], 1, ZFEE))
+        tx_e = z_sendmany_wait(n0, self.addrs['ecc'], [{'address': out, 'amount': 1}])
+        fee_e = -D(n0.gettransaction(tx_e)['fee'])
         self.sync_all()
         v = self.view()
         assert_equal(v['unconfirmed'], 0)                               # nothing from others
-        assert_equal(v['balance'], Decimal('6.5') - 2 - ZFEE - fee_s)
+        assert_equal(v['balance'], Decimal('6.5') - 2 - fee_e - fee_s)
         assert_equal(v['balance_pq'], 2)                                # the FN coin; the SLH one is spent
         assert_equal((v['balance_pq_1'], v['balance_pq_2']), (0, 2))
-        assert_equal(v['balance_ecc'], 3 - 1 - ZFEE + change_s)         # own unconfirmed change counted
+        assert_equal(v['balance_ecc'], 3 - 1 - fee_e + change_s)         # own unconfirmed change counted
         assert_equal(v['z1_transparent_ecc'], 0)                        # depth only: the change is unconfirmed,
         assert_equal(v['z1_transparent_pq'], 2)                         # the spent coins are gone
         assert_equal(v['z0_transparent'], v['balance'])
@@ -271,10 +292,13 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal(self.view(), spent_confirmed)
         self.check_listing()
 
-        print('z_getbalance of addresses this wallet does not hold: 0 for a transparent one (ECC or PQ), refused shielded')
-        assert_equal(D(n0.z_getbalance(n1.getnewaddress())), 0)
-        assert_equal(D(n0.z_getbalance(n1.getnewaddress('', 'pq'))), 0)
-        assert_raises_rpc('From address does not belong to this node', n0.z_getbalance, n1.z_getnewaddress('sapling'))
+        print('z_getbalance of addresses this wallet does not hold: refused, transparent (ECC, PQ of each scheme) and shielded')
+        for foreign in (n1.getnewaddress(), n1.getnewaddress('', 'pq'), n1.getnewaddress('', 'pqslh')):
+            for minconf in (1, 0):
+                assert_raises_rpc(FOREIGN_TADDR, n0.z_getbalance, foreign, minconf)
+        assert_raises_rpc(FOREIGN_ZADDR, n0.z_getbalance, n1.z_getnewaddress('sapling'))
+        assert_raises_rpc('Invalid from address, should be a taddr or zaddr.', n0.z_getbalance, 'not-an-address')
+        # its own addresses answer (ECC, both PQ schemes, Sapling): self.view() reads each of them at minconf 1 and 0
 
         print('a coin locked with lockunspent: getwalletinfo still counts it, the by-depth calls leave it out')
         fn_coin = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(1, 9999999, [self.addrs['fn']])]
@@ -306,6 +330,7 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         w = {r['address']: r for r in n0.listreceivedbyaddress(0, True, True)}
         assert_equal((w[w_fn]['involvesWatchonly'], w[w_fn]['pqscheme'], w[w_fn]['pqschemename']), (True, FN, NAMES[FN]))
         assert 'pqscheme' not in w[w_e]
+        assert_listaddresses_pq(n0, {w_fn: ('imported_watchonly', FN, NAMES[FN])}, exact=('imported_watchonly',))
 
         print('immature coinbase: immature_balance only, then balance_ecc and transparent_ecc once mature')
         before = self.view()
@@ -326,15 +351,19 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
 
         print('restore from the seed alone: the PQ coins, their addresses with the scheme, the first Sapling address')
         export = n0.z_exportwallet('bytypeseed')
-        self.restart0(['-hdseedfile=%s' % export], wallet='restored.dat')
+        self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored.dat')
         n0 = self.nodes[0]
         r = self.view()
         assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], 0, settled['balance_pq_2']))
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
                      (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
-        # transparent ECC keys are keypool keys, not derived from the seed: only a wallet.dat backup restores them
-        assert_equal((r['balance_ecc'], n0.validateaddress(self.addrs['ecc'])['ismine']), (0, False))
-        # the restored PQ keys are not in the address book; listreceivedbyaddress lists them all the same
+        # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
+        # it. Whatever ECC the restored wallet found is its own spendable non-PQ coins: none on ycash-dd (random
+        # keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds some of them (change).
+        assert not n0.validateaddress(self.addrs['ecc'])['ismine']
+        assert_equal(r['balance_ecc'], sum((D(u['amount']) for u in n0.listunspent(1)
+                                            if u['spendable'] and 'pqscheme' not in n0.validateaddress(u['address'])), Decimal(0)))
+        # the restored PQ keys are filed by the rescan (beta2); listreceivedbyaddress lists them
         self.check_listing(ecc=False)
         self.restart0()
         n0 = self.nodes[0]
@@ -355,6 +384,80 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         n0.walletpassphrase(PASSPHRASE, 60)
         assert_equal(self.view(), spent_confirmed)
         n0.walletlock()
+
+        self.restored_classification()
+        self.yed_holder_keys()
+
+    def classification(self, addrs, txids):
+        """How node 0 classifies what reached ``addrs``: its listreceivedbyaddress entries (amount, scheme,
+        yed_holder), getreceivedbyaddress, and the listtransactions rows of ``txids`` that name them."""
+        n0 = self.nodes[0]
+        # entries with receipts only: an address never paid is not re-found by a seed restore (nothing names it)
+        rcv = sorted((r['address'], D(r['amount']), r.get('pqscheme'), r.get('yed_holder', False))
+                     for r in n0.listreceivedbyaddress(0, True) if r['address'] in addrs and D(r['amount']) > 0)
+        got = sorted((a, D(n0.getreceivedbyaddress(a, 0))) for a in addrs)
+        rows = sorted((t['txid'], t['category'], D(t['amount']), t['address'])
+                      for t in n0.listtransactions('*', 10000) if t['txid'] in txids and t.get('address') in addrs)
+        return rcv, got, rows
+
+    def restored_classification(self):
+        """A seed-only restore re-finds the PQ keys by rescan and files them (beta2): receipts at them are classified,
+        listed and counted as on the original wallet: an own send from a PQ coin to a new PQ address of the wallet
+        (a send and a receipt, not change) and another wallet's payment to one."""
+        n0, n1 = self.nodes
+        print('seed-only restore: receipts at restored PQ addresses are classified, listed and counted as on the original')
+        n0.walletpassphrase(PASSPHRASE, 3600)
+        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u['address'] != self.addrs['fn']]
+        assert n0.lockunspent(False, others)
+        p_own = n0.getnewaddress('', 'pqslh')
+        tx_own = n0.sendtoaddress(p_own, Decimal('0.5'))              # spends a coin of the FN-DSA address
+        assert n0.lockunspent(True, others)
+        p_in = n0.getnewaddress('', 'pq')
+        tx_in = n1.sendtoaddress(p_in, Decimal('0.25'))
+        self.mine(1)
+        addrs = {self.addrs['fn'], self.addrs['slh'], p_own, p_in}
+        before = self.classification(addrs, {tx_own, tx_in})
+        assert (tx_own, 'receive', Decimal('0.5'), p_own) in before[2], before
+        assert (tx_in, 'receive', Decimal('0.25'), p_in) in before[2], before
+        export = n0.z_exportwallet('bytypeseed2')
+        self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored2.dat')
+        assert_equal(self.classification(addrs, {tx_own, tx_in}), before)
+        self.restart0()
+
+    def yed_holder_keys(self):
+        """YED holder keys (beta2): a fresh Falcon holder key is filed when drawn and marked "yed_holder" in
+        listreceivedbyaddress and validateaddress (derived from the Yellowback index), a plain PQ address is not;
+        the token dust counts in getwalletinfo (balance_pq), not in the by-depth calls; a seed-only restore marks
+        the restored holder key the same way and locks its token."""
+        print('YED holder keys: filed, marked yed_holder, token dust in balance_pq only; the same after a seed restore')
+        self.nodes[0].walletpassphrase(PASSPHRASE, 3600)                  # set_create funds from node 0
+        activate_yed_late(self, [1], ((0, 1),))
+        n0 = self.nodes[0]
+        n0.walletpassphrase(PASSPHRASE, 3600)
+        self.nodes[1].sendtoaddress(n0.getnewaddress(), 20)              # the collateral (about 6 YEC at $50)
+        self.mine(1)
+        mint, op, key = mint_to_fresh_holder(self.nodes, 0, 1)
+        plain = self.addrs['fn']
+        va = n0.validateaddress(key)
+        assert_equal((va['ismine'], va['pqscheme'], va.get('yed_holder')), (True, FN, True))
+        assert 'yed_holder' not in n0.validateaddress(plain)
+        rcv = {r['address']: r for r in n0.listreceivedbyaddress(0, True)}
+        assert_equal((rcv[key]['pqscheme'], rcv[key].get('yed_holder')), (FN, True))
+        assert 'yed_holder' not in rcv[plain]
+        # filed when drawn: the mint's token output is a receipt on the minting wallet, not change
+        assert [t for t in n0.listtransactions('*', 10000) if t['txid'] == mint and t['category'] == 'receive'
+                and t['address'] == key], 'the holder key is not filed'
+        assert_equal((self.zbal(key, 1), self.zbal(key, 0)), (0, 0))   # locked: not in the by-depth calls
+        self.view(locked_in={FN: Decimal('0.0001')})                       # but in getwalletinfo (balance_pq)
+        addrs = {plain, key}
+        before = self.classification(addrs, set())
+        export = n0.z_exportwallet('bytypeseed3')
+        self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored3.dat')
+        n0 = self.nodes[0]
+        assert_equal(self.classification(addrs, set()), before)
+        assert_equal(n0.validateaddress(key).get('yed_holder'), True)
+        assert_equal(n0.yed_getbalance()['confirmedCents'], 10000)
+        assert {'txid': op[0], 'vout': op[1]} in n0.listlockunspent()
 
 
 if __name__ == '__main__':

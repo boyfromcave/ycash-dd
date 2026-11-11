@@ -193,15 +193,29 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   - `getwalletinfo` adds `balance_ecc`, `balance_pq`, `unconfirmed_balance_ecc`, `unconfirmed_balance_pq` and
     `pq_by_scheme: [{pqscheme, pqschemename, balance_pq, unconfirmed_balance_pq}]` (numbers, as `balance` is).
   - `z_getbalance <address>` takes a post-quantum address of either scheme (it always did on this line; the
-    6.x line refused one, finding L-3) and returns what the address holds (watch-only coins included). A
-    transparent address the wallet does not hold, ECC or post-quantum, answers `0`, as it always did for ECC; a
-    Sapling address it does not hold is refused with `From address does not belong to this node, spending key or
-    viewing key not found.`; an unparseable address with `Invalid from address, should be a taddr or zaddr.`
+    6.x line refused one, finding L-3) and returns what the address holds (watch-only coins included).
+    **Changed from v4.5.0** (the Yellowback lead architect, 2026-11-11; both node lines): a transparent address the
+    wallet does not hold, ECC or post-quantum (no key and no watch-only script), is refused
+    (`RPC_INVALID_ADDRESS_OR_KEY`, `From address does not belong to this node, transparent or post-quantum key or
+    watch-only script not found.`); v4.5.0 answered `0` for a foreign ECC address. A watch-only transparent address
+    still answers. A Sapling address it does not hold is refused as before with `From address does not belong to
+    this node, spending key or viewing key not found.`; an unparseable address with `Invalid from address, should
+    be a taddr or zaddr.`
+  - YED token dust: a YED holder key's token outputs (`TOKEN_VALUE`, 10,000 zat each) are locked by the
+    Yellowback wallet layer. Like any locked coin they count in `getwalletinfo` (`balance_pq` for a Falcon or
+    SLH-DSA holder key, as `balance`/`balance_ecc` always counted a P2PKH holder key's) and not in the by-depth
+    calls (`transparent_pq` of `z_gettotalbalance`, `z_getbalance` of the key).
   - Listings: `listreceivedbyaddress 0 true` lists every transparent address of the address book, ECC and
     post-quantum (`getnewaddress "" "pq"`/`"pqslh"`, and the plain-YEC form of a `yed_getnewaddress "pq"` holder);
     a post-quantum entry adds `pqscheme` and `pqschemename`. It also lists, under account `""`, every post-quantum
-    key of the wallet that received coins without an address-book entry: a wallet restored from its seed
-    (`-hdseedfile`) finds its PQ keys by rescan but does not file them. (ECC keys are keypool keys, not derived from
+    key of the wallet that received coins without an address-book entry. Since beta2 the wallet files such a key
+    itself (purpose `receive`, label `""`) when it first sees a `TX_PQPKH` output paying it, so a wallet restored
+    from its seed (`-hdseedfile`), whose rescan re-finds its PQ keys, classifies, lists and counts their receipts as
+    the original wallet does (a receipt, never change); vault, intent and channel owner keys stay out of the
+    address book. A fresh YED holder key (`yed_mint`, YED change from the Falcon height) is filed when it is drawn,
+    under the purpose a P2PKH holder key gets (`yellowback-vault`, `yellowback-change`). With `-yellowback`, an
+    entry (and `validateaddress` of an address of this wallet) carries `"yed_holder": true` when the Yellowback
+    index holds a YED token of this wallet at that address, ECC or post-quantum; the field is absent otherwise. (ECC keys are keypool keys, not derived from
     the seed: a seed-only restore does not recover ECC coins; the first Sapling address and the PQ keys it does.) `z_listaddresses` lists the Sapling addresses.
     `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. This line has no
     `listaddresses` (the 6.x line's call, which gains the same `pqscheme`/`pqschemename` per PQ address there).

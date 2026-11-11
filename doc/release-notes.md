@@ -21,6 +21,14 @@ Plain-YEC post-quantum addresses (`sq…`)
   are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
   out).
 - `z_sendmany` pays an `sq…` recipient (as a transparent output); no `z_*` RPC spends from one.
+- **`z_getbalance` refuses a transparent address the wallet does not hold** (ECC or post-quantum: no key and no
+  watch-only script) with `From address does not belong to this node, transparent or post-quantum key or watch-only
+  script not found.` (`RPC_INVALID_ADDRESS_OR_KEY`). **This changes inherited v4.5.0 behaviour**: it answered `0`
+  for such an address. A watch-only address still answers; a foreign Sapling address was already refused.
+- **Post-quantum keys are filed in the address book when first paid**: a key of the wallet that receives a
+  `TX_PQPKH` output without an address-book entry is filed (purpose `receive`), so a seed-only restore treats its
+  receipts as receipts, not change; a fresh YED holder key is filed when drawn. With `-yellowback`,
+  `listreceivedbyaddress` and `validateaddress` mark a YED holder key with `"yed_holder": true`.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap
