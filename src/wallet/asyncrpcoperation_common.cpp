@@ -86,13 +86,35 @@ UniValue SendPQTransaction(CTransaction& tx, std::optional<std::reference_wrappe
         // CommitTransaction records the transaction before the mempool judges it; a refused one must not stay at
         // depth -1, where a restart's ReacceptWalletTransactions would submit it (by its own fee rule) after the
         // caller was told it failed and may have sent again.
-        if (!known && pwalletMain->mapWallet.count(txid)) {
-            LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
-            pwalletMain->EraseFromWallet(txid);
-            pwalletMain->mapWallet.erase(txid);
+        if (!known) {
+            const std::string kept = EraseRefusedPQSend(*pwalletMain, txid);
+            if (!kept.empty()) throw JSONRPCError(RPC_WALLET_ERROR, kept);
         }
         throw;
     }
+}
+
+std::string EraseRefusedPQSend(CWallet& wallet, const uint256& txid)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    if (!wallet.mapWallet.count(txid)) return "";
+    if (mempool.exists(txid)) {
+        // Accepted after all (relay follows acceptance): never erase a transaction that may already be relayed.
+        LogPrintf("SendPQTransaction: %s is in the mempool although its commit reported an error; kept\n", txid.ToString());
+        return strprintf("Transaction %s is in the mempool although its commit reported an error; it is kept in the "
+                         "wallet and will be relayed: do not send it again", txid.GetHex());
+    }
+    LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
+    if (wallet.fFileBacked && !CWalletDB(wallet.strWalletFile).EraseTx(txid)) {
+        // Kept in mapWallet too, so the wallet shows what its file holds (and a restart would submit).
+        LogPrintf("ERROR: SendPQTransaction: could not erase %s from the wallet file\n", txid.ToString());
+        return strprintf("The mempool refused transaction %s, but it could not be erased from the wallet file: the "
+                         "wallet still holds this unbroadcast transaction and may submit it at the next start; check "
+                         "it with gettransaction before you send again", txid.GetHex());
+    }
+    wallet.mapWallet.erase(txid);   // mapTxSpends entries are ignored once it is gone (IsSpent looks it up)
+    return "";
 }
 
 std::pair<CTransaction, UniValue> SignSendRawTransaction(UniValue obj, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode) {

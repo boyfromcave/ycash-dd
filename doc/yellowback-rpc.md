@@ -209,13 +209,14 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   (`Insufficient transparent funds, no UTXOs found for taddr from address.`, `Could not find any funds to merge.`).
   As a second check, for a lock removed on purpose (`yed_unlockcoin`), every path that selects coins itself --
   `z_sendmany` (a post-quantum or ECC source, `ANY_TADDR`), `z_mergetoaddress`, `sendtoaddress`/`sendmany`
-  (`CreateTransaction`) and `vault_lock "from"` -- asks the Yellowback index, the check the YED builders make: a token
+  (`CreateTransaction`), `vault_lock "from"` and the vault RPCs' own fee funding (the wallet P2PKH coins `vault_lock`,
+  `vault_buildunlock`, the set acts and a re-funded spend add) -- asks the Yellowback index, the check the YED builders make: a token
   or vault outpoint, an unconfirmed output its transaction's Yellowback payload assigns YED (a `MINT`'s vault and
   token outputs, a `TRANSFER`'s or `REDEEM`'s assignments; what the wallet layer pre-locks), or a carrier of this
-  wallet, is a Yellowback outpoint. `z_sendmany` and `z_mergetoaddress` leave such outpoints out and spend the other
-  coins; they are refused (RPC_WALLET_ERROR) only when the send cannot be made without them, and
+  wallet, is a Yellowback outpoint. `z_sendmany`, `z_mergetoaddress` and the vault fee funding leave such outpoints
+  out and spend the other coins; they are refused (RPC_WALLET_ERROR) only when the send cannot be made without them, and
   `sendtoaddress`/`sendmany` are refused when the selection picked one:
-  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins or lockunspent true)`.
+  `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
   A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
   (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked.
   While the Yellowback index is unhealthy, every plain-YEC send or merge from a post-quantum address (and `vault_lock
@@ -226,13 +227,20 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   F-1's locks on the plain inputs of a committed Yellowback transaction (until it is mined) are coin locks only:
   spending such an input would conflict with that transaction, not burn YED.
 - **Post-quantum fee cap (audit H1).** `z_sendmany` from a post-quantum address and a `z_mergetoaddress` that merges a
-  post-quantum coin refuse an explicit fee above `PQMaxTxFee()` (`-maxtxfee`, or $2 at the attested price, at most
-  `-yellowbackmaxtxfee`) before building (RPC_INVALID_PARAMETER) `Fee <fee> is above the <cap> cap on a post-quantum
-  spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)`; at the commit the fee is checked
-  again under the node's lock, since a price change in a block found while the inputs were signed can lower the
-  cap (RPC_WALLET_ERROR) `The post-quantum fee cap fell to <cap> while this transaction was signed, below its fee
-  <fee>; nothing was sent, send it again`; and a post-quantum transaction the mempool refuses at the commit is
-  erased from the wallet again, so no restart broadcasts a send the caller was told failed.
+  post-quantum coin refuse a fee above `PQMaxTxFee()` (`-maxtxfee`, or $2 at the attested price, at most
+  `-yellowbackmaxtxfee`) before signing (RPC_INVALID_PARAMETER) `Fee <fee> is above the <cap> cap on a post-quantum
+  spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)`: an explicit fee before building, and
+  the fee the wallet computed (for instance a change below a high `-minrelaytxfee` dust threshold folded into the
+  fee) once the inputs are chosen; at the commit the fee is checked again under the node's lock, since a price
+  change in a block found while the inputs were signed can lower the cap (RPC_WALLET_ERROR) `The post-quantum fee
+  cap fell to <cap> while this transaction was signed, below its fee <fee>; nothing was sent, send it again`; and a
+  post-quantum transaction the mempool refuses at the commit is erased from the wallet again, so no restart
+  broadcasts a send the caller was told failed (the error is the stock `SendTransaction: CommitTransaction failed`).
+  If it cannot be erased from the wallet file, the send fails with (RPC_WALLET_ERROR) `The mempool refused
+  transaction <txid>, but it could not be erased from the wallet file: the wallet still holds this unbroadcast
+  transaction and may submit it at the next start; check it with gettransaction before you send again`; a
+  transaction the mempool holds is never erased (`Transaction <txid> is in the mempool although its commit reported
+  an error; it is kept in the wallet and will be relayed: do not send it again`).
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap

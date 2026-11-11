@@ -116,9 +116,10 @@ std::string DropYellowbackCoins(std::vector<COutput>& coins, bool strict);
 CAmount PQInputMarginalFee(uint8_t scheme);
 
 /**
- * Beta2 (audit H1): refuse an explicit fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee …
- * is above the … cap on a post-quantum spend"): the commit submits a PQ transaction without the absurd-fee check
- * only within that cap, so a larger fee would be built, signed and then refused at the commit.
+ * Beta2 (audit H1, review L-1): refuse a fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee
+ * … is above the … cap on a post-quantum spend"), an explicit one before building and a computed one before signing:
+ * the commit submits a PQ transaction without the absurd-fee check only within that cap, so a larger fee would be
+ * built, signed and then refused at the commit.
  */
 void EnsurePQFeeWithinCap(CAmount fee);
 
@@ -131,5 +132,14 @@ void EnsurePQFeeWithinCap(CAmount fee);
  * (ReacceptWalletTransactions, which judges the fee by another rule) broadcasts a send the caller was told failed.
  */
 UniValue SendPQTransaction(CTransaction& tx, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode);
+
+/**
+ * Beta2 (audit H1, review L-2): the erase SendPQTransaction makes when the commit of a transaction the wallet did not
+ * hold before fails. cs_main and wallet.cs_wallet held. Returns "" when `txid` is not in the wallet or was erased
+ * (wallet file and mapWallet); otherwise the error for the caller, naming the txid: the transaction is in the mempool
+ * (never erased: it may already be relayed), or the wallet file refused the erase (the wallet still holds the
+ * unbroadcast transaction, which a restart may submit).
+ */
+std::string EraseRefusedPQSend(CWallet& wallet, const uint256& txid);
 
 #endif // ZCASH_WALLET_ASYNCRPCOPERATION_COMMON_H

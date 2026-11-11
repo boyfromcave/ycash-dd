@@ -1023,6 +1023,9 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         }
         fee = needed;
     }
+    // Review L-1: the settled fee (a computed default, raised to the PQ rule or by change folded in as dust) is held
+    // to the commit's cap before anything is signed; SendPQTransaction re-checks it under the lock.
+    EnsurePQFeeWithinCap(fee_);
 
     for (size_t i = 0; i < t_inputs_.size(); i++) {
         const COutput& c = t_inputs_[i];

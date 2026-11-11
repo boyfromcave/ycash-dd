@@ -5247,6 +5247,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             }
             nFee = needed;
         }
+        EnsurePQFeeWithinCap(nFee);   // review L-1: the computed fee too, before anything is built or signed
     }
 
     if (mergedValue < nFee) {
