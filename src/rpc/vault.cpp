@@ -1745,10 +1745,13 @@ void CheckLockFrom(const yellowback::AddressChoice& from)
 
 /** Fund `mtx` (its outputs set, no inputs) from the coins of one transparent or post-quantum address of this wallet:
  *  confirmed, unlocked, unspent in the node's view (as EligibleCoins), largest first, never a coinbase output where
- *  coinbase must be shielded. Change goes back to the same address (D-4) when it is above dust (a PQ output's dust is
- *  priced at its real spend size, GetPQDustThreshold), else it joins the fee. The fee is VAULT_RPC_FEE for P2PKH coins;
- *  with PQ coins it is max(VAULT_RPC_FEE, the plain PQ rate x size) capped at PQMaxTxFee(), never below the ZIP-317
- *  conventional fee (as CWallet::CreateTransaction prices a PQ input), from the signed size. Signed; inputs locked. */
+ *  coinbase must be shielded, at most MAX_YEC_INPUTS coins and MAX_YEC_INPUT_BYTES of estimated inputs (the YED
+ *  builders' caps: the transaction stays under 100 kB and the sigop limit). Change goes back to the same address (D-4)
+ *  when it is above dust (a PQ output's dust priced at its real spend size, GetPQDustThreshold), else it joins the fee.
+ *  The fee is priced from the signed size: P2PKH coins max(VAULT_RPC_FEE, the relay fee, the ZIP-317 conventional
+ *  fee); PQ coins max(VAULT_RPC_FEE, the plain PQ rate x size) capped at PQMaxTxFee(), never below the ZIP-317
+ *  conventional fee (as CWallet::CreateTransaction prices a PQ input). Signed. Nothing is locked here: the caller
+ *  locks the inputs once the transaction is in the mempool, so a refusal leaves the address's coins free. */
 void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& from)
 {
     AssertLockHeld(cs_main);
@@ -1769,18 +1772,23 @@ void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& 
         eligible.emplace_back(op, c.Value());
     }
     std::sort(eligible.begin(), eligible.end(), [](const std::pair<COutPoint, CAmount>& a, const std::pair<COutPoint, CAmount>& b) { return a.second > b.second; });
+    const size_t inputBytes = yellowback::YecInputBytes(only);
     const size_t nOut = mtx.vout.size();
     CAmount out = 0;
     for (const CTxOut& o : mtx.vout) out += o.nValue;
     CAmount fee = VAULT_RPC_FEE;
     for (int pass = 0; ; pass++) {
-        if (pass == 8) throw JSONRPCError(RPC_WALLET_ERROR, "from: the post-quantum funding fee did not settle");
+        if (pass == 8) throw JSONRPCError(RPC_WALLET_ERROR, "from: the funding fee did not settle");
         mtx.vin.clear();
         mtx.vout.resize(nOut);
         const CAmount needed = out + fee;
         CAmount got = 0;
         for (const auto& e : eligible) {
             if (got >= needed) break;
+            if (mtx.vin.size() + 1 > yellowback::MAX_YEC_INPUTS || (mtx.vin.size() + 1) * inputBytes > yellowback::MAX_YEC_INPUT_BYTES)
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("from: too-many-coins: covering %s at %s would take more than %u coins or %u bytes of inputs; "
+                                                               "consolidate the address's coins first, then retry",
+                                                               FormatMoney(needed), from.text, (unsigned)yellowback::MAX_YEC_INPUTS, (unsigned)yellowback::MAX_YEC_INPUT_BYTES));
             mtx.vin.push_back(CTxIn(e.first, CScript(), CTxIn::SEQUENCE_FINAL));
             got += e.second;
         }
@@ -1793,28 +1801,50 @@ void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& 
         if (pq ? (change > 0 && change >= GetPQDustThreshold(changeOut, ::minRelayTxFee)) : change >= VAULT_RPC_MIN_CHANGE)
             mtx.vout.push_back(changeOut);
         SignWalletInputs(mtx);
-        if (!pq) break;
         const CTransaction signedTx(mtx);
         const size_t size = ::GetSerializeSize(signedTx, SER_NETWORK, PROTOCOL_VERSION);
-        const CAmount required = std::max(std::min(PQSizeFee(VAULT_RPC_FEE, size), PQMaxTxFee()), Zip317ConventionalFee(signedTx));
+        unsigned int sigops = GetLegacySigOpCount(signedTx);
+        for (const CTxIn& in : signedTx.vin) {
+            CTxOut prev;
+            int ph;
+            if (GetCoin(in.prevout, prev, ph)) sigops += GetPQSigOpCount(prev.scriptPubKey);
+        }
+        if (size > MAX_TX_SIZE_BEFORE_SAPLING || sigops > MAX_STANDARD_TX_SIGOPS)
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf("from: the lock would be %u bytes with %u sigops (limits %u, %u); consolidate the address's coins first",
+                                                           (unsigned)size, sigops, (unsigned)MAX_TX_SIZE_BEFORE_SAPLING, MAX_STANDARD_TX_SIGOPS));
+        const CAmount conventional = Zip317ConventionalFee(signedTx);
+        const CAmount required = pq ? std::max(std::min(PQSizeFee(VAULT_RPC_FEE, size), PQMaxTxFee()), conventional)
+                                    : std::max({VAULT_RPC_FEE, ::minRelayTxFee.GetFee(size), conventional});
         if (got - signedTx.GetValueOut() >= required) break;
         fee = std::max(required, fee + 1);
     }
-    for (const CTxIn& in : mtx.vin) {
-        COutPoint op = in.prevout;
-        pwalletMain->LockCoin(op);
-    }
 }
 
+/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection until
+ *  the lock is broadcast or refused: the proving step runs with no wallet lock held, and another builder must not pick
+ *  the same notes meanwhile. Released on every path. */
+struct LockedNotes
+{
+    std::vector<SaplingOutPoint> ops;
+    ~LockedNotes()
+    {
+        if (ops.empty()) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (const SaplingOutPoint& op : ops) pwalletMain->UnlockNote(op);
+    }
+};
+
 /** A TransactionBuilder paying `vout` (the V) from the notes of a Sapling "from", change back to it as a note. The fee
- *  is max(VAULT_RPC_FEE, the ZIP-317 conventional fee of the shape). cs_main and cs_wallet held; the caller proves it
- *  (ProveSapling) with NO lock held, as yed_mint does. */
-TransactionBuilder SaplingLockBuilder(const yellowback::AddressChoice& from, const CTxOut& vout)
+ *  is max(VAULT_RPC_FEE, the ZIP-317 conventional fee of the shape), the selection repeated until it covers that fee
+ *  (or refused: never underpaid). The selected notes are locked into `locked`. cs_main and cs_wallet held; the caller
+ *  proves it (ProveSapling) with NO lock held, as yed_mint does. */
+TransactionBuilder SaplingLockBuilder(const yellowback::AddressChoice& from, const CTxOut& vout, LockedNotes& locked)
 {
     AssertLockHeld(cs_main);
     const size_t outBytes = ::GetSerializeSize(vout, SER_NETWORK, PROTOCOL_VERSION);
     CAmount fee = VAULT_RPC_FEE;
     for (int pass = 0; ; pass++) {
+        if (pass == 25) throw JSONRPCError(RPC_WALLET_ERROR, "from: the Sapling funding fee did not settle");
         libzcash::SaplingExtendedSpendingKey extsk;
         std::vector<SaplingNoteEntry> notes;
         std::vector<SaplingWitness> witnesses;
@@ -1829,12 +1859,16 @@ TransactionBuilder SaplingLockBuilder(const yellowback::AddressChoice& from, con
         }
         // the change note may make one Sapling output: count max(spends, 1) actions
         const CAmount conventional = Zip317ConventionalFee(0, outBytes, std::max<size_t>(notes.size(), 1));
-        if (conventional > fee && pass < 4) { fee = conventional; continue; }
+        if (conventional > fee) { fee = conventional; continue; }
         TransactionBuilder b(Params().GetConsensus(), NextHeight());
         b.SetFee(fee);
         for (size_t i = 0; i < notes.size(); i++) b.AddSaplingSpend(extsk.expsk, notes[i].note, anchor, witnesses[i]);
         b.AddTransparentOutput(vout.scriptPubKey, vout.nValue);
         b.SendChangeTo(from.sapling, extsk.expsk.full_viewing_key().ovk);
+        for (const SaplingNoteEntry& e : notes) {
+            pwalletMain->LockNote(e.op);
+            locked.ops.push_back(e.op);
+        }
         return b;
     }
 }
@@ -1871,6 +1905,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     VaultParams vp;
     CScript spk;
     std::optional<TransactionBuilder> sapling;   // a Sapling "from": proved below with no lock held
+    LockedNotes lockedNotes;                     // its notes, locked until the lock is broadcast or refused
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
         EnsureVaultActive();
@@ -1907,17 +1942,22 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         if (newOwner) vp.owner = NewWalletPQKey(pq::SCHEME_SLH_DSA_SHA2_128S);   // drawn once the rest is valid
         spk = BuildVault(vp);
         if (from.kind == yellowback::AddressChoice::SAPLING) {
-            sapling = SaplingLockBuilder(from, CTxOut(amount, spk));
+            sapling = SaplingLockBuilder(from, CTxOut(amount, spk), lockedNotes);
         } else {
             CMutableTransaction mtx = NewTx();
             mtx.vout.push_back(CTxOut(amount, spk));
             if (from.kind == yellowback::AddressChoice::NONE) {
                 Fund(mtx, 0);
                 SignWalletInputs(mtx);
-            } else {
-                FundFromAddress(mtx, from);
+                return LockResult(Broadcast(CTransaction(mtx)), spk, vp.owner);
             }
-            return LockResult(Broadcast(CTransaction(mtx)), spk, vp.owner);
+            FundFromAddress(mtx, from);
+            const uint256 txid = Broadcast(CTransaction(mtx));
+            for (const CTxIn& in : mtx.vin) {   // locked only once accepted: a refusal leaves the coins free
+                COutPoint op = in.prevout;
+                pwalletMain->LockCoin(op);
+            }
+            return LockResult(txid, spk, vp.owner);
         }
     }
     // Sapling "from": one spend proof per note (seconds each), made with no lock held (as yed_mint, FinishSapling);

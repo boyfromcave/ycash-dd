@@ -14,10 +14,15 @@ vault_lock's funding address "from" (beta2 address-interop plan, decision D-3; d
   second node's mempool before it is mined, and the V is listed once mined;
 - one reorg across the block that holds the PQ and Sapling locks (invalidateblock on every node, a new block): the
   locks return to the mempool and are mined again, the V outputs and the source balances are as before;
-- the vault's later life from each lock: the owner spend (selector 3, a released set) of every V;
+- the vault's later life from each lock: the owner spend (selector 3, a released set) of the P2PKH-, FN-DSA- and
+  default-funded V; an unlock (selector 1, a one-member set) of the SLH-DSA- and Sapling-funded V into an intent,
+  then its release after the delay;
+- change below dust joins the fee; a PQ source whose coins would cross the input caps (400 coins / 75,000 bytes) is
+  refused with its coins left unlocked and a smaller lock from it then works; a three-note Sapling lock and the
+  20-note limit;
 - refusals: not a string, not an address, a Yellowback yr… address, another wallet's address, watch-only transparent
   and Sapling addresses, a scheme-2 address before Falcon, empty transparent / PQ / Sapling addresses, a coinbase-only
-  address where coinbase must be shielded (-regtestshieldcoinbase), a locked wallet;
+  address where coinbase must be shielded (-regtestshieldcoinbase), a locked wallet (P2PKH and Sapling "from");
 - the default (no "from") is unchanged: funded from transparent P2PKH coins with change to a new address.
 
 No address string or prefix is written here: every address comes from the node (the PQ encoding may change).
@@ -45,7 +50,7 @@ from test_framework.util import (
 from test_framework.yellowback_util import conventional_fee
 
 ACTIVATION = 205
-FALCON = 215
+FALCON = 225
 DELAY = 5
 VAULT_RPC_FEE = 10000
 SLH_PQPKH_SCRIPTSIG = 7938       # quantum spec §2.1
@@ -102,8 +107,8 @@ class VaultLockFromTest(BitcoinTestFramework):
         self.sync_all()
         return hashes
 
-    def params(self, amount, source=None):
-        p = {'tag': 'TEST', 'setid': self.setid, 'delay': DELAY, 'ownerheight': self.nodes[0].getblockcount() + 1000,
+    def params(self, amount, source=None, setid=None):
+        p = {'tag': 'TEST', 'setid': setid or self.setid, 'delay': DELAY, 'ownerheight': self.nodes[0].getblockcount() + 1000,
              'amount': amount}
         if source is not None:
             p['from'] = source
@@ -155,6 +160,12 @@ class VaultLockFromTest(BitcoinTestFramework):
                                     'maturity': 2, 'livenesswindow': 50, 'bondmin': 1, 'ratewindow': 20})['setid']
         self.mine(1)
         assert_equal(n0.set_getinfo(self.setid)['released'], True)
+        print('a one-member set of node 0 (unlock threshold 1) for the release path (selector 1)')
+        self.mset = n0.set_create({'seats': 1, 'unlockthreshold': 1, 'maturity': 2})['setid']
+        self.mine(1)
+        assert n0.set_join(self.mset, 1, n0.getblockcount() + 500)['complete']
+        self.mine(2)
+        assert_equal(n0.set_getinfo(self.mset)['released'], False)
 
         print('fund the sources: a P2PKH address, an SLH-DSA PQ address, a Sapling address')
         ecc = n0.getnewaddress()
@@ -207,14 +218,14 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_equal(zat(n0.getreceivedbyaddress(ecc, 0)), zat(10) + zat(7) - VAULT_RPC_FEE)   # 10 in, 10 - 3 - fee back
 
         print('lock from the SLH-DSA post-quantum address (before Falcon)')
-        r_pq1 = n0.vault_lock(self.params(2, pq1))
+        r_pq1 = n0.vault_lock(self.params(2, pq1, self.mset))
         tx_pq1, fee_pq1 = self.check_transparent_lock(r_pq1, pq1, 2, True)
         assert_equal(len(tx_pq1['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
         self.in_second_mempool(r_pq1['txid'])
 
         print('lock from the Sapling address')
         z_before = n0.z_getbalance(zaddr)
-        r_z = n0.vault_lock(self.params(4, zaddr))
+        r_z = n0.vault_lock(self.params(4, zaddr, self.mset))
         tx_z = n0.getrawtransaction(r_z['txid'], 1)
         assert_equal(tx_z['vin'], [])
         assert_equal(len(tx_z['vout']), 1)
@@ -231,18 +242,18 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_equal(n0.getblock(block)['tx'][1:].count(r_pq1['txid']) + n0.getblock(block)['tx'][1:].count(r_z['txid']), 2)
         z_after = z_before - Decimal(zat(4) + fee_z) / 100000000
         assert_equal(n0.z_getbalance(zaddr), z_after)
-        listed = {v['outpoint'] for v in n0.vault_list({'setid': self.setid})}
+        listed = {v['outpoint'] for v in n0.vault_list({'kind': 'vault'})}
         assert {r_ecc['outpoint'], r_pq1['outpoint'], r_z['outpoint']} <= listed
         for node in self.nodes:
             node.invalidateblock(block)
         for txid in (r_pq1['txid'], r_z['txid']):
             assert txid in n0.getrawmempool(), txid
-        assert r_z['outpoint'] not in {v['outpoint'] for v in n0.vault_list({'setid': self.setid})}
+        assert r_z['outpoint'] not in {v['outpoint'] for v in n0.vault_list({'kind': 'vault'})}
         n0.generate(1)
         sync_blocks(self.nodes)
         assert n0.getbestblockhash() != block
         for node in self.nodes:
-            got = {v['outpoint'] for v in node.vault_list({'setid': self.setid})}
+            got = {v['outpoint'] for v in node.vault_list({'kind': 'vault'})}
             assert {r_ecc['outpoint'], r_pq1['outpoint'], r_z['outpoint']} <= got, node
         assert_equal(n0.z_getbalance(zaddr), z_after)
         assert_equal(n0.gettransaction(r_pq1['txid'])['confirmations'], 1)
@@ -267,15 +278,80 @@ class VaultLockFromTest(BitcoinTestFramework):
             assert s.startswith('76a914') and s.endswith('88ac'), s
         self.mine(1)
 
-        print('the later life of each V: the owner spend (selector 3)')
+        print('the later life of each V: the owner spend (selector 3) of the vaults of the released set')
         dest = n0.getnewaddress()
-        for r in (r_ecc, r_pq1, r_z, r_pq2, r_def):
+        for r in (r_ecc, r_pq2, r_def):
             sp = n0.vault_ownerspend(r['outpoint'], dest)
             assert_equal(sp['selector'], 3)
             self.in_second_mempool(sp['txid'])
         self.mine(1)
-        for r in (r_ecc, r_pq1, r_z, r_pq2, r_def):
+        for r in (r_ecc, r_pq2, r_def):
             assert_equal(n0.gettxout(r['txid'], 0), None)
+
+        print('the PQ- and Sapling-funded vaults of the member set: unlock (selector 1) into an intent, then release')
+        payee = n1.getnewaddress()
+        intents = []
+        for r, amt in ((r_pq1, 1), (r_z, 3)):
+            bu = n0.vault_buildunlock(r['outpoint'], [{'address': payee, 'amount': amt}])
+            signed = n0.set_signunlock(bu['hex'])
+            utx = n0.vault_send(signed['hex'])
+            self.in_second_mempool(utx)
+            intents.append('%s:%d' % (utx, bu['intents'][0]['vout']))
+        self.mine(1)
+        for r in (r_pq1, r_z):
+            assert_equal(n0.gettxout(r['txid'], 0), None)
+        assert_raises_rpc(-1, 'matures at height', n0.vault_release, intents[0])
+        self.mine(DELAY)
+        before = n1.getreceivedbyaddress(payee)
+        for op in intents:
+            self.in_second_mempool(n0.vault_release(op))
+        self.mine(1)
+        assert_equal(n1.getreceivedbyaddress(payee) - before, Decimal('4'))
+
+        print('change below dust joins the fee (P2PKH)')
+        dusty = n0.getnewaddress()
+        n0.sendtoaddress(dusty, Decimal('1.00010500'))
+        self.mine(1)
+        r_d = n0.vault_lock(self.params(1, dusty))
+        tx_d = n0.getrawtransaction(r_d['txid'], 1)
+        assert_equal(len(tx_d['vout']), 1)
+        assert_equal(self.fee_of(tx_d), VAULT_RPC_FEE + 500)
+        self.mine(1)
+
+        print('a PQ source whose coins would cross the input caps: refused, coins left free, a smaller lock works')
+        many = n0.getnewaddress('', 'pqslh')
+        for _ in range(10):
+            n0.sendtoaddress(many, 1)
+        self.mine(1)
+        locked_before = n0.listlockunspent()
+        assert_raises_rpc(-4, 'from: too-many-coins: covering 9.5001 at %s' % many, n0.vault_lock, self.params(Decimal('9.5'), many))
+        assert_equal(n0.listlockunspent(), locked_before)
+        r_many = n0.vault_lock(self.params(2, many))
+        tx_many = n0.getrawtransaction(r_many['txid'], 1)
+        assert_equal(len(tx_many['vin']), 3)
+        assert self.fee_of(tx_many) >= max(VAULT_RPC_FEE, conventional_fee(tx_many))
+        self.in_second_mempool(r_many['txid'])
+        self.mine(1)
+
+        print('a multi-note Sapling lock, and the 20-note limit')
+        zmulti = n0.z_getnewaddress('sapling')
+        feeders = [n0.getnewaddress() for _ in range(21)]
+        n0.sendmany('', {a: Decimal('0.1001') for a in feeders})
+        self.mine(1)
+        for a in feeders:
+            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, Decimal('0.0001'))
+            wait_and_assert_operationid_status(n0, opid)
+        self.mine(1)
+        assert_equal(n0.z_getbalance(zmulti), Decimal('2.1'))
+        assert_raises_rpc(-6, 'too-many-notes: the transaction would spend 21 Sapling notes (limit 20)',
+                          n0.vault_lock, self.params(Decimal('2.05'), zmulti))
+        r_multi = n0.vault_lock(self.params(Decimal('0.25'), zmulti))
+        tx_multi = n0.getrawtransaction(r_multi['txid'], 1)
+        assert_equal(len(tx_multi['vShieldedSpend']), 3)
+        assert_equal(self.fee_of(tx_multi), max(VAULT_RPC_FEE, conventional_fee(tx_multi)))
+        self.in_second_mempool(r_multi['txid'])
+        self.mine(1)
+        assert_equal(n0.z_getbalance(zmulti), Decimal('2.1') - Decimal('0.25') - Decimal(self.fee_of(tx_multi)) / 100000000)
 
         print('a coinbase-only address where coinbase must be shielded')
         mature = [u for u in n0.listunspent() if u['generated'] and u['confirmations'] > 100]
@@ -293,11 +369,13 @@ class VaultLockFromTest(BitcoinTestFramework):
         self.restart(2, enc)
         n2 = self.nodes[2]
         own2 = n2.getnewaddress()
+        own2z = n2.z_getnewaddress('sapling')
         n2.encryptwallet(PASS)
         bitcoind_processes[2].wait()
         self.nodes[2] = start_node(2, self.options.tmpdir, self.node_args(2) + enc)
         n2 = self.nodes[2]
         assert_raises_rpc(-13, 'walletpassphrase', n2.vault_lock, self.params(1, own2))
+        assert_raises_rpc(-13, 'walletpassphrase', n2.vault_lock, self.params(1, own2z))
         print('ok')
 
 

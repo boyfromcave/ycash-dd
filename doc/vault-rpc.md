@@ -318,13 +318,18 @@ with change to a new wallet address. With it:
 
 | `from` | spends | fee | change |
 |---|---|---|---|
-| a transparent P2PKH address (`s1…`/`t…`) | that address's confirmed, unlocked coins, largest first | 10,000 zat | back to the same address (from 1,000 zat; less joins the fee) |
+| a transparent P2PKH address (`s1…`/`t…`) | that address's confirmed, unlocked coins, largest first | from the signed size: max(10,000 zat, the relay fee, the ZIP-317 conventional fee) | back to the same address (from 1,000 zat; less joins the fee) |
 | a plain-YEC post-quantum address (`TX_PQPKH`, scheme 1 SLH-DSA or 2 FN-DSA-512) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `sendtoaddress` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
 | a Sapling address (`ys1…`) | that address's confirmed notes (minimum 1 confirmation), largest first, at most 20 (the `yed_mint` selection) | max(10,000 zat, the ZIP-317 conventional fee of the shape) | a Sapling note to the same address |
 
-The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A Sapling-funded lock
-is one transaction with Sapling spends, the V and the change note: the spend proofs are made
-with no wallet lock held, as for `yed_mint`, and it carries the default expiry (next block + 20).
+The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A transparent or PQ
+source spends at most 400 coins and 75,000 bytes of estimated inputs (the `yed_*` builders'
+caps), so the lock stays under 100 kB and the sigop limit; its coins are locked in the wallet only
+once the lock is in the mempool, so a refused lock leaves them free. A Sapling-funded lock is one
+transaction with Sapling spends, the V and the change note: the spend proofs are made with no
+wallet lock held, as for `yed_mint`, the selected notes are locked in the wallet (`LockNote`, as
+the `z_*` operations do) from selection until the lock is broadcast or refused, and it carries
+the default expiry (next block + 20).
 The vault rules (V-1) read only the transparent outputs and inputs, so the shielded parts change
 nothing about the V. A coinbase output is never spent where coinbase must be shielded (mainnet,
 testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
@@ -339,6 +344,9 @@ testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
 | -8 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block` |
 | -6 | `insufficient confirmed funds at <from>: need <x> more` (transparent and PQ; with ` (its <y> of coinbase outputs must be shielded first: z_shieldcoinbase)` when coinbase outputs were left out) |
 | -6 | `insufficient-yec: need <x>, have <y> in confirmed Sapling notes at <from>` |
+| -4 | `from: too-many-coins: covering <x> at <from> would take more than 400 coins or 75000 bytes of inputs; consolidate the address's coins first, then retry` |
+| -4 | `from: the lock would be <n> bytes with <m> sigops (limits 100000, 4000); consolidate the address's coins first` (a backstop behind the caps) |
+| -4 | `from: the funding fee did not settle`, `from: the Sapling funding fee did not settle` (the fee loop did not converge; never underpaid) |
 | -6 | `too-many-notes: the transaction would spend <n> Sapling notes (limit 20); consolidate with z_mergetoaddress first` |
 | -13 | `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet, any `vault_lock`) |
 

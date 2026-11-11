@@ -143,7 +143,9 @@ class VaultRpcContractTest(BitcoinTestFramework):
         falcon = n.z_importpqkey('2:' + '5a' * 48, False)['address']        # Falcon is not active on this chain
         c.error('from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active', n, 'vault_lock', lock_from(falcon))
         c.error('insufficient confirmed funds at', n, 'vault_lock', lock_from(n.getnewaddress()))
-        c.error('insufficient confirmed funds at', n, 'vault_lock', lock_from(n.getnewaddress('', 'pq')))
+        empty_pq = n.getnewaddress('', 'pqslh')                              # scheme 1: spendable before Falcon
+        assert_equal(n.validateaddress(empty_pq)['pqscheme'], 1)
+        c.error('insufficient confirmed funds at', n, 'vault_lock', lock_from(empty_pq))
         c.error('in confirmed Sapling notes at', n, 'vault_lock', lock_from(n.z_getnewaddress('sapling')))
         lk = c.call(n, 'vault_lock', {'tag': 'TEST', 'setid': setid, 'delay': DELAY, 'ownerheight': h + 200, 'amount': 5,
                                       'owner': OWNER_ID})
