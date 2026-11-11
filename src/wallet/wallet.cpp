@@ -15,6 +15,7 @@
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
+#include "yellowback/payload.h"
 #include "yellowback/wallet.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
@@ -7832,29 +7833,57 @@ bool CWallet::EraseAtomicSwap(const std::string& swapId)
     return walletdb.EraseAtomicSwap(swapId);
 }
 
-std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs)
+// Does the payload of `tx` give output n YED (a MINT's vault and token outputs, a TRANSFER's or REDEEM's assignments)?
+// What stage (ii) of the Yellowback wallet layer pre-locks (YellowbackWallet::PreLock), for a transaction the index has
+// not judged yet: unconfirmed, or any transaction while the index is unhealthy.
+static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
 {
+    std::optional<yellowback::FoundPayload> fp = yellowback::FindPayload(tx);
+    if (!fp.has_value()) return false;
+    if (fp->payload.type == yellowback::PayloadType::MINT) return n == 0 || n == 1;
+    if (fp->payload.type == yellowback::PayloadType::TRANSFER || fp->payload.type == yellowback::PayloadType::REDEEM) {
+        for (const yellowback::Assignment& a : fp->payload.assignments) {
+            if (a.vout == n) return true;
+        }
+    }
+    return false;
+}
+
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict, std::vector<COutPoint>* refusedOut)
+{
+    if (refusedOut) refusedOut->clear();
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
-    if (!yw || !yw->Index()) return "";
+    if (!yw || !yw->Index() || inputs.empty()) return "";
     yellowback::YellowbackIndex& index = *yw->Index();
+    CWallet& wallet = *yw->Wallet();
     std::vector<COutPoint> refused;
     {
-        LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+        LOCK(wallet.cs_wallet);                 // lock order (N25): cs_wallet before cs_yellowback
         LOCK(index.cs_yellowback);
-        if (!index.IsHealthy()) {
+        const bool healthy = index.IsHealthy();
+        if (!healthy && strict) {
             return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
                    "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
         }
         yellowback::State st(index.View());
         for (const COutPoint& o : inputs) {
-            if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) refused.push_back(o);
+            bool yed = false;
+            if (healthy) yed = st.GetToken(o).has_value() || st.GetVault(o).has_value();
+            if (!yed && (!healthy || !st.GetTxLog(o.hash).has_value())) {
+                // not judged by the index (unconfirmed, or the index unhealthy): what its payload assigns
+                std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
+                yed = it != wallet.mapWallet.end() && AssignedByYellowbackPayload(it->second, o.n);
+            }
+            if (yed) refused.push_back(o);
         }
     }
     for (const COutPoint& o : inputs) {
         if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
     }
     if (refused.empty()) return "";
+    if (refusedOut) *refusedOut = refused;
     std::string list;
     for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
-    return "refusing to spend a Yellowback outpoint as plain YEC: " + list;
+    return "refusing to spend a Yellowback outpoint as plain YEC: " + list +
+           " (its YED would burn; lock it again with yed_lockcoins or lockunspent true)";
 }

@@ -715,3 +715,9 @@ def tarfile_extractall(tgz, path):
         if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
             raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
     tgz.extractall(path=path, members=members)
+
+def lockunspent_true(node):
+    """`lockunspent true`: unlock every locked coin (the Yellowback layer re-applies its own locks). v4.5.0 takes the
+    single argument; ycash6's body unlocks each listed outpoint itself (its argument table needs both arguments and it
+    refuses an overlay outpoint, yed-locked-outpoint)."""
+    assert node.lockunspent(True)

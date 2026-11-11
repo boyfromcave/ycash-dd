@@ -39,6 +39,7 @@ from test_framework.util import (
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
+    lockunspent_true,
     nuparams,
     start_node,
     start_nodes,
@@ -387,7 +388,8 @@ class VaultLockFromTest(BitcoinTestFramework):
         every token output (consensus would accept a plain spend of one and burn its YED): vault_lock "from" the
         holder key of a fresh mint (a Falcon key; it holds nothing but the token) finds no coins, with the locks in
         place and after `lockunspent true`; with the lock removed on purpose (yed_unlockcoin) the second check
-        refuses the outpoint by name."""
+        refuses the outpoint by name while the key holds nothing else, and once the key also holds plain YEC the lock
+        is funded from those coins without the token."""
         print('token protection: YED live on every node, a mint to a fresh Falcon holder key')
         activate_yed_late(self, [0, 1], ((0, 1), (1, 2), (0, 2)))
         n0 = self.nodes[0]
@@ -399,7 +401,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         outpoint = {'txid': op[0], 'vout': op[1]}
         for unlock_all in (False, True):
             if unlock_all:
-                assert n0.lockunspent(True)
+                lockunspent_true(n0)
             assert outpoint in n0.listlockunspent()
             for amount in (Decimal('0.5'), 1):
                 assert_raises_rpc(-6, 'insufficient confirmed funds at %s' % key, n0.vault_lock, self.params(amount, key))
@@ -410,6 +412,13 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert outpoint not in n0.listlockunspent()
         assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
                           n0.vault_lock, self.params(1, key))
+        # audit L-ii: the key also holds plain YEC; with its token unlocked the lock is funded from the plain coins
+        # alone (signed once, with no lock held: audit A-M1), and the token is left alone
+        n0.sendtoaddress(key, Decimal('2'))
+        self.mine(1)
+        r = n0.vault_lock(self.params(1, key))
+        assert op not in [(i['txid'], i['vout']) for i in n0.getrawtransaction(r['txid'], 1)['vin']]
+        self.mine(1)
         n0.yed_lockcoins()
         assert outpoint in n0.listlockunspent()
         assert_equal(n0.yed_getbalance()['confirmedCents'], before)
