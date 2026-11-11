@@ -2179,11 +2179,19 @@ BOOST_AUTO_TEST_CASE(rpc_erase_refused_pq_send)
     BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
 }
 
+// Reads a wallet-file record back (CDB::Exists is protected): the "tx" record of a transaction.
+class WalletFileProbe : public CWalletDB
+{
+public:
+    explicit WalletFileProbe(const std::string& file) : CWalletDB(file) {}
+    bool HasTx(const uint256& txid) { return Exists(std::make_pair(std::string("tx"), txid)); }
+};
+
 // Review H-1: CWallet::EraseUnbroadcastTx leaves no index naming the erased transaction. A transaction spending a
-// wallet coin and a Sapling nullifier, with a note of its own (nullifier map, sifted set), is recorded and erased;
-// then another one spending the same coin and nullifier is recorded. Before the fix the stale spend entries made
-// SyncMetaData recreate the erased txid as an empty CWalletTx with no wallet (and copy its blank metadata onto the
-// new transaction); ResendWalletTransactions then asserted on it.
+// wallet coin, a Sprout nullifier and a Sapling nullifier, with a note of its own (nullifier map, sifted set), is
+// recorded and erased (its wallet-file record too); then another one spending the same coin and nullifiers is
+// recorded. Before the fix the stale spend entries made SyncMetaData recreate the erased txid as an empty CWalletTx
+// with no wallet (and copy its blank metadata onto the new transaction); ResendWalletTransactions then asserted on it.
 BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
 {
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -2196,6 +2204,7 @@ BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
 
     const uint256 spentNullifier = uint256S("0a");
     const uint256 ownNullifier = uint256S("0b");
+    const uint256 spentSproutNullifier = uint256S("0c");
     auto spender = [&](CAmount out) {
         CMutableTransaction m;
         m.fOverwintered = true;
@@ -2205,6 +2214,10 @@ BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
         SpendDescription sd;
         sd.nullifier = spentNullifier;
         m.vShieldedSpend.push_back(sd);
+        JSDescription js;                                     // mapTxSproutNullifiers (GetConflicts below reads it)
+        js.proof = libzcash::GrothProof();
+        js.nullifiers = {{spentSproutNullifier, uint256S("0d")}};
+        m.vJoinSplit.push_back(js);
         m.vout.push_back(CTxOut(out, CScript() << OP_TRUE));
         return CTransaction(m);
     };
@@ -2218,9 +2231,12 @@ BOOST_AUTO_TEST_CASE(rpc_erase_unbroadcast_tx_indexes)
     BOOST_REQUIRE(pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier));
     BOOST_REQUIRE(pwalletMain->setSiftedSapling.count(txid));
     pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached = true;
+    BOOST_REQUIRE(WalletFileProbe(pwalletMain->strWalletFile).HasTx(txid));
 
     BOOST_REQUIRE(pwalletMain->EraseUnbroadcastTx(txid));
     BOOST_CHECK(!pwalletMain->mapWallet.count(txid));
+    BOOST_CHECK(!WalletFileProbe(pwalletMain->strWalletFile).HasTx(txid));                // the file record is gone
+    BOOST_CHECK(WalletFileProbe(pwalletMain->strWalletFile).HasTx(parentTx.GetHash()));   // and only that one
     BOOST_CHECK(!pwalletMain->mapSaplingNullifiersToNotes.count(ownNullifier));
     BOOST_CHECK(!pwalletMain->setSiftedSapling.count(txid));
     BOOST_CHECK(!pwalletMain->mapWallet.at(parentTx.GetHash()).fAvailableCreditCached);   // its coin is unspent again
