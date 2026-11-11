@@ -70,6 +70,14 @@ namespace {
 const int DEFAULT_LIST_COUNT = 1000;
 const int MAX_LISTMINERS_WINDOW = 4032;
 
+/** A PQ address's versions as {"<scheme>": "<hex>"} (D-9: one 3-byte version per scheme). */
+UniValue PQAddressVersionsJSON(const PQAddressVersions& versions)
+{
+    UniValue o(UniValue::VOBJ);
+    for (const auto& [scheme, ver] : versions) o.pushKV(strprintf("%d", (int)scheme), HexStr(ver));
+    return o;
+}
+
 YellowbackIndex& EnsureIndex()
 {
     if (!g_yellowbackLive || !g_yellowback) {
@@ -790,9 +798,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         prm.pushKV("fees", fees);
     }
     // the Base58Check version bytes of this network's YED addresses (hex), so clients need not hard-code them:
-    // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the 33-byte PQ form (quantum spec §4; 56ab)
+    // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the PQ form, one 3-byte version per scheme
+    // keyed by scheme number (quantum spec §4, D-9; mainnet "2": 56aede "ybf…", "1": 56b044 "ybs…")
     prm.pushKV("addressVersion", HexStr(p.addressVersion));
-    prm.pushKV("pqAddressVersion", HexStr(p.pqAddressVersion));
+    prm.pushKV("pqAddressVersion", PQAddressVersionsJSON(p.pqAddressVersions));
     UniValue windows(UniValue::VOBJ);
     windows.pushKV("fast", p.pFastWindow);
     windows.pushKV("mid", p.pMidWindow);
@@ -838,7 +847,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         pqo.pushKV("falconActive", falcon);
         pqo.pushKV("falconHeight", p.pqFalconHeight);
         pqo.pushKV("feeRateZatPerKB", PQFeeRateZatPerKB());
-        pqo.pushKV("plainAddressVersion", HexStr(PlainPQAddressVersion(::Params().NetworkIDString())));   // D-Q-20: sq/tq/rq
+        pqo.pushKV("plainAddressVersion", PQAddressVersionsJSON(PlainPQAddressVersions(::Params().NetworkIDString())));   // D-Q-20, D-9: sqf/sqs, tqf/tqs, rqf/rqs
         prm.pushKV("pq", pqo);
     }
     UniValue policy(UniValue::VOBJ);

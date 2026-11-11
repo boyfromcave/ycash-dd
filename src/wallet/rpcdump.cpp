@@ -459,7 +459,7 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
             "\nAdds one post-quantum key to the wallet from its 48-byte keygen seed (e.g. a vault owner or holder key made\n"
             "by another wallet such as YEW). The public key is re-derived from the seed. A key this wallet derives from its\n"
             "own HD seed keeps its index; any other key is stored without one (it never moves the wallet's issued index).\n"
-            "The key's plain-YEC address (sq…/tq…/rq…) goes into the address book.\n"
+            "The key's plain-YEC address (sqf…/sqs… mainnet: the third character names the scheme) goes into the address book.\n"
             "\nArguments:\n"
             "1. \"pqseed\"     (string, required) \"<scheme>:<seed hex>\", or dumpwallet's \"<scheme>:<index>:<seed hex>\"\n"
             "                (an optional \"pqseed=\" prefix is accepted), or a dump's whole \"pqseed=… # owner=… addr=… yecaddr=…\"\n"
@@ -470,7 +470,7 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
             "2. rescan       (boolean, optional, default=true) Rescan the chain for the key's transactions\n"
             "3. \"label\"      (string, optional, default=\"\") The address book label\n"
             "\nResult:\n"
-            "{ \"scheme\": n, \"keyhash\": \"hex\", \"pqkeyid\": \"hex (scheme || keyhash)\", \"address\": \"sq…\",\n"
+            "{ \"scheme\": n, \"keyhash\": \"hex\", \"pqkeyid\": \"hex (scheme || keyhash)\", \"address\": \"sqf…|sqs…\",\n"
             "  \"index\": n|null (the HD index when the key is this wallet's own), \"added\": true|false (false: already held) }\n"
             "\nExamples:\n"
             + HelpExampleCli("z_importpqkey", "\"1:<96 hex digits>\"")
@@ -534,6 +534,11 @@ UniValue z_importpqkey(const UniValue& params, bool fHelp)
             {"addr", yellowback::EncodeAddress(pid, yellowback::ParamsForNetwork(Params().NetworkIDString()))},
             {"yecaddr", KeyIO(Params()).EncodeDestination(pid)}};
         for (const auto& e : expect) {
+            // A dump written before D-9 names the key in the 2-byte-version form (quantum spec §4): it still matches.
+            CPQKeyID legacy;
+            if (e.first != "owner" && DecodeLegacyPQAddress(e.second, Params().NetworkIDString(), e.first == "addr", legacy) &&
+                legacy == pid)
+                continue;
             if (e.second != have.at(e.first))
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf(
                     "the line's %s=%s does not match the key its seed makes under scheme %d (%s); nothing imported",

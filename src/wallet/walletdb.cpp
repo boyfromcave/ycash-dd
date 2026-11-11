@@ -512,6 +512,17 @@ public:
     }
 };
 
+/** An address-book record's key: its address string. A post-quantum record written before D-9 holds the
+ *  2-byte-version form, which DecodeDestination refuses; it still names its key (quantum spec §4). */
+static CTxDestination DecodeAddressBookKey(KeyIO& keyIO, const std::string& strAddress)
+{
+    CTxDestination dest = keyIO.DecodeDestination(strAddress);
+    CPQKeyID legacy;
+    if (!IsValidDestination(dest) && DecodeLegacyPQAddress(strAddress, Params().NetworkIDString(), false, legacy))
+        dest = legacy;
+    return dest;
+}
+
 bool
 ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
              CWalletScanState &wss, string& strType, string& strErr)
@@ -527,13 +538,13 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         {
             string strAddress;
             ssKey >> strAddress;
-            ssValue >> pwallet->mapAddressBook[keyIO.DecodeDestination(strAddress)].name;
+            ssValue >> pwallet->mapAddressBook[DecodeAddressBookKey(keyIO, strAddress)].name;
         }
         else if (strType == "purpose")
         {
             string strAddress;
             ssKey >> strAddress;
-            ssValue >> pwallet->mapAddressBook[keyIO.DecodeDestination(strAddress)].purpose;
+            ssValue >> pwallet->mapAddressBook[DecodeAddressBookKey(keyIO, strAddress)].purpose;
         }
         else if (strType == "tx")
         {
