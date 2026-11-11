@@ -688,6 +688,17 @@ def signing_branch_id(node):
     before it."""
     return int(node.getblockchaininfo()['consensus']['nextblock'], 16)
 
+# Line constants of the scripts shared byte-identical with ycash6 (vault_lock_from.py, wallet_pq_fee_cap.py,
+# wallet_yed_ecc_token.py). ycash6's util.py defines the same names for 6.x: its shielding z_sendmany takes the
+# -feepolicy fee (None), its Sapling builder pads a lone output to two, and its refusals read "Insufficient funds: have
+# 0.00, need", "is greater than the maximum fee allowed by this instance" (refused before building) and
+# "SendTransaction: Transaction commit failed:: tx-expiring-soon".
+SHIELDING_SEND_FEE = Decimal('0.0001')   # the explicit fee of a shielding z_sendmany
+ONE_NOTE_SAPLING_OUTPUTS = 1             # Sapling outputs of a bundle with one real output (no padding on v4.5.0)
+STOCK_FEE_OVER_MAXTXFEE = 'CommitTransaction failed'   # an ECC z_sendmany fee above -maxtxfee: the commit is refused
+PQ_EXPIRING_COMMIT_REFUSAL = 'SendTransaction: CommitTransaction failed'   # the operation error when the mempool refuses a commit as expiring soon
+EMPTY_ECC_SOURCE_REFUSAL = 'Insufficient transparent funds, no UTXOs found for taddr from address.'   # z_sendmany from an ECC address with no coin
+
 def tarfile_extractall(tgz, path):
     """Extract the archive ``tgz`` under ``path`` without letting a member escape it.
 

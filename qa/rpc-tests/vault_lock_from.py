@@ -39,6 +39,8 @@ from test_framework.util import (
     assert_equal,
     bitcoind_processes,
     connect_nodes_bi,
+    ONE_NOTE_SAPLING_OUTPUTS,
+    SHIELDING_SEND_FEE,
     lockunspent_true,
     nuparams,
     start_node,
@@ -180,7 +182,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendtoaddress(pq1, 10)
         n0.sendtoaddress(shield_from, Decimal('10.0001'))
         self.mine(1)
-        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, Decimal('0.0001'))
+        opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, SHIELDING_SEND_FEE)
         wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zaddr), Decimal('10'))
@@ -234,7 +236,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         assert_equal(len(tx_z['vout']), 1)
         assert_equal(tx_z['vout'][0]['scriptPubKey']['hex'], r_z['script'])
         assert_equal(len(tx_z['vShieldedSpend']), 1)
-        assert_equal(len(tx_z['vShieldedOutput']), 1)                # the change note
+        assert_equal(len(tx_z['vShieldedOutput']), ONE_NOTE_SAPLING_OUTPUTS)                # the change note
         fee_z = self.fee_of(tx_z)
         assert_equal(fee_z, max(VAULT_RPC_FEE, conventional_fee(tx_z)))
         assert_equal(zat(tx_z['valueBalance']), zat(4) + fee_z)
@@ -342,7 +344,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.sendmany('', {a: Decimal('0.1001') for a in feeders})
         self.mine(1)
         for a in feeders:
-            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, Decimal('0.0001'))
+            opid = n0.z_sendmany(a, [{'address': zmulti, 'amount': Decimal('0.1')}], 1, SHIELDING_SEND_FEE)
             wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zmulti), Decimal('2.1'))
