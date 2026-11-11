@@ -32,6 +32,7 @@ ignore = [
     { id = "RUSTSEC-2025-0055", reason = "tracing-subscriber 0.2 ANSI log poisoning: the node logs its own lines and the operator's own -debug filter, not raw network input; the fix is in 0.3, a breaking upgrade this line's Rust 1.51 cannot build." },
     { id = "RUSTSEC-2026-0386", reason = "tokio AsyncFd safe constructors (new/with_interest/try_new/try_with_interest) violate I/O safety. ycashd never constructs an AsyncFd: src/rust has no use of it and the metrics exporter (hyper 0.14 http1 server) uses TcpListener only. The fix is a deprecation in tokio >= 1.51.6/1.53.3, which needs a far newer rustc than this line's 1.51; it leaves with the librustzcash/metrics upgrade." },
     { id = "RUSTSEC-2024-0344", reason = "curve25519-dalek 3.0.2 Scalar sub timing: used through ed25519-zebra for JoinSplit signature verification, i.e. public inputs only; no secret scalar is processed." },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.0 unmaintained notice (repository archived 2026-10-01), no vulnerability: a macro-only crate (pin_mut!, unsafe_pinned!, unsafe_unpinned!) reached only through futures-util 0.3.13 under hyper =0.14.12 (librustzcash and metrics-exporter-prometheus 0.3). futures-util drops it only from 0.3.32 (rust-version 1.71); this line builds with Rust 1.51 (rust-toolchain), and every release it can build still depends on pin-utils, whose 0.1.1 is covered by the same notice. Leaves with the librustzcash/metrics upgrade; the same entry, with an expiry, is in osv-scanner.toml." },
 ]
 
 [bans]
