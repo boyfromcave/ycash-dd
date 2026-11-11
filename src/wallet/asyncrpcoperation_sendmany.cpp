@@ -27,6 +27,8 @@
 #include "wallet.h"
 #include "walletdb.h"
 #include "script/interpreter.h"
+#include "script/sign.h"
+#include "policy/policy.h"
 #include "utiltime.h"
 #include "zcash/IncrementalMerkleTree.hpp"
 #include "miner.h"
@@ -69,8 +71,10 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
         std::vector<SendManyRecipient> zOutputs,
         int minDepth,
         CAmount fee,
-        UniValue contextInfo) :
-        tx_(contextualTx), fromaddress_(fromAddress), t_outputs_(tOutputs), z_outputs_(zOutputs), mindepth_(minDepth), fee_(fee), contextinfo_(contextInfo)
+        UniValue contextInfo,
+        bool feeExplicit) :
+        tx_(contextualTx), fromaddress_(fromAddress), t_outputs_(tOutputs), z_outputs_(zOutputs), mindepth_(minDepth), fee_(fee), contextinfo_(contextInfo),
+        feeExplicit_(feeExplicit)
 {
     assert(fee_ >= 0);
 
@@ -98,6 +102,10 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
     fromtaddr_ = keyIO.DecodeDestination(fromAddress);
     isfromtaddr_ = useanyutxo_ || IsValidDestination(fromtaddr_);
     isfromzaddr_ = false;
+    isfrompq_ = !useanyutxo_ && IsPQKeyDestination(fromtaddr_);
+    if (isfrompq_ && !isUsingBuilder_) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "A post-quantum from address cannot pay a Sprout address");
+    }
 
     if (!isfromtaddr_) {
         auto address = keyIO.DecodePaymentAddress(fromAddress);
@@ -240,7 +248,11 @@ bool AsyncRPCOperation_sendmany::main_impl() {
 
     // When spending coinbase utxos, you can only specify a single zaddr as the change must go somewhere
     // and if there are multiple zaddrs, we don't know where to send it.
-    if (isfromtaddr_) {
+    if (isfrompq_) {
+        // A post-quantum from address (beta2 D-2): its own coins, the fee settled on the real size.
+        select_pq_inputs(txValues, sendAmount);
+        minersFee = fee_;
+    } else if (isfromtaddr_) {
         // Only select coinbase if we are spending from a single t-address to a single z-address.
         if (!useanyutxo_ && isSingleZaddrOutput) {
             bool b = find_utxos(true, txValues);
@@ -325,7 +337,12 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         // Set change address if we are using transparent funds
         // TODO: Should we just use fromtaddr_ as the change address?
         CReserveKey keyChange(pwalletMain);
-        if (isfromtaddr_)
+        if (isfrompq_)
+        {
+            // beta2 D-4: change from a post-quantum address returns to that address (same scheme, no new key).
+            builder_.SendChangeTo(fromtaddr_);
+        }
+        else if (isfromtaddr_)
         {
             if (GetBoolArg("-sendchangeback", DEFAULT_SEND_CHANGE_BACK))
             {
@@ -403,8 +420,19 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             builder_.AddTransparentOutput(address, amount);
         }
 
-        // Build the transaction
+        // Build the transaction (Sapling proofs are made here, with no lock held)
         tx_ = builder_.Build().GetTxOrThrow();
+
+        if (!pq_inputs_.empty()) {
+            // The post-quantum inputs, signed under the vault flags of the builder's height (beta2 D-2).
+            CMutableTransaction mtx(tx_);
+            SignPQBuilderInputs(mtx, pq_inputs_, builder_.GetHeight());
+            tx_ = CTransaction(mtx);
+            const CAmount needed = PQBuilderFee(minersFee, tx_);
+            if (needed > minersFee) {
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Post-quantum fee estimate %s fell short of the %s the signed transaction needs", FormatMoney(minersFee), FormatMoney(needed)));
+            }
+        }
 
         UniValue sendResult = SendTransaction(tx_, keyChange, testmode);
         set_result(sendResult);
@@ -868,8 +896,8 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase, TxValues& txVa
             true,               // fOnlySpendable
             mindepth_,          // nMinDepth
             &destinations);     // onlyFilterByDests
-    // A TX_PQPKH coin is spent only by the YED/vault builders, never by z_sendmany: its signature needs the
-    // vault flags and this operation signs P2PKH only (quantum spec A-15).
+    // An ECC from address and ANY_TADDR spend ECC (P2PKH) coins only; a post-quantum from address is spent
+    // through select_pq_inputs() (beta2 D-2), which signs under the vault flags after Build().
     t_inputs_.erase(std::remove_if(t_inputs_.begin(), t_inputs_.end(), [](const COutput& o) {
         CTxDestination dest;
         return ExtractDestination(o.tx->vout[o.i].scriptPubKey, dest) && IsPQKeyDestination(dest);
@@ -885,6 +913,109 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase, TxValues& txVa
     load_inputs(txValues);
 
     return t_inputs_.size() > 0;
+}
+
+void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount sendAmount) {
+    assert(isfrompq_ && isUsingBuilder_);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    const int nHeight = builder_.GetHeight();
+
+    std::vector<COutput> coins;
+    std::set<CTxDestination> destinations = {fromtaddr_};
+    pwalletMain->AvailableCoins(
+            coins,
+            false,              // fOnlyConfirmed
+            nullptr,            // coinControl
+            true,               // fIncludeZeroValue
+            false,              // fIncludeCoinBase (a post-quantum address is never mined to)
+            true,               // fOnlySpendable
+            mindepth_,          // nMinDepth
+            &destinations);     // onlyFilterByDests
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
+        return !IsPQInputScript(o.tx->vout[o.i].scriptPubKey);
+    }), coins.end());
+    if (coins.empty()) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
+    }
+    // Largest first: each post-quantum input costs its full signature in size and fee.
+    std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
+        return i.Value() > j.Value();
+    });
+
+    KeyIO keyIO(Params());
+    std::vector<CTxOut> tOuts;
+    for (const SendManyRecipient& r : t_outputs_) {
+        tOuts.emplace_back(r.amount, GetScriptForDestination(keyIO.DecodeDestination(r.address)));
+    }
+    const CScript changeScript = GetScriptForDestination(fromtaddr_);
+
+    // The fee depends on the inputs and the change output, and the selection on the fee: repeat until the fee
+    // covers the transaction it pays for (it only grows, so this settles in a few rounds).
+    CAmount fee = fee_;
+    for (int round = 0; ; round++) {
+        if (round >= 16) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Could not settle the fee of this post-quantum spend");
+        }
+        CAmount target = sendAmount + fee;
+        std::vector<COutput> selected;
+        CAmount sum = 0;
+        CAmount change = 0;
+        for (const COutput& c : coins) {
+            selected.push_back(c);
+            sum += c.Value();
+            if (sum >= target) {
+                change = sum - target;
+                if (change == 0 || change >= GetPQDustThreshold(CTxOut(change, changeScript), ::minRelayTxFee)) break;
+            }
+        }
+        if (sum < target) {
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+                               strprintf("Insufficient transparent funds, have %s, need %s",
+                                         FormatMoney(sum), FormatMoney(target)));
+        }
+        // Change below the post-quantum dust threshold (priced on the real spend size) goes to the fee, as
+        // sendtoaddress does: no dust output is made.
+        CAmount dustToFee = 0;
+        if (change > 0 && change < GetPQDustThreshold(CTxOut(change, changeScript), ::minRelayTxFee)) {
+            dustToFee = change;
+            change = 0;
+        }
+
+        std::vector<std::pair<CScript, CAmount>> ins;
+        for (const COutput& c : selected) {
+            ins.emplace_back(c.tx->vout[c.i].scriptPubKey, c.Value());
+        }
+        std::vector<CTxOut> outs = tOuts;
+        if (change > 0) outs.emplace_back(change, changeScript);
+        const CTransaction shape = PQFeeShape(nHeight, ins, outs, 0, z_outputs_.size());
+        const size_t maxInputs = MaxPQInputs(shape);
+        if (selected.size() > maxInputs) {
+            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+                "This send needs %d post-quantum inputs, more than the %d one standard transaction can sign; "
+                "combine the address's coins first with z_mergetoaddress", selected.size(), maxInputs));
+        }
+        const CAmount needed = PQBuilderFee(fee_, shape);
+        if (needed <= fee) {
+            t_inputs_ = selected;
+            txValues.t_inputs_total = sum;
+            fee += dustToFee;
+            txValues.targetAmount = sendAmount + fee;
+            fee_ = fee;
+            break;
+        }
+        if (feeExplicit_) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "Fee %s is below the %s this post-quantum spend needs", FormatMoney(fee_), FormatMoney(needed)));
+        }
+        fee = needed;
+    }
+
+    for (size_t i = 0; i < t_inputs_.size(); i++) {
+        const COutput& c = t_inputs_[i];
+        const CTxOut& txOut = c.tx->vout[c.i];
+        builder_.AddTransparentInputUnsigned(COutPoint(c.tx->GetHash(), c.i), txOut.nValue);
+        pq_inputs_.push_back(PQBuilderInput{i, txOut.scriptPubKey, txOut.nValue});
+    }
 }
 
 bool AsyncRPCOperation_sendmany::load_inputs(TxValues& txValues) {

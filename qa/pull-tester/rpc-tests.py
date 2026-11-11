@@ -120,6 +120,8 @@ BASE_SCRIPTS= [
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -hdseedfile.
     'wallet_pq_address.py',
+    # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.
+    'wallet_address_matrix.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
