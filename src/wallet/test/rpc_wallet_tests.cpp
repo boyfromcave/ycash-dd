@@ -233,6 +233,9 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
     BOOST_CHECK_NO_THROW(CallRPC("getnewaddress \"\""));
     /* Accounts are deprecated */
     BOOST_CHECK_THROW(CallRPC("getnewaddress getnewaddress_demoaccount"), runtime_error);
+    /* The type may come first (beta2 item 10; wallet_getnewaddress_type.py), but not first and again second.
+       (No successful call here: the address-book count below expects the two addresses above.) */
+    BOOST_CHECK_THROW(CallRPC("getnewaddress p2pkh p2pkh"), runtime_error);
 
     /*********************************
      * 		getaccountaddress

@@ -164,10 +164,13 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 2)
         throw runtime_error(
+            "getnewaddress ( \"type\" )\n"
             "getnewaddress ( \"account\" \"type\" )\n"
             "\nReturns a new Ycash address for receiving payments.\n"
-            "\nArguments:\n"
-            "1. \"account\"        (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
+            "\nArguments (the type may come first, getnewaddress pq, or second after the empty account, getnewaddress \"\" pq):\n"
+            "1. \"type\"|\"account\" (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
+            "                     argument. Or the DEPRECATED account: the empty string \"\" (the default account), which may be\n"
+            "                     followed by the type. Any other string is an error.\n"
             "2. \"type\"           (string, optional, default \"p2pkh\") \"p2pkh\" (a keypool key), or \"pq\": a post-quantum address\n"
             "                     (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's HD seed, FN-DSA-512 once\n"
             "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
@@ -179,18 +182,30 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "\"zcashaddress\"    (string) The new Ycash address\n"
             "\nExamples:\n"
             + HelpExampleCli("getnewaddress", "")
+            + HelpExampleCli("getnewaddress", "pq")
             + HelpExampleCli("getnewaddress", "\"\" \"pq\"")
-            + HelpExampleRpc("getnewaddress", "")
+            + HelpExampleRpc("getnewaddress", "\"pq\"")
         );
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
-    // Parse the account first so we don't generate a key if there's an error
+    // Parse the arguments first so we don't generate a key if there's an error. The first slot is the
+    // address type (beta2 item 10: getnewaddress pq, as yed_getnewaddress takes its type first) or the old
+    // account placeholder, which AccountFromValue accepts only as "": a type name was never a valid account,
+    // so no call that worked before changes meaning.
     string strAccount;
-    if (params.size() > 0)
-        strAccount = AccountFromValue(params[0]);
-
-    const std::string type = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "p2pkh";
+    std::string type = "p2pkh";
+    if (params.size() > 0 && params[0].isStr() &&
+        (params[0].get_str() == "p2pkh" || params[0].get_str() == "pq" || params[0].get_str() == "pqslh")) {
+        if (params.size() > 1 && !params[1].isNull())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "the address type is given first, so there is no second argument (getnewaddress pq, or getnewaddress \"\" pq)");
+        type = params[0].get_str();
+    } else {
+        if (params.size() > 0)
+            strAccount = AccountFromValue(params[0]);
+        if (params.size() > 1 && !params[1].isNull())
+            type = params[1].get_str();
+    }
     if (type == "pq" || type == "pqslh") {
         // A plain-YEC post-quantum address (D-Q-20): the TX_PQPKH key a PQ YED address names, from the PQ key
         // chain (DerivePQSeed). Scheme by the holder policy (quantum spec A-13): Falcon once active, else SLH-DSA.
