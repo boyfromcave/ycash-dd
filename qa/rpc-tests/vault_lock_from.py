@@ -410,8 +410,11 @@ class VaultLockFromTest(BitcoinTestFramework):
         r = n0.yed_unlockcoin(op[0], op[1], UNLOCK_ACK)
         assert_equal((r['wasYellowbackLocked'], r['cents']), (True, before))
         assert outpoint not in n0.listlockunspent()
-        assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
-                          n0.vault_lock, self.params(1, key))
+        msg = assert_raises_rpc(-4, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op,
+                                n0.vault_lock, self.params(1, key))
+        # review M-1: the hint names the call that locks it again (`lockunspent true` would not)
+        assert_equal(msg, 'from: refusing to spend a Yellowback outpoint as plain YEC: %s:%d' % op +
+                     ' (its YED would burn; lock it again with yed_lockcoins)')
         # audit L-ii: the key also holds plain YEC; with its token unlocked the lock is funded from the plain coins
         # alone (signed once, with no lock held: audit A-M1), and the token is left alone
         n0.sendtoaddress(key, Decimal('2'))

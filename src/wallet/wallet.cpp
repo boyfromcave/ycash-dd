@@ -7885,5 +7885,5 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
     std::string list;
     for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
     return "refusing to spend a Yellowback outpoint as plain YEC: " + list +
-           " (its YED would burn; lock it again with yed_lockcoins or lockunspent true)";
+           " (its YED would burn; lock it again with yed_lockcoins)";
 }
