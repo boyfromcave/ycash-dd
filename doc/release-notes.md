@@ -51,6 +51,16 @@ Plain-YEC post-quantum addresses (`sq…`)
   `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
   `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
   Falcon keeps its `… can be paid only once …` strings.
+- **`z_getbalance` refuses a transparent address the wallet does not hold** (ECC or post-quantum: no key and no
+  watch-only script) with `From address does not belong to this node, transparent or post-quantum key or watch-only
+  script not found.` (`RPC_INVALID_ADDRESS_OR_KEY`). **This changes inherited v4.5.0 behaviour**: it answered `0`
+  for such an address. A watch-only address still answers; a foreign Sapling address was already refused.
+- **Post-quantum keys are filed in the address book when first paid**: a key of the wallet that receives a
+  `TX_PQPKH` output without an address-book entry is filed (purpose `receive`), so a seed-only restore treats its
+  receipts as receipts, not change (a vault, intent or channel owner key stays out, even when paid a `TX_PQPKH`
+  output); keys paid before this release are filed once when the wallet loads; a fresh YED holder key is filed when
+  drawn. Where Yellowback is live (the network has a vault height and a YED attestor set),
+  `listreceivedbyaddress` and `validateaddress` mark a YED holder key with `"yed_holder": true`.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
   unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap

@@ -233,6 +233,9 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
     BOOST_CHECK_NO_THROW(CallRPC("getnewaddress \"\""));
     /* Accounts are deprecated */
     BOOST_CHECK_THROW(CallRPC("getnewaddress getnewaddress_demoaccount"), runtime_error);
+    /* The type may come first (beta2 item 10; wallet_getnewaddress_type.py), but not first and again second.
+       (No successful call here: the address-book count below expects the two addresses above.) */
+    BOOST_CHECK_THROW(CallRPC("getnewaddress p2pkh p2pkh"), runtime_error);
 
     /*********************************
      * 		getaccountaddress
@@ -361,12 +364,20 @@ BOOST_AUTO_TEST_CASE(rpc_wallet_getbalance)
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
+    UniValue retValue;
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getnewaddress"));
+    std::string taddr1 = retValue.get_str();
 
     BOOST_CHECK_THROW(CallRPC("z_getbalance too many args"), runtime_error);
     BOOST_CHECK_THROW(CallRPC("z_getbalance invalidaddress"), runtime_error);
-    BOOST_CHECK_NO_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7"));
-    BOOST_CHECK_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7 -1"), runtime_error);
-    BOOST_CHECK_NO_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7 0"));
+    // address does not belong to wallet: refused, transparent as shielded (beta2, the lead architect, 2026-11-11)
+    BOOST_CHECK_THROW(CallRPC("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7"), runtime_error);
+    CheckRPCThrows("z_getbalance smFRgn9GzTnGyrpTVAdLhHpfLYfrPCKqyk7",
+        "From address does not belong to this node, transparent or post-quantum key or watch-only script not found.");
+    BOOST_CHECK_NO_THROW(CallRPC(std::string("z_getbalance ") + taddr1));
+    // negative minconf not allowed
+    BOOST_CHECK_THROW(CallRPC(std::string("z_getbalance ") + taddr1 + " -1"), runtime_error);
+    BOOST_CHECK_NO_THROW(CallRPC(std::string("z_getbalance ") + taddr1 + std::string(" 0")));
     BOOST_CHECK_THROW(CallRPC("z_getbalance tnRZ8bPq2pff3xBWhTJhNkVUkm2uhzksDeW5PvEa7aFKGT9Qi3YgTALZfjaY4jU3HLVKBtHdSXxoPoLA3naMPcHBcY88FcF 1"), runtime_error);
 
 
