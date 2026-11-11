@@ -33,6 +33,8 @@ from decimal import Decimal
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    PQ_EXPIRING_COMMIT_REFUSAL,
+    STOCK_FEE_OVER_MAXTXFEE,
     VAULT_BRANCH_ID,
     assert_equal,
     connect_nodes_bi,
@@ -178,7 +180,7 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
         self.mine(1)
         res = self.op_result(n0, z_sendmany_opid(n0, ecc2, [(b, Decimal('1'))], 1, Decimal('0.2')))
         assert_equal(res['status'], 'failed')
-        assert 'CommitTransaction failed' in res['error']['message'], res['error']['message']
+        assert STOCK_FEE_OVER_MAXTXFEE in res['error']['message'], res['error']['message']
         self.computed_fee_over_cap()
         self.refused_commit_is_erased()
 
@@ -217,7 +219,7 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
         n0.generate(2)
         res = self.op_result(n0, opid)
         assert_equal(res['status'], 'failed')
-        assert_equal(res['error']['message'], 'SendTransaction: CommitTransaction failed')
+        assert_equal(res['error']['message'], PQ_EXPIRING_COMMIT_REFUSAL)
         self.sync_all()
 
         def gone(node):

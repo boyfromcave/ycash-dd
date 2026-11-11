@@ -31,6 +31,7 @@ from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     COINBASE_ONLY_TRANSPARENT_REFUSAL,
+    EMPTY_ECC_SOURCE_REFUSAL,
     VAULT_BRANCH_ID,
     assert_equal,
     connect_nodes_bi,
@@ -130,7 +131,7 @@ class WalletYedEccTokenTest(BitcoinTestFramework):
             if unlock_all:
                 lockunspent_true(n1)
             assert outpoint in n1.listlockunspent()
-            every_path('Insufficient transparent funds, no UTXOs found for taddr from address.',
+            every_path(EMPTY_ECC_SOURCE_REFUSAL,
                        COINBASE_ONLY_TRANSPARENT_REFUSAL, 'Could not find any funds to merge.',
                        '')                                    # sendtoaddress/sendmany: their stock insufficient-funds errors
             assert outpoint in n1.listlockunspent()
