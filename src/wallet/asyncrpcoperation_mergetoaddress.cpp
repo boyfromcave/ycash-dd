@@ -300,7 +300,7 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
             CAmount amount = std::get<1>(t);
             CScript scriptPubKey = std::get<2>(t);
             if (IsPQInputScript(scriptPubKey)) {
-                pqInputs.push_back(PQBuilderInput{nIn, scriptPubKey, amount});
+                pqInputs.push_back(PQBuilderInput{nIn, outPoint, scriptPubKey, amount});
                 builder_.AddTransparentInputUnsigned(outPoint, amount);
             } else {
                 builder_.AddTransparentInput(outPoint, scriptPubKey, amount);

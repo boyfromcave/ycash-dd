@@ -1,3 +1,4 @@
+// Copyright (c) 2019 The Zcash developers
 // Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
@@ -99,23 +100,66 @@ CAmount PQBuilderFee(CAmount base, const CTransaction& tx)
                     Zip317ConventionalFee(tx));
 }
 
-size_t MaxPQInputs(const CTransaction& shape)
+unsigned int PolicySigOps(const CTransaction& shape, const std::vector<CScript>& prevScripts)
 {
-    const unsigned int legacy = GetLegacySigOpCount(shape);
-    return legacy >= MAX_STANDARD_TX_SIGOPS ? 0 : (MAX_STANDARD_TX_SIGOPS - legacy) / pq::SIGOP_COST;
+    assert(prevScripts.size() == shape.vin.size());
+    unsigned int n = GetLegacySigOpCount(shape);
+    for (size_t i = 0; i < shape.vin.size(); i++) {
+        if (prevScripts[i].IsPayToScriptHash())
+            n += prevScripts[i].GetSigOpCount(shape.vin[i].scriptSig);
+        n += GetPQSigOpCount(prevScripts[i]);
+    }
+    return n;
+}
+
+void EnsurePQShapeStandard(const CTransaction& shape, const std::vector<CScript>& prevScripts, size_t nPQInputs)
+{
+    if (nPQInputs > MAX_PQ_INPUTS_PER_TX) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "This send needs %d post-quantum inputs, more than the %d one transaction may carry; "
+            "combine the address's coins first with z_mergetoaddress", nPQInputs, MAX_PQ_INPUTS_PER_TX));
+    }
+    const unsigned int sigops = PolicySigOps(shape, prevScripts);
+    if (sigops > MAX_STANDARD_TX_SIGOPS) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "This transaction needs %u signature operations, more than the %u a standard transaction allows; "
+            "spend fewer inputs", sigops, MAX_STANDARD_TX_SIGOPS));
+    }
+}
+
+static void CheckPQInputsStillValid(const std::vector<PQBuilderInput>& ins, uint32_t branchId, unsigned int vaultFlags)
+{
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    EnsureWalletIsUnlocked();
+    const Consensus::Params& consensus = Params().GetConsensus();
+    const int next = chainActive.Height() + 1;
+    if (CurrentEpochBranchId(next, consensus) != branchId || GetVaultScriptFlags(next, consensus) != vaultFlags) {
+        throw JSONRPCError(RPC_WALLET_ERROR,
+            "The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again");
+    }
+    for (const PQBuilderInput& in : ins) {
+        if (pwalletMain->IsSpent(in.outpoint.hash, in.outpoint.n)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "A post-quantum input was spent while this transaction was built; send it again");
+        }
+    }
 }
 
 void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderInput>& ins, int nHeight)
 {
     if (ins.empty()) return;
-    LOCK2(cs_main, pwalletMain->cs_wallet);
-    EnsureWalletIsUnlocked();
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(pwalletMain->cs_wallet);
     const Consensus::Params& consensus = Params().GetConsensus();
     const uint32_t branchId = CurrentEpochBranchId(nHeight, consensus);
-    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(nHeight, consensus);
+    const unsigned int vaultFlags = GetVaultScriptFlags(nHeight, consensus);
+    const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | vaultFlags;
+
+    CheckPQInputsStillValid(ins, branchId, vaultFlags);
+    // No global lock from here: the key comes from the keystore under cs_KeyStore, the signature is made and
+    // verified (ProduceSignature) with nothing else held.
     const CTransaction txConst(mtx);
     for (const PQBuilderInput& in : ins) {
-        if (in.nIn >= mtx.vin.size() || !IsPQInputScript(in.scriptPubKey))
+        if (in.nIn >= mtx.vin.size() || mtx.vin[in.nIn].prevout != in.outpoint || !IsPQInputScript(in.scriptPubKey))
             throw JSONRPCError(RPC_WALLET_ERROR, "Post-quantum input does not match the built transaction");
         SignatureData sigdata;
         if (!ProduceSignature(TransactionSignatureCreator(pwalletMain, &txConst, in.nIn, in.value, SIGHASH_ALL),
@@ -123,4 +167,5 @@ void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderIn
             throw JSONRPCError(RPC_WALLET_ERROR, "Failed to sign a post-quantum input");
         UpdateTransaction(mtx, in.nIn, sigdata);
     }
+    CheckPQInputsStillValid(ins, branchId, vaultFlags);
 }

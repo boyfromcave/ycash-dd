@@ -14,13 +14,18 @@ prefix is hard-coded (the prefixes change under D-9).
 
 - sources ECC, Sapling, PQ FN-DSA, PQ SLH-DSA x destinations ECC, Sapling, PQ FN-DSA, PQ SLH-DSA (16 cells), plus a
   multi-recipient send mixing all four types from a PQ source and from a Sapling source. For every transaction:
-  accepted to the mempool of a second node, mined, its fee pinned (a PQ input: max(DEFAULT_FEE, -pqfeerate x size,
-  the ZIP-317 conventional fee); otherwise the line's default), change from a PQ source back to that address (D-4) and
-  from a Sapling source a Sapling note, balances and listings right on both wallets; one reorg across the block, then
-  the same checks; every received output spent again;
-- z_mergetoaddress: PQ -> PQ, PQ + ECC -> Sapling, Sapling -> PQ, with the same fee rule;
+  accepted to the mempool of a second node, mined, its fee pinned to a fixed number for its shape (computed here from
+  the ZIP-317 sizes of an SLH-DSA input, 7,981 bytes = 54 logical actions = 27,000 zat, and an FN-DSA input, 1,620
+  bytes = 11 actions = 5,500 zat, +500 per Sapling output; 1,000 zat without a PQ input), change from a PQ source back
+  to that address (D-4) and from a Sapling source a Sapling note, balances and listings right on both wallets; one
+  reorg across the block, then the same checks; then every output the receiver got is spent (each receiving address
+  is emptied with z_mergetoaddress);
+- z_mergetoaddress: PQ -> PQ, PQ + ECC -> Sapling, Sapling -> PQ, P2SH multisig + PQ -> ECC, and the per-transaction
+  PQ input cap (100: the merge takes 100 and reports the rest);
+- change below the PQ dust threshold goes to the fee; a send that needs more than 100 PQ inputs is refused;
 - refusals: before the vault upgrade, an FN-DSA address before Falcon, an amount below the PQ dust threshold, an
-  explicit fee below what a PQ spend needs, a coinbase-only source to a PQ address, a locked wallet.
+  explicit fee below what a PQ spend needs, a PQ address of another wallet, insufficient PQ funds, a locked wallet,
+  and an ECC source holding only coinbase paying a PQ address (coinbase is never selected for a transparent recipient).
 
 Node profile P0 (no index): every check uses the wallet calls only.
 
@@ -50,7 +55,13 @@ from test_framework.yellowback_util import conventional_fee
 ACTIVATION = 210        # the vault upgrade (UPGRADE_VAULT)
 FALCON = 220            # -pqfalconheight: FN-DSA-512 admitted from here
 DEFAULT_FEE = 1000      # policy/fees.h (ycash-dd)
-PQ_FEE_RATE = 100       # -pqfeerate default: -minrelaytxfee, zat per 1,000 bytes
+# Fixed fees of fixed shapes (ZIP-317: 500 zat x max(2, ceil(vin bytes / 150), ceil(vout bytes / 34)) + Sapling outputs;
+# an input is outpoint 36 + compact size + scriptSig + sequence 4: SLH-DSA 7,938-byte scriptSig = 7,981 bytes,
+# FN-DSA 1,577-byte scriptSig = 1,620 bytes, P2PKH ~148 bytes). -pqfeerate x size (100 zat/kB) is far below these.
+FEE_SLH = 27000         # one SLH-DSA input: ceil(7981 / 150) = 54 actions
+FEE_FN = 5500           # one FN-DSA input: ceil(1620 / 150) = 11 actions
+FEE_SAPLING_OUT = 500   # one Sapling output: one more action
+PQ_CAP = 100            # MAX_PQ_INPUTS_PER_TX
 ECC, SAP, FN, SLH = 'ECC', 'Sapling', 'PQ-FN-DSA', 'PQ-SLH-DSA'
 KINDS = (ECC, SAP, FN, SLH)
 
@@ -160,10 +171,6 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         vout = sum(zat(o['value']) for o in raw['vout'])
         return vin + zat(raw.get('valueBalance', 0)) - vout, raw
 
-    def pq_rule(self, raw):
-        size = len(raw['hex']) // 2
-        return max(DEFAULT_FEE, max(PQ_FEE_RATE, PQ_FEE_RATE * size // 1000), conventional_fee(raw))
-
     def has_pq_input(self, node, raw):
         for i in raw['vin']:
             prev = node.decoderawtransaction(node.gettransaction(i['txid'])['hex'])
@@ -171,14 +178,14 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                 return True
         return False
 
-    def check_sent(self, node, txid, src):
-        """Mempool of a second node, the fee rule, and D-4 change."""
+    def check_sent(self, node, txid, src, expected=None):
+        """Mempool of a second node, the fee (a fixed number for a PQ shape; the line's default otherwise), D-4 change."""
         sync_mempools(self.nodes[:3])
         assert txid in self.nodes[2].getrawmempool(), txid
         fee, raw = self.fee_of(node, txid)
         pq = self.has_pq_input(node, raw)
-        expected = self.pq_rule(raw) if pq else self.default_fee(raw)
-        assert_equal(fee, expected)
+        assert_equal(pq, expected is not None)
+        assert_equal(fee, expected if pq else self.default_fee(raw))
         if src is not None and self.kind_of(node, src) in (FN, SLH):
             assert pq, txid
             src_spk = self.spk(node, src)
@@ -253,10 +260,14 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         for k in KINDS:
             assert_equal(self.unspent(n0, src[k]), Decimal(5))
 
-        print('refusals: PQ dust, an explicit fee below a PQ spend, a coinbase-only source, a locked wallet')
+        print('refusals: PQ dust, an explicit fee below a PQ spend, another wallet\'s PQ address, a coinbase-only ECC source, a locked wallet')
         assert_raises_rpc('below the dust threshold', self.zsend, n0, src[ECC], [(dst[SLH], Decimal('0.00001'))])
         assert_raises_rpc('below the dust threshold', self.zsend, n0, src[SAP], [(dst[FN], Decimal('0.00000100'))])
         self.zsend_fails(n0, src[SLH], [(dst[ECC], Decimal('0.1'))], 'Fee 0.0001 is below the', Decimal('0.0001'))
+        assert_raises_rpc('From address does not belong to this node, post-quantum key not found.',
+                          self.zsend, n0, dst[SLH], [(src[ECC], Decimal('0.1'))])
+        assert_raises_rpc('From address does not belong to this node, post-quantum key not found.',
+                          n0.z_mergetoaddress, [dst[FN]], src[ECC])
         cb = get_coinbase_address(n0)
         self.zsend_fails(n0, cb, [(dst[SLH], 1)], 'Could not find any non-coinbase UTXOs to spend')
         n3.encryptwallet('matrix-pass')
@@ -275,7 +286,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
             for d in KINDS:
                 amount += Decimal('0.01')
                 txid = self.zsend_ok(n0, src[s], [(dst[d], amount)])
-                fee = self.check_sent(n0, txid, src[s])
+                fee = self.check_sent(n0, txid, src[s], self.pq_fee(s, d == SAP))
                 expect_in[d] += amount
                 expect_left[s] -= amount + coins(fee)
                 sent.append((txid, s))
@@ -283,7 +294,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
         for s in (SLH, SAP):
             mixed = [(dst[d], Decimal('0.05')) for d in KINDS]
             txid = self.zsend_ok(n0, src[s], mixed)
-            fee = self.check_sent(n0, txid, src[s])
+            fee = self.check_sent(n0, txid, src[s], self.pq_fee(s, True))
             for d in KINDS:
                 expect_in[d] += Decimal('0.05')
             expect_left[s] -= Decimal('0.20') + coins(fee)
@@ -323,38 +334,103 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
             assert_equal(n0.gettransaction(txid)['blockhash'], block2)
         check_balances('after the reorg')
 
-        print('every received output is spent again (node 1, each type, to node 0)')
+        print('every output node 1 received is spent: each receiving address emptied with z_mergetoaddress')
         back = n0.getnewaddress()
+        # six outputs at each address (four cells + two mixed sends): the fees of six inputs of each kind
+        merge_fee = {ECC: None, SAP: None, FN: 500 * -(-6 * 1620 // 150), SLH: 500 * -(-6 * 7981 // 150)}
+        total_back = Decimal(0)
         for d in KINDS:
-            txid = self.zsend_ok(n1, dst[d], [(back, Decimal('0.05'))])
-            self.check_sent(n1, txid, dst[d])
+            r = n1.z_mergetoaddress([dst[d]] if d != SAP else ['ANY_SAPLING'], back)
+            assert_equal(r['mergingUTXOs'] + r['mergingNotes'], 6)
+            txid = wait_and_assert_operationid_status(n1, r['opid'])
+            fee = self.check_sent(n1, txid, None, merge_fee[d])
+            total_back += expect_in[d] - coins(fee)
         self.mine(1)
-        assert_equal(n0.getreceivedbyaddress(back), Decimal('0.20'))
+        for d in KINDS:
+            assert_equal(self.unspent(n1, dst[d]), 0)
+        assert_equal(n0.getreceivedbyaddress(back), total_back)
 
         print('z_mergetoaddress: PQ -> PQ, PQ + ECC -> Sapling, Sapling -> PQ')
         merged_pq = n0.getnewaddress('', 'pqslh')
         r = n0.z_mergetoaddress([src[FN]], merged_pq)
+        assert_equal(r['mergingUTXOs'], 5)                # one unspent original and four D-4 change outputs
         txid = wait_and_assert_operationid_status(n0, r['opid'])
-        fee = self.check_sent(n0, txid, None)
+        fee = self.check_sent(n0, txid, None, 500 * -(-5 * 1620 // 150))
         assert_equal(coins(fee), Decimal(r['mergingTransparentValue']) - n0.getrawtransaction(txid, 1)['vout'][0]['value'])
         self.mine(1)
         assert_equal(self.unspent(n0, src[FN]), 0)
         assert_raises_rpc('Fee 0.0001 is below the', n0.z_mergetoaddress, [merged_pq], dst[ECC], Decimal('0.0001'))
         r = n0.z_mergetoaddress([src[SLH], src[ECC]], src[SAP])
+        assert_equal(r['mergingUTXOs'], 6)                # five SLH-DSA change outputs and one ECC coin
         txid = wait_and_assert_operationid_status(n0, r['opid'])
-        self.check_sent(n0, txid, None)
+        self.check_sent(n0, txid, None, 500 * (-(-(5 * 7981 + 148) // 150) + 1))
         self.mine(1)
         assert_equal(self.unspent(n0, src[SLH]), 0)
         merged_fn = n0.getnewaddress('', 'pq')
         r = n0.z_mergetoaddress(['ANY_SAPLING'], merged_fn)
         txid = wait_and_assert_operationid_status(n0, r['opid'])
         fee = self.check_sent(n0, txid, None)
-        assert_equal(fee, DEFAULT_FEE if not self.is_v6() else fee)
         self.mine(1)
         assert_equal(self.unspent(n0, merged_fn), Decimal(r['mergingShieldedValue']) - coins(fee))
         txid = self.zsend_ok(n0, merged_fn, [(dst[SAP], Decimal('0.5'))])
-        self.check_sent(n0, txid, merged_fn)
+        self.check_sent(n0, txid, merged_fn, FEE_FN + FEE_SAPLING_OUT)
         self.mine(1)
+
+        print('z_mergetoaddress: a P2SH multisig coin and a PQ coin in one merge (the policy sigops of both)')
+        k1, k2 = n0.getnewaddress(), n0.getnewaddress()
+        msig = n0.addmultisigaddress(2, [n0.validateaddress(k1)['pubkey'], n0.validateaddress(k2)['pubkey']])
+        pq_one = n0.getnewaddress('', 'pqslh')
+        n0.sendtoaddress(msig, 1)
+        n0.sendtoaddress(pq_one, 1)
+        self.mine(1)
+        r = n0.z_mergetoaddress([msig, pq_one], back)
+        assert_equal(r['mergingUTXOs'], 2)
+        txid = wait_and_assert_operationid_status(n0, r['opid'])
+        # vin: 7,981 (SLH-DSA) + ~260 (2-of-2 P2SH: OP_0, two signatures, the 71-byte redeem script) = 55 actions
+        self.check_sent(n0, txid, None, 27500)
+        self.mine(1)
+
+        print('PQ change below the dust threshold goes to the fee')
+        dust_src = n0.getnewaddress('', 'pqslh')
+        n0.sendtoaddress(dust_src, 1)
+        self.mine(1)
+        txid = self.zsend_ok(n0, dust_src, [(n1.getnewaddress(), Decimal(1) - coins(FEE_SLH + 500))])
+        assert_equal(len(n0.getrawtransaction(txid, 1)['vout']), 1)     # no change output
+        self.check_sent(n0, txid, dust_src, FEE_SLH + 500)                # the 500-zat dust is part of the fee
+        self.mine(1)
+        assert_equal(self.unspent(n0, dust_src), 0)
+
+        print('insufficient PQ funds; more than %d PQ inputs (send refused, merge takes %d and reports the rest)' % (PQ_CAP, PQ_CAP))
+        small = n0.getnewaddress('', 'pq')
+        self.zsend_fails(n0, small, [(back, Decimal('0.1'))], 'Insufficient transparent funds, no UTXOs found')
+        small_spk = self.spk(n0, small)
+        held = []    # locked while funding, or sendtoaddress would select them again (it spends PQ coins too)
+        for i in range(PQ_CAP + 10):
+            txid = n0.sendtoaddress(small, Decimal('0.001'))
+            vout = [o['n'] for o in n0.getrawtransaction(txid, 1)['vout'] if o['scriptPubKey']['hex'] == small_spk][0]
+            held.append({'txid': txid, 'vout': vout})
+            n0.lockunspent(False, [held[-1]])
+            if i % 20 == 19:
+                self.mine(1)
+        self.mine(1)
+        n0.lockunspent(True, held)
+        assert_equal(self.unspent(n0, small), Decimal('0.110'))
+        self.zsend_fails(n0, small, [(back, Decimal('0.2'))], 'Insufficient transparent funds, have 0.11')
+        self.zsend_fails(n0, small, [(back, Decimal('0.1'))],
+                         'This send needs %d post-quantum inputs, more than the %d one transaction may carry' % (PQ_CAP + 1, PQ_CAP))
+        cap_fee = 500 * -(-PQ_CAP * 1620 // 150)       # 1,080 actions: 0.0054 YEC, given explicitly (limit 0 needs a fee)
+        r = n0.z_mergetoaddress([small], merged_fn, coins(cap_fee), 0)
+        assert_equal((r['mergingUTXOs'], r['remainingUTXOs']), (PQ_CAP, 10))
+        txid = wait_and_assert_operationid_status(n0, r['opid'])
+        self.check_sent(n0, txid, None, cap_fee)
+        self.mine(1)
+        assert_equal(len(n0.listunspent(1, 9999999, [small])), 10)
+
+    def pq_fee(self, s, sapling_out):
+        """The fixed fee of a one-input send from a source of kind s (None: no PQ input, the line's default)."""
+        if s not in (FN, SLH):
+            return None
+        return (FEE_SLH if s == SLH else FEE_FN) + (FEE_SAPLING_OUT if sapling_out else 0)
 
 
 if __name__ == '__main__':

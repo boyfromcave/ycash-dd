@@ -4820,7 +4820,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             "\nconstrained by the consensus rule defining a maximum transaction size of "
             + strprintf("%d bytes before Sapling, and %d", MAX_TX_SIZE_BEFORE_SAPLING, MAX_TX_SIZE_AFTER_SAPLING)
             + "\nbytes once Sapling activates. A post-quantum address merges its own coins (at most "
-            + strprintf("%d", (MAX_STANDARD_TX_SIGOPS - 1) / pq::SIGOP_COST) + " per transaction, the"
+            + strprintf("%d", MAX_PQ_INPUTS_PER_TX) + " per transaction, within the"
             + "\nstandard signature-operation limit); the fee of such a merge is priced on its size (the default is raised to it,"
             + "\nan explicit fee below it is refused)."
             + HelpRequiringPassphrase() + "\n"
@@ -5028,10 +5028,11 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         estimatedTxSize += OUTPUTDESCRIPTION_SIZE;
     }
 
-    // Post-quantum inputs: each OP_CHECKPQSIG costs pq::SIGOP_COST policy sigops (one sigop is left for the
-    // destination output's script).
+    // Post-quantum inputs (beta2 D-6): at most MAX_PQ_INPUTS_PER_TX of them, and the policy sigops of the selected
+    // inputs (pq::SIGOP_COST per OP_CHECKPQSIG, a P2SH input's redeem-script sigops) within MAX_STANDARD_TX_SIGOPS,
+    // one left for the destination output's script. A coin past either limit stays for a later merge.
     size_t numPQUtxos = 0;
-    const size_t maxPQUtxos = (MAX_STANDARD_TX_SIGOPS - 1) / pq::SIGOP_COST;
+    unsigned int selectedSigOps = 1;
 
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
@@ -5067,9 +5068,17 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             if (!maxedOutUTXOsFlag) {
                 size_t increase = isPQ ? PQSpendInputSize(std::get<CPQKeyID>(address).scheme) :
                                   (std::get_if<CScriptID>(&address) != nullptr) ? CTXIN_SPEND_P2SH_SIZE : CTXIN_SPEND_DUST_SIZE;
+                unsigned int sigops = 0;
+                if (isPQ) {
+                    sigops = GetPQSigOpCount(scriptPubKey);
+                } else if (const CScriptID* sid = std::get_if<CScriptID>(&address)) {
+                    CScript redeem;
+                    sigops = pwalletMain->GetCScript(*sid, redeem) ? redeem.GetSigOpCount(true) : MAX_P2SH_SIGOPS;
+                }
                 if (estimatedTxSize + increase >= max_tx_size ||
                     (mempoolLimit > 0 && utxoCounter > mempoolLimit) ||
-                    (isPQ && numPQUtxos >= maxPQUtxos))
+                    (isPQ && numPQUtxos >= MAX_PQ_INPUTS_PER_TX) ||
+                    selectedSigOps + sigops > MAX_STANDARD_TX_SIGOPS)
                 {
                     maxedOutUTXOsFlag = true;
                 } else {
@@ -5077,6 +5086,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     COutPoint utxo(out.tx->GetHash(), out.i);
                     utxoInputs.emplace_back(utxo, nValue, scriptPubKey);
                     mergedUTXOValue += nValue;
+                    selectedSigOps += sigops;
                     if (isPQ) numPQUtxos++;
                 }
             }
@@ -5192,13 +5202,20 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     // A merge with post-quantum inputs pays the fee rule of a PQ spend on its real size (beta2 D-6): the default
     // fee is raised to it, an explicit fee below it is refused.
     if (numPQUtxos > 0) {
+        // The TransactionBuilder signs the PQ inputs after Build(); it has no Sprout path for them.
+        if (!sproutNoteInputs.empty() || isToSproutZaddr) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
+        }
         std::vector<std::pair<CScript, CAmount>> shapeIns;
+        std::vector<CScript> prevScripts;
         for (const MergeToAddressInputUTXO& t : utxoInputs) {
             shapeIns.emplace_back(std::get<2>(t), std::get<1>(t));
+            prevScripts.push_back(std::get<2>(t));
         }
         std::vector<CTxOut> shapeOuts;
         if (IsValidDestination(taddr)) shapeOuts.emplace_back(mergedValue, GetScriptForDestination(taddr));
         const CTransaction shape = PQFeeShape(nextBlockHeight, shapeIns, shapeOuts, saplingNoteInputs.size(), isToSaplingZaddr ? 1 : 0);
+        EnsurePQShapeStandard(shape, prevScripts, numPQUtxos);
         const CAmount needed = PQBuilderFee(nFee, shape);
         if (needed > nFee) {
             if (params.size() > 2) {

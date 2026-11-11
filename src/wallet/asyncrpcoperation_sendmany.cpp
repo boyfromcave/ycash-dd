@@ -956,18 +956,17 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         if (round >= 16) {
             throw JSONRPCError(RPC_WALLET_ERROR, "Could not settle the fee of this post-quantum spend");
         }
+        // The fewest coins (largest first) that cover the target. Change below the dust threshold is folded into the
+        // fee below rather than avoided by adding a coin: another PQ input costs more than the dust it would save.
         CAmount target = sendAmount + fee;
         std::vector<COutput> selected;
         CAmount sum = 0;
-        CAmount change = 0;
         for (const COutput& c : coins) {
+            if (sum >= target) break;
             selected.push_back(c);
             sum += c.Value();
-            if (sum >= target) {
-                change = sum - target;
-                if (change == 0 || change >= GetPQDustThreshold(CTxOut(change, changeScript), ::minRelayTxFee)) break;
-            }
         }
+        CAmount change = sum - target;
         if (sum < target) {
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                                strprintf("Insufficient transparent funds, have %s, need %s",
@@ -982,18 +981,15 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         }
 
         std::vector<std::pair<CScript, CAmount>> ins;
+        std::vector<CScript> prevScripts;
         for (const COutput& c : selected) {
             ins.emplace_back(c.tx->vout[c.i].scriptPubKey, c.Value());
+            prevScripts.push_back(c.tx->vout[c.i].scriptPubKey);
         }
         std::vector<CTxOut> outs = tOuts;
         if (change > 0) outs.emplace_back(change, changeScript);
         const CTransaction shape = PQFeeShape(nHeight, ins, outs, 0, z_outputs_.size());
-        const size_t maxInputs = MaxPQInputs(shape);
-        if (selected.size() > maxInputs) {
-            throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
-                "This send needs %d post-quantum inputs, more than the %d one standard transaction can sign; "
-                "combine the address's coins first with z_mergetoaddress", selected.size(), maxInputs));
-        }
+        EnsurePQShapeStandard(shape, prevScripts, selected.size());
         const CAmount needed = PQBuilderFee(fee_, shape);
         if (needed <= fee) {
             t_inputs_ = selected;
@@ -1014,7 +1010,7 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         const COutput& c = t_inputs_[i];
         const CTxOut& txOut = c.tx->vout[c.i];
         builder_.AddTransparentInputUnsigned(COutPoint(c.tx->GetHash(), c.i), txOut.nValue);
-        pq_inputs_.push_back(PQBuilderInput{i, txOut.scriptPubKey, txOut.nValue});
+        pq_inputs_.push_back(PQBuilderInput{i, COutPoint(c.tx->GetHash(), c.i), txOut.scriptPubKey, txOut.nValue});
     }
 }
 

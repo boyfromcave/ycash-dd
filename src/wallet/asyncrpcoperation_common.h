@@ -42,9 +42,18 @@ std::pair<CTransaction, UniValue> SignSendRawTransaction(UniValue obj, std::opti
  */
 struct PQBuilderInput {
     size_t nIn;              //!< the input's index in the built transaction (Build() keeps the order of vin)
+    COutPoint outpoint;      //!< the coin selected; SignPQBuilderInputs refuses a vin[nIn] that spends another
     CScript scriptPubKey;    //!< the TX_PQPKH script of the coin
     CAmount value;
 };
+
+/**
+ * The most post-quantum inputs one z_sendmany / z_mergetoaddress transaction carries. Measured on an Apple M-series
+ * laptop (2026-11-10, regtest, under load): an SLH-DSA-SHA2-128s input signs and verifies in ~0.33 s, an FN-DSA-512
+ * input in ~3 ms. 100 SLH-DSA inputs are ~33 s of signing (done with no global lock held, SignPQBuilderInputs) and
+ * ~0.8 MB, under half a block; policy alone would allow 199 (MAX_STANDARD_TX_SIGOPS / pq::SIGOP_COST, less the outputs).
+ */
+static const size_t MAX_PQ_INPUTS_PER_TX = 100;
 
 /**
  * The shape of the transaction a builder operation will produce, for the fee and the sigop check before
@@ -63,14 +72,28 @@ CTransaction PQFeeShape(int nHeight, const std::vector<std::pair<CScript, CAmoun
  */
 CAmount PQBuilderFee(CAmount base, const CTransaction& tx);
 
-/** The most post-quantum inputs one standard transaction carries: each OP_CHECKPQSIG costs pq::SIGOP_COST policy
- *  sigops, MAX_STANDARD_TX_SIGOPS in all, less the legacy sigops of `shape` (its outputs). */
-size_t MaxPQInputs(const CTransaction& shape);
+/**
+ * The policy signature-operation count of `shape` as the mempool counts it (main.cpp, AcceptToMemoryPool): its legacy
+ * sigops, the P2SH sigops of each input whose previous output (prevScripts[i]) is P2SH (from the redeem script in its
+ * dummy scriptSig), and pq::SIGOP_COST per OP_CHECKPQSIG in each previous output (GetPQSigOpCount).
+ */
+unsigned int PolicySigOps(const CTransaction& shape, const std::vector<CScript>& prevScripts);
+
+/**
+ * Refuse a builder transaction with more than MAX_PQ_INPUTS_PER_TX post-quantum inputs (RPC_WALLET_ERROR, "This send
+ * needs …") or more than MAX_STANDARD_TX_SIGOPS policy sigops (RPC_WALLET_ERROR, "This transaction needs …"), before
+ * anything is proved or signed.
+ */
+void EnsurePQShapeStandard(const CTransaction& shape, const std::vector<CScript>& prevScripts, size_t nPQInputs);
 
 /**
  * Signs the post-quantum inputs of a built transaction under the vault script flags of nHeight (the height the
- * builder was made for; quantum spec §5.2) and that height's branch ID. Takes cs_main and pwalletMain->cs_wallet;
- * throws RPC_WALLET_UNLOCK_NEEDED for a locked wallet and RPC_WALLET_ERROR when a signature cannot be made.
+ * builder was made for; quantum spec §5.2) and that height's branch ID. Must be called with neither cs_main nor
+ * pwalletMain->cs_wallet held, and holds neither while signing (an SLH-DSA signature takes ~0.3 s): it takes them
+ * briefly before and after the signing loop to check that the wallet is unlocked, that every input is the coin
+ * selected and still unspent by the wallet, and that the next block's branch ID and vault flags are still those of
+ * nHeight (a reorg or an upgrade boundary while proving or signing). Throws RPC_WALLET_UNLOCK_NEEDED for a locked
+ * wallet and RPC_WALLET_ERROR otherwise; the keys come from the keystore under its own lock.
  */
 void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderInput>& ins, int nHeight);
 
