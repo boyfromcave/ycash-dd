@@ -171,6 +171,15 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   the YEC their token outputs carry is not taken for change); holder keys issued by an earlier build
   are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
   out).
+- **`getnewaddress` takes the type first** (beta2 item 10): `getnewaddress pq`, `getnewaddress pqslh` and
+  `getnewaddress p2pkh`, as `yed_getnewaddress` takes its type; the old shape `getnewaddress "" "pq"` keeps
+  working, and `getnewaddress` with no argument is still a P2PKH address. A type name was never a valid first
+  argument (the account placeholder accepts only `""`), so no call that worked before changes meaning; any other
+  first string is still refused, now with `Accounts are unsupported; the first argument is the address type,
+  "p2pkh", "pq" or "pqslh" (lower case), or "" followed by the type` (the type names are case-sensitive, as
+  `yed_getnewaddress`'s and `z_getnewaddress`'s are, so `PQ` is refused with this message), and a type given first and again second is
+  refused with `the address type is given first, so there is no second argument (getnewaddress pq, or
+  getnewaddress "" pq)`.
 - `z_sendmany` pays an `sq…` recipient (as a transparent output); no `z_*` RPC spends from one.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
