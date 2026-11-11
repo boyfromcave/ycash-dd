@@ -97,4 +97,39 @@ void EnsurePQShapeStandard(const CTransaction& shape, const std::vector<CScript>
  */
 void SignPQBuilderInputs(CMutableTransaction& mtx, const std::vector<PQBuilderInput>& ins, int nHeight);
 
+/**
+ * Beta2 (the Yellowback second check, review m2, audit L-ii): removes from `coins` every Yellowback outpoint
+ * (YellowbackInputRefusal: a token, vault or carrier whose coin lock was removed) and returns the refusal naming them
+ * ("" when there were none); the caller spends the remaining plain coins and throws the refusal (RPC_WALLET_ERROR) only
+ * when they do not cover the send. A `strict` caller (a post-quantum source) is refused outright while the index is
+ * unhealthy (thrown here). cs_main and cs_wallet may be held.
+ */
+std::string DropYellowbackCoins(std::vector<COutput>& coins, bool strict);
+
+/**
+ * Beta2 (audit A-M2): what one more post-quantum input of `scheme` adds to a plain spend's fee at the current rule:
+ * max(PlainPQFeeRate() x its spend size, the ZIP-317 marginal fee of its logical actions) (SLH-DSA 27,000 zat, FN-DSA
+ * 5,500 zat with no attested price). A coin worth no more than this is never selected by z_sendmany or merged by
+ * z_mergetoaddress from a post-quantum address: spending it costs at least what it holds (outsiders can place such
+ * outputs on a known address at the relay dust price, far below this).
+ */
+CAmount PQInputMarginalFee(uint8_t scheme);
+
+/**
+ * Beta2 (audit H1): refuse an explicit fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee …
+ * is above the … cap on a post-quantum spend"): the commit submits a PQ transaction without the absurd-fee check
+ * only within that cap, so a larger fee would be built, signed and then refused at the commit.
+ */
+void EnsurePQFeeWithinCap(CAmount fee);
+
+/**
+ * Beta2 (audit H1): SendTransaction for a transaction with post-quantum inputs built outside the wallet's locks
+ * (z_sendmany, z_mergetoaddress). Under cs_main and cs_wallet, held across the commit: the fee is re-checked against
+ * PQMaxTxFee() (a price change in a block found while the inputs were signed can lower it; RPC_WALLET_ERROR, nothing
+ * recorded); and when the commit fails (the mempool refuses the transaction) the transaction is erased from the
+ * wallet again, as the Yellowback commit does (YellowbackWallet::RemoveOrphan), so that no later restart
+ * (ReacceptWalletTransactions, which judges the fee by another rule) broadcasts a send the caller was told failed.
+ */
+UniValue SendPQTransaction(CTransaction& tx, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode);
+
 #endif // ZCASH_WALLET_ASYNCRPCOPERATION_COMMON_H

@@ -377,7 +377,8 @@ bool AsyncRPCOperation_mergetoaddress::main_impl()
             }
         }
 
-        UniValue sendResult = SendTransaction(tx_, std::nullopt, testmode);
+        // A post-quantum merge is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+        UniValue sendResult = pqInputs.empty() ? SendTransaction(tx_, std::nullopt, testmode) : SendPQTransaction(tx_, std::nullopt, testmode);
         set_result(sendResult);
 
         return true;

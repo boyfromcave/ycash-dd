@@ -434,7 +434,8 @@ bool AsyncRPCOperation_sendmany::main_impl() {
             }
         }
 
-        UniValue sendResult = SendTransaction(tx_, keyChange, testmode);
+        // A post-quantum send is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+        UniValue sendResult = pq_inputs_.empty() ? SendTransaction(tx_, keyChange, testmode) : SendPQTransaction(tx_, keyChange, testmode);
         set_result(sendResult);
 
         return true;
@@ -902,6 +903,14 @@ bool AsyncRPCOperation_sendmany::find_utxos(bool fAcceptCoinbase, TxValues& txVa
         CTxDestination dest;
         return ExtractDestination(o.tx->vout[o.i].scriptPubKey, dest) && IsPQKeyDestination(dest);
     }), t_inputs_.end());
+    // The Yellowback second check (review m2): an ECC from address or ANY_TADDR never spends a YED token, vault or
+    // carrier whose coin lock was removed; the send goes on with the other coins, refused only if it needs them.
+    const std::string yedRefusal = DropYellowbackCoins(t_inputs_, false);
+    if (!yedRefusal.empty()) {
+        CAmount total = 0;
+        for (const COutput& c : t_inputs_) total += c.Value();
+        if (total < txValues.targetAmount) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+    }
     if (t_inputs_.empty()) return false;
 
     // sort in ascending order, so smaller utxos appear first
@@ -934,16 +943,16 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
     coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
         return !IsPQInputScript(o.tx->vout[o.i].scriptPubKey);
     }), coins.end());
+    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
+    // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
+    // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
+    const std::string yedRefusal = DropYellowbackCoins(coins, true);
+    // Audit A-M2: a coin worth no more than the fee its own input adds is never selected (PQInputMarginalFee).
+    const CAmount marginal = PQInputMarginalFee(std::get<CPQKeyID>(fromtaddr_).scheme);
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& o) { return o.Value() <= marginal; }), coins.end());
     if (coins.empty()) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
-    }
-    // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the send when any
-    // candidate coin is one the Yellowback index knows as a token or vault, or the wallet layer as a carrier.
-    {
-        std::vector<COutPoint> candidates;
-        for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
-        const std::string refusal = YellowbackInputRefusal(candidates);
-        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);
     }
     // Largest first: each post-quantum input costs its full signature in size and fee.
     std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
@@ -976,6 +985,7 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         }
         CAmount change = sum - target;
         if (sum < target) {
+            if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
                                strprintf("Insufficient transparent funds, have %s, need %s",
                                          FormatMoney(sum), FormatMoney(target)));

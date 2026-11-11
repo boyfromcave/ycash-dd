@@ -16,6 +16,7 @@
 #include "policy/policy.h"
 #include "rpc/server.h"
 #include "script/sign.h"
+#include "utilmoneystr.h"
 
 extern UniValue signrawtransaction(const UniValue& params, bool fHelp);
 
@@ -36,6 +37,62 @@ UniValue SendTransaction(CTransaction& tx, std::optional<std::reference_wrapper<
         o.pushKV("hex", EncodeHexTx(tx));
     }
     return o;
+}
+
+std::string DropYellowbackCoins(std::vector<COutput>& coins, bool strict)
+{
+    std::vector<COutPoint> candidates;
+    for (const COutput& c : coins) candidates.emplace_back(c.tx->GetHash(), c.i);
+    std::vector<COutPoint> refused;
+    const std::string refusal = YellowbackInputRefusal(candidates, strict, &refused);
+    if (refusal.empty()) return "";
+    if (refused.empty()) throw JSONRPCError(RPC_WALLET_ERROR, refusal);     // the unhealthy-index refusal
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& c) {
+        return std::find(refused.begin(), refused.end(), COutPoint(c.tx->GetHash(), c.i)) != refused.end();
+    }), coins.end());
+    return refusal;
+}
+
+CAmount PQInputMarginalFee(uint8_t scheme)
+{
+    const size_t n = PQSpendInputSize(scheme);
+    return std::max(PlainPQFeeRate().GetFee(n), ZIP317_MARGINAL_FEE * (CAmount)((n + ZIP317_INPUT_SIZE - 1) / ZIP317_INPUT_SIZE));
+}
+
+void EnsurePQFeeWithinCap(CAmount fee)
+{
+    const CAmount cap = PQMaxTxFee();
+    if (fee > cap) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "Fee %s is above the %s cap on a post-quantum spend (-maxtxfee, or $2 at the attested price, at most -yellowbackmaxtxfee)",
+            FormatMoney(fee), FormatMoney(cap)));
+    }
+}
+
+UniValue SendPQTransaction(CTransaction& tx, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode)
+{
+    if (testmode) return SendTransaction(tx, reservekey, testmode);
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    if (std::optional<CAmount> over = YedFeeOverCap(tx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf(
+            "The post-quantum fee cap fell to %s while this transaction was signed, below its fee %s; nothing was sent, send it again",
+            FormatMoney(PQMaxTxFee()), FormatMoney(over.value())));
+    }
+    const uint256 txid = tx.GetHash();
+    const bool known = pwalletMain->mapWallet.count(txid) != 0;
+    try {
+        return SendTransaction(tx, reservekey, testmode);
+    } catch (...) {
+        // CommitTransaction records the transaction before the mempool judges it; a refused one must not stay at
+        // depth -1, where a restart's ReacceptWalletTransactions would submit it (by its own fee rule) after the
+        // caller was told it failed and may have sent again.
+        if (!known && pwalletMain->mapWallet.count(txid)) {
+            LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
+            pwalletMain->EraseFromWallet(txid);
+            pwalletMain->mapWallet.erase(txid);
+        }
+        throw;
+    }
 }
 
 std::pair<CTransaction, UniValue> SignSendRawTransaction(UniValue obj, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode) {
