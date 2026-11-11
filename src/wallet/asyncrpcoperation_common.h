@@ -136,7 +136,7 @@ UniValue SendPQTransaction(CTransaction& tx, std::optional<std::reference_wrappe
 /**
  * Beta2 (audit H1, review L-2): the erase SendPQTransaction makes when the commit of a transaction the wallet did not
  * hold before fails. cs_main and wallet.cs_wallet held. Returns "" when `txid` is not in the wallet or was erased
- * (wallet file and mapWallet); otherwise the error for the caller, naming the txid: the transaction is in the mempool
+ * (CWallet::EraseUnbroadcastTx: the wallet file, mapWallet and every index naming it, review H-1); otherwise the error for the caller, naming the txid: the transaction is in the mempool
  * (never erased: it may already be relayed), or the wallet file refused the erase (the wallet still holds the
  * unbroadcast transaction, which a restart may submit).
  */

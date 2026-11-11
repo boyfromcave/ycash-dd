@@ -1486,7 +1486,7 @@ void CWallet::AddToSaplingSpends(const uint256& nullifier, const uint256& wtxid)
     SyncMetaData<uint256>(range);
 }
 
-#ifdef YCASH_WR
+// Built in every configuration (not only YCASH_WR): EraseUnbroadcastTx uses them too.
 void CWallet::RemoveFromSpends(const uint256& wtxid)
 {
     RemoveFromTransparentSpends(wtxid);
@@ -1550,7 +1550,6 @@ void CWallet::RemoveFromSaplingSpends(const uint256& wtxid)
         }
     }
 }
-#endif // YCASH_WR
 
 void CWallet::AddToSpends(const uint256& wtxid)
 {
@@ -3245,6 +3244,42 @@ void CWallet::EraseFromWallet(const uint256 &hash)
             CWalletDB(strWalletFile).EraseTx(hash);
     }
     return;
+}
+
+bool CWallet::EraseUnbroadcastTx(const uint256& txid)
+{
+    AssertLockHeld(cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = mapWallet.find(txid);
+    if (it == mapWallet.end()) return true;
+    // The wallet file first: if its record stays, everything stays, so memory shows what a restart would load.
+    if (fFileBacked && !CWalletDB(strWalletFile).EraseTx(txid)) return false;
+    const CWalletTx& wtx = it->second;
+    // Cached balances: the outputs this transaction spent become spendable again (reads the nullifier maps below
+    // before they change; the spent notes belong to other transactions).
+    MarkAffectedTransactionsDirty(wtx);
+    // mapTxSpends, mapTxSproutNullifiers, mapTxSaplingNullifiers: every entry whose value is this txid. A stale one
+    // makes the next transaction spending the same coin run SyncMetaData, whose mapWallet[] would recreate this
+    // txid as an empty CWalletTx with no wallet bound (review H-1: RelayWalletTransaction asserts on it).
+    RemoveFromSpends(txid);
+    // mapSproutNullifiersToNotes, mapSaplingNullifiersToNotes: entries naming this transaction's own notes (set only
+    // once a note's position is known, so normally none for an unmined transaction).
+    for (std::map<uint256, JSOutPoint>::iterator n = mapSproutNullifiersToNotes.begin(); n != mapSproutNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSproutNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    for (std::map<uint256, SaplingOutPoint>::iterator n = mapSaplingNullifiersToNotes.begin(); n != mapSaplingNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSaplingNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    // setSiftedSprout, setSiftedSapling: the witness updates at every block do mapWallet.at() on each member.
+    setSiftedSprout.erase(txid);
+    setSiftedSapling.erase(txid);
+    // Nothing else names it: this line has no wtxOrdered (OrderedTxItems sorts mapWallet on each call), no
+    // mapRequestCount and no recipient mappings; setExWallet holds only deleted transactions; locked coins and notes
+    // name the inputs' outpoints and belong to the operation that built the transaction, which releases them;
+    // Yellowback's yecLocks are taken only after an accepted commit.
+    mapWallet.erase(it);
+    return true;
 }
 
 

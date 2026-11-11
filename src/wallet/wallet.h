@@ -1087,12 +1087,11 @@ private:
     void AddToSproutSpends(const uint256& nullifier, const uint256& wtxid);
     void AddToSaplingSpends(const uint256& nullifier, const uint256& wtxid);
     void AddToSpends(const uint256& wtxid);
-#ifdef YCASH_WR
+    // Built in every configuration (not only YCASH_WR): EraseUnbroadcastTx uses them too.
     void RemoveFromTransparentSpends(const uint256& wtxid);
     void RemoveFromSproutSpends(const uint256& wtxid);
     void RemoveFromSaplingSpends(const uint256& wtxid);
     void RemoveFromSpends(const uint256& wtxid);
-#endif // YCASH_WR
 
 public:
     /*
@@ -1572,6 +1571,14 @@ public:
     void SyncTransaction(const CTransaction& tx, const CBlock* pblock, const int nHeight);
     bool AddToWalletIfInvolvingMe(const CTransaction& tx, const CBlock* pblock, const int nHeight, bool fUpdate);
     void EraseFromWallet(const uint256 &hash);
+    /**
+     * Erase a wallet transaction that was recorded by CommitTransaction but never reached the mempool or a block
+     * (Yellowback: the refused post-quantum send, YellowbackWallet::RemoveOrphan), together with every index that
+     * names it, so that no later lookup recreates it as an empty entry (review H-1). The caller has established
+     * that the transaction is neither in the mempool nor in a block. Returns false, changing nothing, only when
+     * the wallet file record could not be erased. Requires cs_wallet.
+     */
+    bool EraseUnbroadcastTx(const uint256& txid);
     void WitnessNoteCommitment(
          std::vector<uint256> commitments,
          std::vector<std::optional<SproutWitness>>& witnesses,

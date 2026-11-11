@@ -106,14 +106,15 @@ std::string EraseRefusedPQSend(CWallet& wallet, const uint256& txid)
                          "wallet and will be relayed: do not send it again", txid.GetHex());
     }
     LogPrintf("SendPQTransaction: erasing %s, recorded by CommitTransaction and refused by the mempool\n", txid.ToString());
-    if (wallet.fFileBacked && !CWalletDB(wallet.strWalletFile).EraseTx(txid)) {
+    // Review H-1: the shared erase drops every index naming the transaction (its spends above all), not only the
+    // mapWallet entry, so that sending again from the same coins in this process is safe.
+    if (!wallet.EraseUnbroadcastTx(txid)) {
         // Kept in mapWallet too, so the wallet shows what its file holds (and a restart would submit).
         LogPrintf("ERROR: SendPQTransaction: could not erase %s from the wallet file\n", txid.ToString());
         return strprintf("The mempool refused transaction %s, but it could not be erased from the wallet file: the "
                          "wallet still holds this unbroadcast transaction and may submit it at the next start; check "
                          "it with gettransaction before you send again", txid.GetHex());
     }
-    wallet.mapWallet.erase(txid);   // mapTxSpends entries are ignored once it is gone (IsSpent looks it up)
     return "";
 }
 
