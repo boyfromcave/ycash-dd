@@ -15,6 +15,7 @@
 #include "main.h"
 #include "net.h"
 #include "netbase.h"
+#include "policy/policy.h"
 #include "proof_verifier.h"
 #include "rpc/server.h"
 #include "timedata.h"
@@ -155,6 +156,31 @@ void EnsurePQRecipientPayable(const CTxDestination& dest)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "post-quantum addresses can be paid only once the vault upgrade is active at the next block");
     if (pq->scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), next))
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "an FN-DSA-512 (scheme 2) post-quantum address can be paid only once Falcon is active at the next block");
+}
+
+void EnsurePQSourceSpendable(const CTxDestination& dest)
+{
+    const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest);
+    if (!pq) return;
+    AssertLockHeld(cs_main);
+    AssertLockHeld(pwalletMain->cs_wallet);
+    const int next = chainActive.Height() + 1;
+    if (!Params().GetConsensus().NetworkUpgradeActive(next, Consensus::UPGRADE_VAULT))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "post-quantum addresses can be spent from only once the vault upgrade is active at the next block");
+    if (pq->scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), next))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block");
+    if (!pwalletMain->HavePQKey(*pq))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, post-quantum key not found.");
+    EnsureWalletIsUnlocked();
+}
+
+void EnsurePQAmountNotDust(const CTxDestination& dest, CAmount amount)
+{
+    if (!IsPQKeyDestination(dest)) return;
+    const CTxOut out(amount, GetScriptForDestination(dest));
+    const CAmount dust = GetPQDustThreshold(out, ::minRelayTxFee);
+    if (amount < dust)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid parameter, amount %s is below the dust threshold %s of a post-quantum output", FormatMoney(amount), FormatMoney(dust)));
 }
 
 UniValue getnewaddress(const UniValue& params, bool fHelp)
@@ -4346,18 +4372,20 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
             "\nChange generated from one or more transparent addresses flows to a new transparent"
             "\naddress, while change generated from a shielded address returns to itself."
+            "\nA post-quantum from address spends its own coins and its change returns to itself; the fee of"
+            "\nsuch a send is priced on its size (the default is raised to it, an explicit fee below it is refused)."
             "\nWhen sending coinbase UTXOs to a shielded address, change is not allowed."
             "\nThe entire value of the UTXO(s) must be consumed."
             + strprintf("\nBefore Sapling activates, the maximum number of zaddr outputs is %d due to transaction size limits.\n", Z_SENDMANY_MAX_ZADDR_OUTPUTS_BEFORE_SAPLING)
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
-            "1. \"fromaddress\"         (string, required) The transparent or shielded address to send the funds from.\n"
+            "1. \"fromaddress\"         (string, required) The transparent (ECC or post-quantum) or shielded address to send the funds from.\n"
             "                           The following special strings are also accepted:\n"
-            "                               - \"ANY_TADDR\": Select non-coinbase UTXOs from any transparent addresses belonging to the wallet.\n"
+            "                               - \"ANY_TADDR\": Select non-coinbase UTXOs from any ECC transparent addresses belonging to the wallet.\n"
             "                                              Use z_shieldcoinbase to shield coinbase UTXOs from multiple transparent addresses.\n"
             "2. \"amounts\"             (array, required) An array of json objects representing the amounts to send.\n"
             "    [{\n"
-            "      \"address\":address  (string, required) The address is a taddr or zaddr\n"
+            "      \"address\":address  (string, required) The address is a taddr (ECC or post-quantum) or zaddr\n"
             "      \"amount\":amount    (numeric, required) The numeric amount in " + CURRENCY_UNIT + " is the value\n"
             "      \"memo\":memo        (string, optional) If the address is a zaddr, raw data represented in hexadecimal string format\n"
             "    }, ... ]\n"
@@ -4386,10 +4414,8 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     } else {
         CTxDestination taddr = keyIO.DecodeDestination(fromaddress);
         fromTaddr = IsValidDestination(taddr);
-        if (IsPQKeyDestination(taddr)) {
-            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_sendmany cannot spend from a post-quantum address; use sendtoaddress or sendmany");
-        }
+        // A post-quantum from address spends its own TX_PQPKH coins (beta2 D-2; reverses quantum spec A-15).
+        EnsurePQSourceSpendable(taddr);
         if (!fromTaddr) {
             auto res = keyIO.DecodePaymentAddress(fromaddress);
             if (!IsValidPaymentAddress(res)) {
@@ -4504,6 +4530,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         CAmount nAmount = AmountFromValue( av );
         if (nAmount < 0)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amount must be positive");
+        if (!isZaddr) EnsurePQAmountNotDust(taddr, nAmount);
 
         if (isZaddr) {
             zaddrRecipients.push_back( SendManyRecipient(address, nAmount, memo) );
@@ -4561,7 +4588,8 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     CTransaction tx(mtx);
     txsize += GetSerializeSize(tx, SER_NETWORK, tx.nVersion);
     if (fromTaddr) {
-        txsize += CTXIN_SPEND_DUST_SIZE;
+        const CTxDestination fromDest = keyIO.DecodeDestination(fromaddress);
+        txsize += IsPQKeyDestination(fromDest) ? PQSpendInputSize(std::get<CPQKeyID>(fromDest).scheme) : CTXIN_SPEND_DUST_SIZE;
         txsize += CTXOUT_REGULAR_SIZE;      // There will probably be taddr change
     }
     txsize += CTXOUT_REGULAR_SIZE * taddrRecipients.size();
@@ -4612,6 +4640,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the sum of outputs %s and also greater than the default fee", FormatMoney(nFee), FormatMoney(nTotalOut)));
             }
 	}
+        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
+        // than build, sign and fail at the commit.
+        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
     }
 
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
@@ -4647,7 +4678,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
 
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
-    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
+    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo, params.size() > 3) );
     q->addOperation(operation);
     AsyncRPCOperationId operationId = operation->getId();
     return operationId;
@@ -5036,22 +5067,25 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             "\nparameter is set to zero will mean limit the number of UTXOs based on the size of the transaction.  Any limit is"
             "\nconstrained by the consensus rule defining a maximum transaction size of "
             + strprintf("%d bytes before Sapling, and %d", MAX_TX_SIZE_BEFORE_SAPLING, MAX_TX_SIZE_AFTER_SAPLING)
-            + "\nbytes once Sapling activates."
+            + "\nbytes once Sapling activates. A post-quantum address merges its own coins (at most "
+            + strprintf("%d", MAX_PQ_INPUTS_PER_TX) + " per transaction, within the"
+            + "\nstandard signature-operation limit); the fee of such a merge is priced on its size (the default is raised to it,"
+            + "\nan explicit fee below it is refused)."
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. fromaddresses         (array, required) A JSON array with addresses.\n"
             "                         The following special strings are accepted inside the array:\n"
-            "                             - \"ANY_TADDR\":   Merge UTXOs from any taddrs belonging to the wallet.\n"
+            "                             - \"ANY_TADDR\":   Merge UTXOs from any ECC taddrs belonging to the wallet (not post-quantum ones).\n"
             "                             - \"ANY_SPROUT\":  Merge notes from any Sprout zaddrs belonging to the wallet.\n"
             "                             - \"ANY_SAPLING\": Merge notes from any Sapling zaddrs belonging to the wallet.\n"
             "                         While it is possible to use a variety of different combinations of addresses and the above values,\n"
             "                         it is not possible to send funds from both sprout and sapling addresses simultaneously. If a special\n"
             "                         string is given, any given addresses of that type will be counted as duplicates and cause an error.\n"
             "    [\n"
-            "      \"address\"          (string) Can be a taddr or a zaddr\n"
+            "      \"address\"          (string) Can be a taddr (ECC or post-quantum) or a zaddr\n"
             "      ,...\n"
             "    ]\n"
-            "2. \"toaddress\"           (string, required) The taddr or zaddr to send the funds to.\n"
+            "2. \"toaddress\"           (string, required) The taddr (ECC or post-quantum) or zaddr to send the funds to.\n"
             "3. fee                   (numeric, optional, default="
             + strprintf("%s", FormatMoney(DEFAULT_FEE)) + ") The fee amount to attach to this transaction.\n"
             "4. transparent_limit     (numeric, optional, default="
@@ -5113,10 +5147,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             isFromNonSprout = true;
         } else {
             CTxDestination taddr = keyIO.DecodeDestination(address);
-            if (IsPQKeyDestination(taddr)) {
-                // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_mergetoaddress cannot spend from a post-quantum address; use sendtoaddress or sendmany");
-            }
+            // A post-quantum source spends its own TX_PQPKH coins (beta2 D-6; reverses quantum spec A-15).
+            EnsurePQSourceSpendable(taddr);
             if (IsValidDestination(taddr)) {
                 taddrs.insert(taddr);
                 isFromNonSprout = true;
@@ -5244,10 +5276,30 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         estimatedTxSize += OUTPUTDESCRIPTION_SIZE;
     }
 
+    // Post-quantum inputs (beta2 D-6): at most MAX_PQ_INPUTS_PER_TX of them, and the policy sigops of the selected
+    // inputs (pq::SIGOP_COST per OP_CHECKPQSIG, a P2SH input's redeem-script sigops) within MAX_STANDARD_TX_SIGOPS,
+    // one left for the destination output's script. A coin past either limit stays for a later merge.
+    size_t numPQUtxos = 0;
+    unsigned int selectedSigOps = 1;
+
+    std::string yedRefusal;
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
         vector<COutput> vecOutputs;
         pwalletMain->AvailableCoins(vecOutputs, true, NULL, false, false);
+        // The Yellowback second check (review m2, audit L-ii): a YED token, vault or carrier whose coin lock was removed
+        // is never merged as plain YEC; the merge goes on with the other coins and is refused, naming them, only if
+        // nothing else is left to merge. A merge naming a post-quantum address is refused outright while the
+        // Yellowback index is unhealthy (as z_sendmany from one).
+        bool namesPQ = false;
+        for (const CTxDestination& d : taddrs) namesPQ = namesPQ || IsPQKeyDestination(d);
+        // only the coins this merge could take are judged (a PQ coin only from its named address)
+        vecOutputs.erase(std::remove_if(vecOutputs.begin(), vecOutputs.end(), [&](const COutput& out) {
+            CTxDestination a;
+            if (!out.fSpendable || !ExtractDestination(out.tx->vout[out.i].scriptPubKey, a)) return true;
+            return (IsPQKeyDestination(a) || taddrs.size() > 0) && !taddrs.count(a);
+        }), vecOutputs.end());
+        yedRefusal = DropYellowbackCoins(vecOutputs, namesPQ);
 
         // Find unspent utxos and update estimated size
         for (const COutput& out : vecOutputs) {
@@ -5261,8 +5313,14 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             if (!ExtractDestination(scriptPubKey, address)) {
                 continue;
             }
-            // z_mergetoaddress never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
-            if (IsPQKeyDestination(address)) {
+            // A TX_PQPKH coin is merged only from its named post-quantum address (beta2 D-6); ANY_TADDR
+            // merges ECC (P2PKH) coins only.
+            const bool isPQ = IsPQKeyDestination(address);
+            if (isPQ && !taddrs.count(address)) {
+                continue;
+            }
+            // Audit A-M2: a post-quantum coin worth no more than the fee its own input adds is not merged.
+            if (isPQ && out.tx->vout[out.i].nValue <= PQInputMarginalFee(std::get<CPQKeyID>(address).scheme)) {
                 continue;
             }
             // If taddr is not wildcard "*", filter utxos
@@ -5274,9 +5332,19 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             CAmount nValue = out.tx->vout[out.i].nValue;
 
             if (!maxedOutUTXOsFlag) {
-                size_t increase = (std::get_if<CScriptID>(&address) != nullptr) ? CTXIN_SPEND_P2SH_SIZE : CTXIN_SPEND_DUST_SIZE;
+                size_t increase = isPQ ? PQSpendInputSize(std::get<CPQKeyID>(address).scheme) :
+                                  (std::get_if<CScriptID>(&address) != nullptr) ? CTXIN_SPEND_P2SH_SIZE : CTXIN_SPEND_DUST_SIZE;
+                unsigned int sigops = 0;
+                if (isPQ) {
+                    sigops = GetPQSigOpCount(scriptPubKey);
+                } else if (const CScriptID* sid = std::get_if<CScriptID>(&address)) {
+                    CScript redeem;
+                    sigops = pwalletMain->GetCScript(*sid, redeem) ? redeem.GetSigOpCount(true) : MAX_P2SH_SIGOPS;
+                }
                 if (estimatedTxSize + increase >= max_tx_size ||
-                    (mempoolLimit > 0 && utxoCounter > mempoolLimit))
+                    (mempoolLimit > 0 && utxoCounter > mempoolLimit) ||
+                    (isPQ && numPQUtxos >= MAX_PQ_INPUTS_PER_TX) ||
+                    selectedSigOps + sigops > MAX_STANDARD_TX_SIGOPS)
                 {
                     maxedOutUTXOsFlag = true;
                 } else {
@@ -5284,6 +5352,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     COutPoint utxo(out.tx->GetHash(), out.i);
                     utxoInputs.emplace_back(utxo, nValue, scriptPubKey);
                     mergedUTXOValue += nValue;
+                    selectedSigOps += sigops;
+                    if (isPQ) numPQUtxos++;
                 }
             }
 
@@ -5382,6 +5452,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numNotes = sproutNoteInputs.size() + saplingNoteInputs.size();
 
     if (numUtxos == 0 && numNotes == 0) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge.");
     }
 
@@ -5394,6 +5465,36 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     }
 
     CAmount mergedValue = mergedUTXOValue + mergedNoteValue;
+
+    // A merge with post-quantum inputs pays the fee rule of a PQ spend on its real size (beta2 D-6): the default
+    // fee is raised to it, an explicit fee below it is refused.
+    if (numPQUtxos > 0) {
+        // The TransactionBuilder signs the PQ inputs after Build(); it has no Sprout path for them.
+        if (!sproutNoteInputs.empty() || isToSproutZaddr) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
+        }
+        std::vector<std::pair<CScript, CAmount>> shapeIns;
+        std::vector<CScript> prevScripts;
+        for (const MergeToAddressInputUTXO& t : utxoInputs) {
+            shapeIns.emplace_back(std::get<2>(t), std::get<1>(t));
+            prevScripts.push_back(std::get<2>(t));
+        }
+        std::vector<CTxOut> shapeOuts;
+        if (IsValidDestination(taddr)) shapeOuts.emplace_back(mergedValue, GetScriptForDestination(taddr));
+        const CTransaction shape = PQFeeShape(nextBlockHeight, shapeIns, shapeOuts, saplingNoteInputs.size(), isToSaplingZaddr ? 1 : 0);
+        EnsurePQShapeStandard(shape, prevScripts, numPQUtxos);
+        if (params.size() > 2) EnsurePQFeeWithinCap(nFee);   // beta2 (audit H1): never build what the commit refuses
+        const CAmount needed = PQBuilderFee(nFee, shape);
+        if (needed > nFee) {
+            if (params.size() > 2) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "Fee %s is below the %s this post-quantum spend needs", FormatMoney(nFee), FormatMoney(needed)));
+            }
+            nFee = needed;
+        }
+        EnsurePQFeeWithinCap(nFee);   // review L-1: the computed fee too, before anything is built or signed
+    }
+
     if (mergedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient funds, have %s, which is less than miners fee %s",
@@ -5405,6 +5506,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     if (nFee > netAmount) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the net amount to be shielded %s", FormatMoney(nFee), FormatMoney(netAmount)));
     }
+    EnsurePQAmountNotDust(taddr, netAmount);
 
     // Keep record of parameters in context object
     UniValue contextInfo(UniValue::VOBJ);
@@ -5432,7 +5534,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
     // Builder (used if Sapling addresses are involved)
     std::optional<TransactionBuilder> builder;
-    if (isToSaplingZaddr || saplingNoteInputs.size() > 0) {
+    // (and if any input is post-quantum: the builder path signs it after Build(), beta2 D-6)
+    if (isToSaplingZaddr || saplingNoteInputs.size() > 0 || numPQUtxos > 0) {
         builder = TransactionBuilder(Params().GetConsensus(), nextBlockHeight, pwalletMain);
     }
     // Create operation and add to global queue
