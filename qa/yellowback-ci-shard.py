@@ -73,6 +73,7 @@ WEIGHTS = {
     "txn_doublespend": 30,
     "wallet_balance_by_type": 90,       # estimate (2026-11-10): two nodes, one restart, two reorgs
     "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
+    "wallet_yed_held_guard": 150,       # estimate (2026-11-11): several restarts, three copied wallets
     "zmq_concurrent_test": 100,         # 45 s stress + the window build (2026-10-11, M-series laptop)
 }
 DEFAULT = 240
