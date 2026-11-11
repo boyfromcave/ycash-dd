@@ -187,9 +187,9 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
 
 # Rule: MINT-1 MINT-3
-        print('rpcversion 8 (7 added params.pq and the v4 MINT; 8 the fee structure)')
+        print('rpcversion 9 (7 added params.pq and the v4 MINT; 8 the fee structure; 9 the PQ versions per scheme, D-9)')
         info = user.yed_getinfo()
-        assert_equal(info['rpcversion'], 8)
+        assert_equal(info['rpcversion'], 9)   # 9: D-9, the PQ address versions per scheme
         pq = info['params']['pq']
         assert_equal((pq['schemes'], pq['falconActive'], pq['falconHeight']), ([1], False, FALCON_HEIGHT))
         assert_greater_than(pq['feeRateZatPerKB'], 0)

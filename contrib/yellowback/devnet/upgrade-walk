@@ -525,8 +525,8 @@ class Walk:
         up = self.call(USER, "yed_getinfo", keys=["rpcversion", "upgrade", "attest"])
         params = self.node(USER).yed_getinfo()["params"]
         # 5: the upgrade; 6: in-term claims (IT-7); 7: the post-quantum line (params.pq, quantum spec §6.2);
-        # 8: its fee structure (params.fees, D-Q-23..26)
-        want = 8 if "fees" in params else 7 if "pq" in params else 6 if params.get("inTermClaims") is True else 5
+        # 8: its fee structure (params.fees, D-Q-23..26); 9: PQ address versions per scheme (D-9)
+        want = 9 if isinstance(params.get("pqAddressVersion"), dict) else 8 if "fees" in params else 7 if "pq" in params else 6 if params.get("inTermClaims") is True else 5
         self.ok(up["rpcversion"] == want and up["upgrade"]["attestorSetId"] == self.set_id, "Yellowback rpcversion %d on the attestor set %s" % (want, self.set_id[:16]))
         self.fails(STOCK, "yed_getinfo", expect="Method not found")
         self.note("node 1 runs without -yellowbackattestorset: no yed_* there, but the primitive (set_*/vault_*) runs on every node")
@@ -817,8 +817,8 @@ class Walk:
         pq = self.call(USER, "yed_getinfo", keys=["rpcversion"])
         pq = self.pq_params()
         self.out("    = params.pq %s" % jdump(pq))
-        self.ok(self.node(USER).yed_getinfo()["rpcversion"] == 8 and pq.get("schemes") == ([1, 2] if falcon else [1]),
-                "rpcversion 8; params.pq.schemes %s, falconActive %s, falconHeight %s" % (pq.get("schemes"), pq.get("falconActive"), pq.get("falconHeight")))
+        self.ok(self.node(USER).yed_getinfo()["rpcversion"] == 9 and pq.get("schemes") == ([1, 2] if falcon else [1]),
+                "rpcversion 9; params.pq.schemes %s, falconActive %s, falconHeight %s" % (pq.get("schemes"), pq.get("falconActive"), pq.get("falconHeight")))
         # every YED vault's owner is SLH-DSA (D-Q-1): vault E, minted by the wallet's yed_mint (with --only: the wallet's newest)
         if "E" not in self.vaults:
             self.vaults["E"] = max(self.node(USER).yed_listpositions("ACTIVE"), key=lambda r: r.get("refHeight", 0))["txid"]

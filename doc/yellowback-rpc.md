@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 8
+# Yellowback RPC contract (`yed_*`), rpcversion 9
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `8` (the fee structure, below; post-quantum owners took `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `9` (scheme-visible post-quantum prefixes, below; the fee structure took `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -79,6 +79,19 @@ claim); `yed_listpositions` rows gain `earlyRedeemFeeZat`; `yed_estimateredeem` 
 wallet shows before the owner confirms a redeem); `vault-locked` no longer refuses an ACTIVE redeem
 in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
 `claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
+
+**Scheme-visible post-quantum prefixes (`rpcversion` 9; decision D-9, docs/plans/yellowback-quantum-spec.md §4.1).**
+A post-quantum address is Base58Check(3-byte version ‖ 32-byte keyHash), 53 characters, one version per network,
+coin and scheme, so the third character names the scheme: `sqf…`/`sqs…` (testnet `tqf…`/`tqs…`, regtest
+`rqf…`/`rqs…`) plain YEC, `ybf…`/`ybs…` (`ytf…`/`yts…`, `yrf…`/`yrs…`) YED; `f` = FN-DSA-512, `s` = SLH-DSA-SHA2-128s.
+The earlier 2-byte version ‖ scheme byte form (`sq…`/`tq…`/`rq…`, `yb…`/`yt…`/`yr…` with a digit or letter that did
+not name the scheme) is neither produced nor accepted by any RPC; the one exception is `z_importpqkey`'s check of a
+key-dump line's `addr=`/`yecaddr=`, which accepts the earlier form so a dump made before D-9 still imports, and the
+wallet rewrites its own address-book records once at load. Shape changes, old → new: `yed_getinfo.params.pqAddressVersion`
+hex string (`"5710"`) → object of hex keyed by scheme number (`{"1": "5715aa", "2": "571444"}`);
+`yed_getinfo.params.pq.plainAddressVersion` hex string (`"4c51"`) → the same kind of object (`{"1": "4c5655", "2":
+"4c54ef"}`). Every other field keeps its type; fields that carry a post-quantum address (`ownerAddress`,
+`transparentAddress`, `address`, …) carry the new text. The shared vectors are `src/test/data/pq_address_vectors.json`.
 
 **The fee structure (`rpcversion` 8; docs/plans/yellowback-quantum-fees-spec.md §1–§3, quantum plan
 D-Q-23 Option D, D-Q-23a, D-Q-24, D-Q-25).** The pool fee is a **protocol fee in dollars**, tiered by the
@@ -357,7 +370,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 8,
+  "rpcversion": 9,
   "enabled": true,
   "network": "regtest",
   "height": 331,
