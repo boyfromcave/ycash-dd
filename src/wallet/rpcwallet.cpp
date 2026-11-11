@@ -170,9 +170,10 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "\nArguments (the type may come first, getnewaddress pq, or second after the empty account, getnewaddress \"\" pq):\n"
             "1. \"type\"|\"account\" (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
             "                     argument. Or the DEPRECATED account: the empty string \"\" (the default account), which may be\n"
-            "                     followed by the type. Any other string is an error.\n"
+            "                     followed by the type. Any other string is refused (\"Accounts are unsupported\"); the type\n"
+            "                     names are lower case.\n"
             "2. \"type\"           (string, optional, default \"p2pkh\") \"p2pkh\" (a keypool key), or \"pq\": a post-quantum address\n"
-            "                     (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's HD seed, FN-DSA-512 once\n"
+            "                     (53 characters, its prefix showing the network and the scheme) from the wallet's HD seed, FN-DSA-512 once\n"
             "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                     yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                     Needs the vault upgrade active at the next block and an unlocked wallet.\n"
@@ -201,6 +202,10 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "the address type is given first, so there is no second argument (getnewaddress pq, or getnewaddress \"\" pq)");
         type = params[0].get_str();
     } else {
+        // A first string that is neither "" nor a type name: the old refusal, naming the valid types (a type
+        // name in another case, "PQ", lands here too).
+        if (params.size() > 0 && params[0].isStr() && !params[0].get_str().empty())
+            throw JSONRPCError(RPC_WALLET_ACCOUNTS_UNSUPPORTED, "Accounts are unsupported; the first argument is the address type, \"p2pkh\", \"pq\" or \"pqslh\" (lower case), or \"\" followed by the type");
         if (params.size() > 0)
             strAccount = AccountFromValue(params[0]);
         if (params.size() > 1 && !params[1].isNull())

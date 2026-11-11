@@ -71,6 +71,10 @@ class WalletGetNewAddressTypeTest(BitcoinTestFramework):
         assert_raises_rpc('Accounts are unsupported', n0.getnewaddress, 'savings')
         assert_raises_rpc('Accounts are unsupported', n0.getnewaddress, 'savings', 'pq')
         assert_raises_rpc('Accounts are unsupported', n0.getnewaddress, 'bogus')
+        # the type names are lower case; another case is refused with an error that names them
+        for bad in ('PQ', 'Pq', 'PQSLH', 'P2PKH'):
+            assert_raises_rpc('the first argument is the address type, "p2pkh", "pq" or "pqslh" (lower case)', n0.getnewaddress, bad)
+        assert_raises_rpc('type must be', n0.getnewaddress, '', 'PQ')
         assert_raises_rpc('type must be', n0.getnewaddress, '', 'bogus')
         assert_raises_rpc('the address type is given first, so there is no second argument', n0.getnewaddress, 'pq', 'pq')
         assert_raises_rpc('the address type is given first, so there is no second argument', n0.getnewaddress, 'p2pkh', '')

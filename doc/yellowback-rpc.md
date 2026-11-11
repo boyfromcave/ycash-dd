@@ -175,7 +175,9 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `getnewaddress p2pkh`, as `yed_getnewaddress` takes its type; the old shape `getnewaddress "" "pq"` keeps
   working, and `getnewaddress` with no argument is still a P2PKH address. A type name was never a valid first
   argument (the account placeholder accepts only `""`), so no call that worked before changes meaning; any other
-  first string is still refused with `Accounts are unsupported`, and a type given first and again second is
+  first string is still refused, now with `Accounts are unsupported; the first argument is the address type,
+  "p2pkh", "pq" or "pqslh" (lower case), or "" followed by the type` (the type names are case-sensitive, as
+  `yed_getnewaddress`'s and `z_getnewaddress`'s are, so `PQ` is refused with this message), and a type given first and again second is
   refused with `the address type is given first, so there is no second argument (getnewaddress pq, or
   getnewaddress "" pq)`.
 - `z_sendmany` pays an `sq…` recipient (as a transparent output); no `z_*` RPC spends from one.
