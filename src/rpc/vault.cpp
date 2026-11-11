@@ -1771,6 +1771,15 @@ void FundFromAddress(CMutableTransaction& mtx, const yellowback::AddressChoice& 
         if (c.fIsCoinbase && shieldCoinbase) { coinbaseValue += c.Value(); continue; }
         eligible.emplace_back(op, c.Value());
     }
+    {
+        // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): refuse the lock when
+        // any coin of the address is one the Yellowback index knows as a token or vault, or the wallet layer as a
+        // carrier.
+        std::vector<COutPoint> candidates;
+        for (const auto& e : eligible) candidates.push_back(e.first);
+        const std::string refusal = YellowbackInputRefusal(candidates);
+        if (!refusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, "from: " + refusal);
+    }
     std::sort(eligible.begin(), eligible.end(), [](const std::pair<COutPoint, CAmount>& a, const std::pair<COutPoint, CAmount>& b) { return a.second > b.second; });
     const size_t inputBytes = yellowback::YecInputBytes(only);
     const size_t nOut = mtx.vout.size();

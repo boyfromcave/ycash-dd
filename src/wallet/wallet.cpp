@@ -15,6 +15,7 @@
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
+#include "yellowback/wallet.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "consensus/consensus.h"
@@ -7829,4 +7830,31 @@ bool CWallet::EraseAtomicSwap(const std::string& swapId)
     // Remove from database
     CWalletDB walletdb(strWalletFile);
     return walletdb.EraseAtomicSwap(swapId);
+}
+
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs)
+{
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index()) return "";
+    yellowback::YellowbackIndex& index = *yw->Index();
+    std::vector<COutPoint> refused;
+    {
+        LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+        LOCK(index.cs_yellowback);
+        if (!index.IsHealthy()) {
+            return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
+                   "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
+        }
+        yellowback::State st(index.View());
+        for (const COutPoint& o : inputs) {
+            if (st.GetToken(o).has_value() || st.GetVault(o).has_value()) refused.push_back(o);
+        }
+    }
+    for (const COutPoint& o : inputs) {
+        if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
+    }
+    if (refused.empty()) return "";
+    std::string list;
+    for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+    return "refusing to spend a Yellowback outpoint as plain YEC: " + list;
 }

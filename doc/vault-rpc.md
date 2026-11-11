@@ -348,6 +348,8 @@ testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
 | -4 | `from: the lock would be <n> bytes with <m> sigops (limits 100000, 4000); consolidate the address's coins first` (a backstop behind the caps) |
 | -4 | `from: the funding fee did not settle`, `from: the Sapling funding fee did not settle` (the fee loop did not converge; never underpaid) |
 | -6 | `too-many-notes: the transaction would spend <n> Sapling notes (limit 20); consolidate with z_mergetoaddress first` |
+| -4 | `from: refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…]` (with `-yellowback`: a coin of a transparent or PQ `from` that the Yellowback index knows as a YED token or vault, or that the wallet holds as a carrier; the wallet's coin lock already keeps every token out, so this is reached only when that lock was removed, e.g. by `yed_unlockcoin`) |
+| -4 | `from: refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback` (with `-yellowback`, a transparent or PQ `from`) |
 | -13 | `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet, any `vault_lock`) |
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...] ( rebuild )`
