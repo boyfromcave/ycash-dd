@@ -21,4 +21,13 @@ void RegisterWalletRPCCommands(CRPCTable &tableRPC);
  */
 void EnsurePQRecipientPayable(const CTxDestination& dest);
 
+/** The name RPC results print beside a post-quantum scheme number: 1 "SLH-DSA-SHA2-128s", 2 "FN-DSA-512". */
+std::string PQSchemeName(uint8_t scheme);
+
+/** Beta2: the output scripts at which the Yellowback index holds a YED token of this wallet (the wallet's YED holder
+ *  keys, ECC or post-quantum): what "yed_holder" marks in listreceivedbyaddress and validateaddress (from the wallet's own
+ *  Yellowback-locked outpoints, each looked up in the index). Empty where Yellowback is not live or while the index is
+ *  unhealthy. Takes cs_wallet, then cs_yellowback. */
+std::set<CScript> YedHolderScripts();
+
 #endif //BITCOIN_WALLET_RPCWALLET_H

@@ -649,6 +649,23 @@ def wait_and_assert_operationid_status(node, myopid, in_status='success', in_err
     else:
         return None
 
+# Line helpers for functional scripts kept byte-identical on both C++ node lines (beta2; first user
+# wallet_balance_by_type.py). ycash6's util.py defines the same names for 6.x: SEED_RESTORE_OPTION = '-mnemonicfile'
+# (z_exportwallet's recovery phrase), z_sendmany_wait passes no fee (the wallet's ZIP-317 fee) and the privacy policy
+# AllowFullyTransparent, and assert_listaddresses_pq checks 6.x's listaddresses.
+SEED_RESTORE_OPTION = '-hdseedfile'     # v4.5.0: a new wallet from the HD seed z_exportwallet writes
+
+def z_sendmany_wait(node, fromaddr, amounts, minconf=1):
+    """z_sendmany and wait for success; returns the txid (read the fee from gettransaction). v4.5.0: an explicit fee
+    of 0.0001 and no privacy policy (the line has none)."""
+    opid = node.z_sendmany(fromaddr, amounts, minconf, Decimal('0.0001'))
+    return wait_and_assert_operationid_status(node, opid)
+
+def assert_listaddresses_pq(node, expected, exact=('mnemonic_seed',)):
+    """6.x: listaddresses lists each post-quantum address of ``expected`` once, in the "pq" array of its source.
+    ycash-dd has no listaddresses: this version returns at once."""
+    return
+
 # Find a coinbase address on the node, filtering by the number of UTXOs it has.
 # If no filter is provided, returns the coinbase address on the node containing
 # the greatest number of spendable UTXOs.
@@ -715,3 +732,11 @@ def tarfile_extractall(tgz, path):
         if m.islnk() and (os.path.isabs(m.linkname) or not inside(m.linkname)):
             raise ValueError("tar hard link %r -> %r escapes %s" % (m.name, m.linkname, path))
     tgz.extractall(path=path, members=members)
+
+
+def seed_restored_balance_ecc(settled):
+    """getwalletinfo's balance_ecc of a wallet restored from its seed alone (wallet_balance_by_type.py), given the
+    original wallet's view ``settled``. A line difference: ycash-dd's ECC keys are random keypool keys, not derived
+    from the seed, so the restore finds no ECC coin: 0. (ycash6 supplies its own body: its keypool keys come from the
+    seed and the rescan re-finds some of them.)"""
+    return Decimal(0)
