@@ -213,9 +213,16 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
     from its seed (`-hdseedfile`), whose rescan re-finds its PQ keys, classifies, lists and counts their receipts as
     the original wallet does (a receipt, never change); vault, intent and channel owner keys stay out of the
     address book. A fresh YED holder key (`yed_mint`, YED change from the Falcon height) is filed when it is drawn,
-    under the purpose a P2PKH holder key gets (`yellowback-vault`, `yellowback-change`). With `-yellowback`, an
+    under the purpose a P2PKH holder key gets (`yellowback-vault`, `yellowback-change`); a key paid before beta2 is
+    filed once when the wallet loads (purpose `receive`); a key the wallet has seen as a vault or intent owner or a
+    channel client is never filed, even when someone pays a `TX_PQPKH` output to it (its hash is public in the vault
+    script): such a payment still counts in the balances and is listed (`listreceivedbyaddress` under `""`, a
+    receipt in `listtransactions`). Where Yellowback is live (the network has a vault height and a YED attestor
+    set), an
     entry (and `validateaddress` of an address of this wallet) carries `"yed_holder": true` when the Yellowback
-    index holds a YED token of this wallet at that address, ECC or post-quantum; the field is absent otherwise. (ECC keys are keypool keys, not derived from
+    index holds a YED token of this wallet at that address, ECC or post-quantum (looked up from the wallet's own
+    Yellowback-locked outpoints; a token whose lock was removed with `yed_unlockcoin` is not marked until it is
+    locked again); the field is absent otherwise. (ECC keys are keypool keys, not derived from
     the seed: a seed-only restore does not recover ECC coins; the first Sapling address and the PQ keys it does.) `z_listaddresses` lists the Sapling addresses.
     `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. This line has no
     `listaddresses` (the 6.x line's call, which gains the same `pqscheme`/`pqschemename` per PQ address there).

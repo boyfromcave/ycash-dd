@@ -1302,7 +1302,9 @@ static WalletBalanceSplit GetWalletBalanceSplit()
         const bool trusted = wtx.IsTrusted();
         const bool unconfirmed = !CheckFinalTx(wtx) || (!trusted && wtx.GetDepthInMainChain() == 0);
         if (!trusted && !unconfirmed) continue;
-        CAmount credit = wtx.GetAvailableCredit();
+        // Review m6: both parts in ONE fresh pass (the credit uncached, as the PQ part always was), so the ECC/PQ split
+        // and balance agree whatever the transaction's credit cache says; the cost is that of the PQ loop already here.
+        const CAmount credit = wtx.GetAvailableCredit(false);
         PQAmounts pqTx;
         if (credit != 0) {
             for (unsigned int i = 0; i < wtx.vout.size(); i++) {
@@ -1311,9 +1313,6 @@ static WalletBalanceSplit GetWalletBalanceSplit()
                 if (!scheme || pwalletMain->IsSpent(item.first, i)) continue;
                 pqTx.Add(*scheme, pwalletMain->GetCredit(txout, ISMINE_SPENDABLE));
             }
-            // The PQ part is read fresh, the credit from the transaction's cache: should the cache ever lag behind
-            // (a spend it has not seen), recount the credit the same fresh way, so the _ecc fields never go negative.
-            if (pqTx.Total() > credit) credit = wtx.GetAvailableCredit(false);
         }
         if (trusted) r.balance += credit; else r.unconfirmed += credit;
         PQAmounts& pq = trusted ? r.pqBalance : r.pqUnconfirmed;
@@ -1334,10 +1333,18 @@ std::set<CScript> YedHolderScripts()
     std::set<CScript> out;
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
     if (!yw || !yw->Index()) return out;
+    // Review m3: the wallet's own Yellowback-locked outpoints, each looked up in the index, so the cost follows the
+    // wallet's tokens rather than every token on the network. A token whose lock was removed (yed_unlockcoin) is not
+    // marked until the next reconciliation locks it again.
+    const std::set<COutPoint> locked = yw->Locked();
     LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
     LOCK(yw->Index()->cs_yellowback);
     if (!yw->Index()->IsHealthy()) return out;
-    for (const yellowback::YedCoin& c : yw->AllCoins()) out.insert(c.token.scriptPubKey);
+    yellowback::State st(yw->Index()->View());
+    for (const COutPoint& o : locked) {
+        std::optional<yellowback::TokenRecord> t = st.GetToken(o);
+        if (t.has_value() && yw->IsMineScript(t->scriptPubKey)) out.insert(t->scriptPubKey);
+    }
     return out;
 }
 
@@ -1515,7 +1522,7 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "    \"amountZat\" : xxxx                 (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
             "    \"confirmations\" : n                (numeric) The number of confirmations of the most recent transaction included\n"
             "    \"pqscheme\" : n,                    (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
-            "    \"yed_holder\" : true,               (boolean) With -yellowback, present only on a YED holder key: the Yellowback index holds a\n"
+            "    \"yed_holder\" : true,               (boolean) Where Yellowback is live, present only on a YED holder key: the Yellowback index holds a\n"
             "                                         YED token of this wallet at this address (its token outputs are locked; see yed_listunspent)\n"
             "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
             "    \"txids\" : [\"txid\", ...]            (array) The transactions that paid the address\n"

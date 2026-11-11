@@ -27,7 +27,9 @@ Plain-YEC post-quantum addresses (`sq…`)
   for such an address. A watch-only address still answers; a foreign Sapling address was already refused.
 - **Post-quantum keys are filed in the address book when first paid**: a key of the wallet that receives a
   `TX_PQPKH` output without an address-book entry is filed (purpose `receive`), so a seed-only restore treats its
-  receipts as receipts, not change; a fresh YED holder key is filed when drawn. With `-yellowback`,
+  receipts as receipts, not change (a vault, intent or channel owner key stays out, even when paid a `TX_PQPKH`
+  output); keys paid before this release are filed once when the wallet loads; a fresh YED holder key is filed when
+  drawn. Where Yellowback is live (the network has a vault height and a YED attestor set),
   `listreceivedbyaddress` and `validateaddress` mark a YED holder key with `"yed_holder": true`.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
   post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
