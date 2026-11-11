@@ -106,7 +106,7 @@ env:
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
   OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-check\.py)'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live vault_lock_from
   # The inherited Ycash suite that must keep passing against the fork binary (P5); the names recorded
   # as passing in Phase 0 are in doc/yellowback.md "Build and test baseline". getblocktemplate_proposals,
   # getblocktemplate_longpoll and invalidateblock abort ycashd at the pin (a stock regtest node
