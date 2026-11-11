@@ -39,6 +39,7 @@ from test_framework.util import (
     nuparams,
     start_node,
     start_nodes,
+    stop_node,
     sync_blocks,
     wait_and_assert_operationid_status,
 )
@@ -70,14 +71,22 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         self.num_nodes = 2
         self.setup_clean_chain = False
 
-    def node_args(self, i):
+    def node_args(self, i, wallet='bytype.dat'):
         a = [nuparams(VAULT_BRANCH_ID, ACTIVATION), '-pqfalcon=1']
         if i == 0:
             # a wallet of its own: the cached chain's coinbase of node 0 stays in wallet.dat
-            a += ['-wallet=bytype.dat', '-experimentalfeatures', '-developerencryptwallet']
+            a += ['-wallet=%s' % wallet, '-experimentalfeatures', '-developerencryptwallet',
+                  '-exportdir=%s' % os.path.join(self.options.tmpdir, 'export0')]
         return a
 
+    def restart0(self, extra=(), wallet='bytype.dat'):
+        stop_node(self.nodes[0], 0)
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0, wallet) + list(extra))
+        connect_nodes_bi(self.nodes, 0, 1)
+        sync_blocks(self.nodes)
+
     def setup_network(self, split=False):
+        os.makedirs(os.path.join(self.options.tmpdir, 'export0'), exist_ok=True)
         self.nodes = start_nodes(self.num_nodes, self.options.tmpdir,
                                  extra_args=[self.node_args(i) for i in range(self.num_nodes)])
         connect_nodes_bi(self.nodes, 0, 1)
@@ -91,8 +100,10 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
 
     # ---- the views ----------------------------------------------------------------------------------------------
 
-    def view(self):
-        """Every balance figure of node 0, as Decimals, with the invariants checked."""
+    def view(self, locked_in=None):
+        """Every balance figure of node 0, as Decimals, with the invariants checked. locked: the value of coins
+        locked with lockunspent, {'ecc': x, 1: slh, 2: fn}, which getwalletinfo counts and the by-depth calls do not."""
+        locked = dict({'ecc': 0, SLH: 0, FN: 0}); locked.update(locked_in or {})
         n0 = self.nodes[0]
         w = n0.getwalletinfo()
         v = {'balance': D(w['balance']), 'unconfirmed': D(w['unconfirmed_balance']),
@@ -120,14 +131,15 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             for s in t['pq_by_scheme']:
                 v[k + 'pq_%d' % s['pqscheme']] = D(s['transparent_pq'])
             assert_equal(v[k + 'transparent_pq'], v[k + 'pq_1'] + v[k + 'pq_2'])
-        # L-6: minconf 0 counts every unconfirmed output; balance + unconfirmed_balance counts them too (no immature
-        # or locked coins in this wallet), so the two agree, for the ECC and the PQ part alike
-        assert_equal(v['immature'], 0)
-        assert_equal(v['z0_transparent'], v['balance'] + v['unconfirmed'])
-        assert_equal(v['z0_transparent_ecc'], v['balance_ecc'] + v['unconfirmed_ecc'])
-        assert_equal(v['z0_transparent_pq'], v['balance_pq'] + v['unconfirmed_pq'])
+        # L-6: minconf 0 counts every unconfirmed output; balance + unconfirmed_balance counts them too, so the two
+        # agree, for the ECC part, the PQ part and each scheme, except for coins locked with lockunspent (counted by
+        # getwalletinfo only). Immature coinbase is in neither (immature_balance); watch-only is in neither here.
+        lpq = locked[SLH] + locked[FN]
+        assert_equal(v['z0_transparent'], v['balance'] + v['unconfirmed'] - locked['ecc'] - lpq)
+        assert_equal(v['z0_transparent_ecc'], v['balance_ecc'] + v['unconfirmed_ecc'] - locked['ecc'])
+        assert_equal(v['z0_transparent_pq'], v['balance_pq'] + v['unconfirmed_pq'] - lpq)
         for s in (SLH, FN):
-            assert_equal(v['z0_pq_%d' % s], v['balance_pq_%d' % s] + v['unconfirmed_pq_%d' % s])
+            assert_equal(v['z0_pq_%d' % s], v['balance_pq_%d' % s] + v['unconfirmed_pq_%d' % s] - locked[s])
         for name, addr in self.addrs.items():
             for minconf in (1, 0):
                 v['%s@%d' % (name, minconf)] = D(n0.z_getbalance(addr, minconf))
@@ -139,7 +151,7 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             assert_equal(v[k + 'private'], v['z@%d' % minconf])
         return v
 
-    def check_listing(self):
+    def check_listing(self, ecc=True):
         n0 = self.nodes[0]
         rcv = {r['address']: r for r in n0.listreceivedbyaddress(0, True)}
         for name, scheme in (('fn', FN), ('slh', SLH)):
@@ -147,9 +159,10 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
             assert_equal((r['pqscheme'], r['pqschemename']), (scheme, NAMES[scheme]))
             va = n0.validateaddress(self.addrs[name])
             assert_equal((va['ismine'], va['pqscheme'], va['pqschemename']), (True, scheme, NAMES[scheme]))
-        r = rcv[self.addrs['ecc']]
-        assert 'pqscheme' not in r and 'pqschemename' not in r
-        assert 'pqschemename' not in n0.validateaddress(self.addrs['ecc'])
+        if ecc:
+            r = rcv[self.addrs['ecc']]
+            assert 'pqscheme' not in r and 'pqschemename' not in r
+            assert 'pqschemename' not in n0.validateaddress(self.addrs['ecc'])
         assert_equal(n0.z_listaddresses(), [self.addrs['z']])
 
     # ---- the test ----------------------------------------------------------------------------------------------
@@ -257,6 +270,76 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         sync_blocks(self.nodes)
         assert_equal(self.view(), spent_confirmed)
         self.check_listing()
+
+        print('z_getbalance of addresses this wallet does not hold: 0 for a transparent one (ECC or PQ), refused shielded')
+        assert_equal(D(n0.z_getbalance(n1.getnewaddress())), 0)
+        assert_equal(D(n0.z_getbalance(n1.getnewaddress('', 'pq'))), 0)
+        assert_raises_rpc('From address does not belong to this node', n0.z_getbalance, n1.z_getnewaddress('sapling'))
+
+        print('a coin locked with lockunspent: getwalletinfo still counts it, the by-depth calls leave it out')
+        fn_coin = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(1, 9999999, [self.addrs['fn']])]
+        assert n0.lockunspent(False, fn_coin)
+        v = self.view(locked_in={FN: Decimal(2)})
+        assert_equal((v['balance_pq'], v['balance_pq_2'], v['balance']), (2, 2, spent_confirmed['balance']))
+        assert_equal((v['z1_transparent_pq'], v['z1_pq_2'], v['fn@1'], v['fn@0']), (0, 0, 0, 0))
+        assert_equal(v['z1_transparent'], spent_confirmed['z1_transparent'] - 2)
+        assert n0.lockunspent(True, fn_coin)
+        assert_equal(self.view(), spent_confirmed)
+
+        print('watch-only coins: only z_gettotalbalance with includeWatchonly (and z_getbalance of the address) count them')
+        w_e, w_fn = n1.getnewaddress(), n1.getnewaddress('', 'pq')
+        n1.sendtoaddress(w_e, 1)
+        n1.sendtoaddress(w_fn, Decimal('0.5'))
+        self.mine(1)
+        n0.importaddress(w_e, '', True)
+        n0.importaddress(w_fn, '', True)
+        assert_equal(self.view(), spent_confirmed)
+        for minconf in (1, 0):
+            t = n0.z_gettotalbalance(minconf, True)
+            k = 'z%d_' % minconf
+            assert_equal((D(t['transparent']), D(t['transparent_ecc']), D(t['transparent_pq'])),
+                         (spent_confirmed[k + 'transparent'] + Decimal('1.5'), spent_confirmed[k + 'transparent_ecc'] + 1,
+                          spent_confirmed[k + 'transparent_pq'] + Decimal('0.5')))
+            assert_equal([(x['pqscheme'], D(x['transparent_pq'])) for x in t['pq_by_scheme']],
+                         [(SLH, spent_confirmed[k + 'pq_1']), (FN, spent_confirmed[k + 'pq_2'] + Decimal('0.5'))])
+        assert_equal((D(n0.z_getbalance(w_e)), D(n0.z_getbalance(w_fn))), (1, Decimal('0.5')))
+        w = {r['address']: r for r in n0.listreceivedbyaddress(0, True, True)}
+        assert_equal((w[w_fn]['involvesWatchonly'], w[w_fn]['pqscheme'], w[w_fn]['pqschemename']), (True, FN, NAMES[FN]))
+        assert 'pqscheme' not in w[w_e]
+
+        print('immature coinbase: immature_balance only, then balance_ecc and transparent_ecc once mature')
+        before = self.view()
+        self.sync_all()
+        n0.generate(1)
+        self.sync_all()
+        v = self.view()
+        reward = v['immature']
+        assert reward > 0
+        for k in ('balance', 'balance_ecc', 'balance_pq', 'unconfirmed', 'z1_transparent', 'z0_transparent', 'z1_transparent_pq'):
+            assert_equal((k, v[k]), (k, before[k]))
+        self.mine(100)
+        v = self.view()
+        assert_equal(v['immature'], 0)
+        assert_equal((v['balance_ecc'], v['balance_pq']), (before['balance_ecc'] + reward, before['balance_pq']))
+        assert_equal((v['z1_transparent_ecc'], v['z1_transparent_pq']), (before['z1_transparent_ecc'] + reward, before['z1_transparent_pq']))
+        settled = v
+
+        print('restore from the seed alone: the PQ coins, their addresses with the scheme, the first Sapling address')
+        export = n0.z_exportwallet('bytypeseed')
+        self.restart0(['-hdseedfile=%s' % export], wallet='restored.dat')
+        n0 = self.nodes[0]
+        r = self.view()
+        assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], 0, settled['balance_pq_2']))
+        assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
+                     (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
+        # transparent ECC keys are keypool keys, not derived from the seed: only a wallet.dat backup restores them
+        assert_equal((r['balance_ecc'], n0.validateaddress(self.addrs['ecc'])['ismine']), (0, False))
+        # the restored PQ keys are not in the address book; listreceivedbyaddress lists them all the same
+        self.check_listing(ecc=False)
+        self.restart0()
+        n0 = self.nodes[0]
+        assert_equal(self.view(), settled)
+        spent_confirmed = settled
 
         print('an encrypted, locked wallet shows the same balances and listings')
         n0.encryptwallet(PASSPHRASE)

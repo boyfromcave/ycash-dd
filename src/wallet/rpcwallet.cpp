@@ -1245,14 +1245,14 @@ std::string PQSchemeName(uint8_t scheme)
     }
 }
 
-//! The post-quantum scheme of a TX_PQPKH output script, or nullopt for any other script.
-static std::optional<uint8_t> PQSchemeOfScript(const CScript& script)
+//! The post-quantum scheme of a TX_PQPKH output script, or nullopt for any other script. The template is checked
+//! by its bytes, as script/standard.cpp MatchPayToPQKeyHash checks it (quantum spec §2.1: 0x20 <keyHash:32>
+//! OP_1|OP_2 OP_CHECKPQSIG, 35 bytes), so the balance calls pay a byte compare per output, not a Solver call.
+static std::optional<uint8_t> PQSchemeOfScript(const CScript& s)
 {
-    CTxDestination dest;
-    if (!ExtractDestination(script, dest)) return std::nullopt;
-    const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest);
-    if (!pq) return std::nullopt;
-    return pq->scheme;
+    if (s.size() == 35 && s[0] == 32 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG)
+        return (uint8_t)CScript::DecodeOP_N((opcodetype)s[33]);
+    return std::nullopt;
 }
 
 //! Post-quantum amounts by scheme (index = scheme byte).
@@ -1262,11 +1262,15 @@ struct PQAmounts {
     CAmount Total() const { return byScheme[1] + byScheme[2]; }
 };
 
-//! The PQ share of the wallet's spendable transparent outputs counted the way getBalanceTaddr("") counts them
-//! (AvailableCoins: unspent, not locked, mature, depth >= minDepth; spendable only when ignoreUnspendable).
-static PQAmounts PQAvailableBalance(int minDepth, bool ignoreUnspendable)
+//! getBalanceTaddr("", minDepth, ignoreUnspendable) and its post-quantum part, in its one AvailableCoins pass
+//! (unspent, not locked by lockunspent, mature, depth >= minDepth; watch-only too unless ignoreUnspendable).
+struct TransparentSplit {
+    CAmount total = 0;
+    PQAmounts pq;
+};
+static TransparentSplit AvailableTransparentSplit(int minDepth, bool ignoreUnspendable)
 {
-    PQAmounts r;
+    TransparentSplit r;
     std::vector<COutput> vecOutputs;
     LOCK2(cs_main, pwalletMain->cs_wallet);
     pwalletMain->AvailableCoins(vecOutputs, false, NULL, true);
@@ -1274,31 +1278,39 @@ static PQAmounts PQAvailableBalance(int minDepth, bool ignoreUnspendable)
         if (out.nDepth < minDepth) continue;
         if (ignoreUnspendable && !out.fSpendable) continue;
         const CTxOut& txout = out.tx->vout[out.i];
-        if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) r.Add(*scheme, txout.nValue);
+        r.total += txout.nValue;
+        if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) r.pq.Add(*scheme, txout.nValue);
     }
     return r;
 }
 
-//! The PQ share of CWallet::GetBalance() (unconfirmed false: trusted transactions) or of
-//! CWallet::GetUnconfirmedBalance() (unconfirmed true: not final, or depth 0 and not trusted), output by output as
-//! CWalletTx::GetAvailableCredit sums them (unspent, ISMINE_SPENDABLE, a coinbase only once mature).
-static PQAmounts PQWalletBalance(bool unconfirmed)
+//! CWallet::GetBalance() and CWallet::GetUnconfirmedBalance(), with their post-quantum parts, in one pass over
+//! mapWallet (the two functions make one pass each). Same rules: balance = the cached available credit of every
+//! trusted transaction; unconfirmed = that of every non-final one, or of depth 0 and not trusted. Only a
+//! transaction with a nonzero available credit has its outputs looked at for TX_PQPKH (unspent, ISMINE_SPENDABLE,
+//! as CWalletTx::GetAvailableCredit counts them).
+struct WalletBalanceSplit {
+    CAmount balance = 0, unconfirmed = 0;
+    PQAmounts pqBalance, pqUnconfirmed;
+};
+static WalletBalanceSplit GetWalletBalanceSplit()
 {
-    PQAmounts r;
+    WalletBalanceSplit r;
     LOCK2(cs_main, pwalletMain->cs_wallet);
     for (const std::pair<const uint256, CWalletTx>& item : pwalletMain->mapWallet) {
         const CWalletTx& wtx = item.second;
-        const bool counted = unconfirmed
-            ? (!CheckFinalTx(wtx) || (!wtx.IsTrusted() && wtx.GetDepthInMainChain() == 0))
-            : wtx.IsTrusted();
-        if (!counted) continue;
-        if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity() > 0) continue;
+        const bool trusted = wtx.IsTrusted();
+        const bool unconfirmed = !CheckFinalTx(wtx) || (!trusted && wtx.GetDepthInMainChain() == 0);
+        if (!trusted && !unconfirmed) continue;
+        const CAmount credit = wtx.GetAvailableCredit();
+        if (trusted) r.balance += credit; else r.unconfirmed += credit;
+        if (credit == 0) continue;
+        PQAmounts& pq = trusted ? r.pqBalance : r.pqUnconfirmed;
         for (unsigned int i = 0; i < wtx.vout.size(); i++) {
-            if (pwalletMain->IsSpent(item.first, i)) continue;
             const CTxOut& txout = wtx.vout[i];
             auto scheme = PQSchemeOfScript(txout.scriptPubKey);
-            if (!scheme) continue;
-            r.Add(*scheme, pwalletMain->GetCredit(txout, ISMINE_SPENDABLE));
+            if (!scheme || pwalletMain->IsSpent(item.first, i)) continue;
+            pq.Add(*scheme, pwalletMain->GetCredit(txout, ISMINE_SPENDABLE));
         }
     }
     return r;
@@ -1380,9 +1392,18 @@ UniValue ListReceived(const UniValue& params, bool fByAccounts)
     // Reply
     UniValue ret(UniValue::VARR);
     std::map<std::string, tallyitem> mapAccountTally;
-    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook) {
+    // The address book, plus (beta2 item 15) every post-quantum key of this wallet that received coins without an
+    // address-book entry: a wallet restored from its seed (-hdseedfile) finds its PQ keys by rescan but does not
+    // file them, and they must still be listed. They go under the default account "".
+    std::vector<std::pair<CTxDestination, std::string>> listed;
+    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook)
+        listed.emplace_back(item.first, item.second.name);
+    for (const std::pair<CTxDestination, tallyitem>& t : mapTally)
+        if (std::get_if<CPQKeyID>(&t.first) && !pwalletMain->mapAddressBook.count(t.first))
+            listed.emplace_back(t.first, std::string());
+    for (const std::pair<CTxDestination, std::string>& item : listed) {
         const CTxDestination& dest = item.first;
-        const std::string& strAccount = item.second.name;
+        const std::string& strAccount = item.second;
         std::map<CTxDestination, tallyitem>::iterator it = mapTally.find(dest);
         if (it == mapTally.end() && !fIncludeEmpty)
             continue;
@@ -1478,7 +1499,8 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "  }\n"
             "  ,...\n"
             "]\n"
-            "\nWith includeempty, this lists every transparent address of the wallet's address book, ECC and post-quantum\n"
+            "\nWith includeempty, this lists every transparent address of the wallet's address book, ECC and post-quantum,\n"
+            "and always every post-quantum address of the wallet that received coins (a seed restore does not file those)\n"
             "(getnewaddress, getnewaddress \"\" \"pq\" / \"pqslh\"); z_listaddresses lists the shielded ones. amount is what an address\n"
             "received; z_getbalance gives what it holds now.\n"
 
@@ -2522,9 +2544,10 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"balance\": xxxxxxx,         (numeric) the total confirmed transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"unconfirmed_balance\": xxx, (numeric) the total unconfirmed transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"immature_balance\": xxxxxx, (numeric) the total immature transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
-            "  \"balance_ecc\": xxxxxxx,     (numeric) the part of balance held by ECC transparent addresses (P2PKH, P2SH)\n"
+            "  \"balance_ecc\": xxxxxxx,     (numeric) balance minus balance_pq: every coin of balance that is not post-quantum\n"
+            "                             (P2PKH, P2PK, P2SH)\n"
             "  \"balance_pq\": xxxxxxx,      (numeric) the part of balance held by post-quantum addresses (TX_PQPKH)\n"
-            "  \"unconfirmed_balance_ecc\": xxx, (numeric) the part of unconfirmed_balance held by ECC transparent addresses\n"
+            "  \"unconfirmed_balance_ecc\": xxx, (numeric) unconfirmed_balance minus unconfirmed_balance_pq\n"
             "  \"unconfirmed_balance_pq\": xxx,  (numeric) the part of unconfirmed_balance held by post-quantum addresses\n"
             "  \"pq_by_scheme\": [           (array) balance_pq and unconfirmed_balance_pq by scheme, both schemes always\n"
             "    {\n"
@@ -2556,15 +2579,16 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("walletversion", pwalletMain->GetVersion());
-    const CAmount nBalance = pwalletMain->GetBalance();
-    const CAmount nUnconfirmed = pwalletMain->GetUnconfirmedBalance();
+    const WalletBalanceSplit split = GetWalletBalanceSplit();   // = GetBalance(), GetUnconfirmedBalance(), one pass
+    const CAmount nBalance = split.balance;
+    const CAmount nUnconfirmed = split.unconfirmed;
     obj.pushKV("balance",       ValueFromAmount(nBalance));
     obj.pushKV("unconfirmed_balance", ValueFromAmount(nUnconfirmed));
     obj.pushKV("immature_balance",    ValueFromAmount(pwalletMain->GetImmatureBalance()));
     {
         // The split by address type (beta2 item 15): ECC = the existing figure minus its post-quantum part.
-        const PQAmounts pqBal = PQWalletBalance(false);
-        const PQAmounts pqUnc = PQWalletBalance(true);
+        const PQAmounts& pqBal = split.pqBalance;
+        const PQAmounts& pqUnc = split.pqUnconfirmed;
         obj.pushKV("balance_ecc", ValueFromAmount(nBalance - pqBal.Total()));
         obj.pushKV("balance_pq", ValueFromAmount(pqBal.Total()));
         obj.pushKV("unconfirmed_balance_ecc", ValueFromAmount(nUnconfirmed - pqUnc.Total()));
@@ -3761,7 +3785,8 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
             "\ndetected, and so the returned balance may be larger than the actual balance.\n"
             "\nArguments:\n"
             "1. \"address\"      (string) The selected address. It may be a transparent address (ECC, or post-quantum of\n"
-            "                   either scheme) or a private address.\n"
+            "                   either scheme) or a private address. A transparent address (ECC or post-quantum) this wallet does\n"
+            "                   not hold answers 0 (nothing of it is in the wallet); a shielded one is refused.\n"
             "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times\n"
             "                   (as z_gettotalbalance: unconfirmed own change is left out at 1 and counted at 0).\n"
             "3. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
@@ -3838,7 +3863,8 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
             "  \"transparent\": xxxxx,     (numeric) the total balance of transparent funds\n"
             "  \"private\": xxxxx,         (numeric) the total balance of shielded funds (in both Sprout and Sapling addresses)\n"
             "  \"total\": xxxxx,           (numeric) the total balance of both transparent and shielded funds\n"
-            "  \"transparent_ecc\": xxxxx, (numeric) the part of transparent held by ECC transparent addresses (P2PKH, P2SH)\n"
+            "  \"transparent_ecc\": xxxxx, (numeric) transparent minus transparent_pq: every output of transparent that is not\n"
+            "                             post-quantum (P2PKH, P2PK, P2SH; with includeWatchonly any other watched script)\n"
             "  \"transparent_pq\": xxxxx,  (numeric) the part of transparent held by post-quantum addresses (TX_PQPKH)\n"
             "  \"pq_by_scheme\": [         (array) transparent_pq by scheme, both schemes always\n"
             "    {\n"
@@ -3850,7 +3876,9 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
             "}\n"
             "\nEvery figure counts an output by its confirmations alone: at minconf 1 (the default) an unconfirmed output\n"
             "is left out even when it is this wallet's own change (getwalletinfo's balance counts that); minconf 0 counts\n"
-            "every unconfirmed output. Post-quantum coins are transparent: transparent = transparent_ecc + transparent_pq.\n"
+            "every unconfirmed output. Coins locked with lockunspent and immature coinbase are left out; includeWatchonly\n"
+            "adds watch-only coins (getwalletinfo counts locked coins and never watch-only ones). Post-quantum coins are\n"
+            "transparent: transparent = transparent_ecc + transparent_pq, each split counted by the same rule.\n"
             "The amounts are strings, as transparent, private and total are.\n"
             "\nExamples:\n"
             "\nThe total amount in the wallet\n"
@@ -3880,7 +3908,8 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     // but they don't because wtx.GetAmounts() does not handle tx where there are no outputs
     // pwalletMain->GetBalance() does not accept min depth parameter
     // so we use our own method to get balance of utxos.
-    CAmount nBalance = getBalanceTaddr("", nMinDepth, !fIncludeWatchonly);
+    const TransparentSplit tsplit = AvailableTransparentSplit(nMinDepth, !fIncludeWatchonly);   // = getBalanceTaddr("")
+    CAmount nBalance = tsplit.total;
     CAmount nPrivateBalance = getBalanceZaddr("", nMinDepth, INT_MAX, !fIncludeWatchonly);
     CAmount nTotalBalance = nBalance + nPrivateBalance;
     UniValue result(UniValue::VOBJ);
@@ -3888,7 +3917,7 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     result.pushKV("private", FormatMoney(nPrivateBalance));
     result.pushKV("total", FormatMoney(nTotalBalance));
     // The split by address type (beta2 item 15), by the rule transparent follows: ECC = transparent minus its PQ part.
-    const PQAmounts pqBal = PQAvailableBalance(nMinDepth, !fIncludeWatchonly);
+    const PQAmounts& pqBal = tsplit.pq;
     result.pushKV("transparent_ecc", FormatMoney(nBalance - pqBal.Total()));
     result.pushKV("transparent_pq", FormatMoney(pqBal.Total()));
     UniValue byScheme(UniValue::VARR);

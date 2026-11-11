@@ -183,8 +183,9 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
 - **Balances and addresses by type** (beta2 item 15; additions only, every existing field keeps its meaning).
   A post-quantum coin is a transparent coin: it stays inside `transparent` (`z_gettotalbalance`), `balance` /
   `unconfirmed_balance` (`getwalletinfo`) and `getbalance`, and the new fields say how much of it is
-  post-quantum. ECC means every other transparent output (P2PKH, P2SH) and is computed as the existing figure minus
-  its post-quantum part, so the two always add up. Scheme `1` is `"SLH-DSA-SHA2-128s"`, `2` is `"FN-DSA-512"`;
+  post-quantum. The `_ecc` fields are the existing figure minus its post-quantum part, so the two always add up
+  exactly: every counted output that is not `TX_PQPKH`, in practice P2PKH, P2PK and P2SH coins, and with
+  `includeWatchonly` any other watched script (bare multisig, a vault or channel script imported as watch-only). Scheme `1` is `"SLH-DSA-SHA2-128s"`, `2` is `"FN-DSA-512"`;
   `pq_by_scheme` always lists both, in that order, a scheme the wallet does not use with zero.
   - `z_gettotalbalance ( minconf includeWatchonly )` adds `transparent_ecc`, `transparent_pq` and
     `pq_by_scheme: [{pqscheme, pqschemename, transparent_pq}]`; amounts are strings, as `transparent`,
@@ -192,11 +193,16 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   - `getwalletinfo` adds `balance_ecc`, `balance_pq`, `unconfirmed_balance_ecc`, `unconfirmed_balance_pq` and
     `pq_by_scheme: [{pqscheme, pqschemename, balance_pq, unconfirmed_balance_pq}]` (numbers, as `balance` is).
   - `z_getbalance <address>` takes a post-quantum address of either scheme (it always did on this line; the
-    6.x line refused one, finding L-3) and returns what the address holds. An unparseable address is still
-    refused with `Invalid from address, should be a taddr or zaddr.`
+    6.x line refused one, finding L-3) and returns what the address holds (watch-only coins included). A
+    transparent address the wallet does not hold, ECC or post-quantum, answers `0`, as it always did for ECC; a
+    Sapling address it does not hold is refused with `From address does not belong to this node, spending key or
+    viewing key not found.`; an unparseable address with `Invalid from address, should be a taddr or zaddr.`
   - Listings: `listreceivedbyaddress 0 true` lists every transparent address of the address book, ECC and
     post-quantum (`getnewaddress "" "pq"`/`"pqslh"`, and the plain-YEC form of a `yed_getnewaddress "pq"` holder);
-    a post-quantum entry adds `pqscheme` and `pqschemename`. `z_listaddresses` lists the Sapling addresses.
+    a post-quantum entry adds `pqscheme` and `pqschemename`. It also lists, under account `""`, every post-quantum
+    key of the wallet that received coins without an address-book entry: a wallet restored from its seed
+    (`-hdseedfile`) finds its PQ keys by rescan but does not file them. (ECC keys are keypool keys, not derived from
+    the seed: a seed-only restore does not recover ECC coins; the first Sapling address and the PQ keys it does.) `z_listaddresses` lists the Sapling addresses.
     `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. This line has no
     `listaddresses` (the 6.x line's call, which gains the same `pqscheme`/`pqschemename` per PQ address there).
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, now documented and
@@ -206,10 +212,13 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
     (`getwalletinfo.unconfirmed_balance`): every other unconfirmed output. *By depth* (`z_gettotalbalance`,
     `z_getbalance`, `listunspent`, all with `minconf`, default 1): an output counts when its transaction has at
     least `minconf` confirmations, whoever made it, so at the default an own change output is left out for a
-    block and at `minconf` 0 every unconfirmed output counts; these also leave out coins locked by
-    `lockunspent`. Hence, in a wallet with no immature or locked coins,
-    `z_gettotalbalance(0).transparent = balance + unconfirmed_balance`, and the same holds for the ECC part,
-    the post-quantum part and each scheme: the post-quantum figures follow the rule of the field they split.
+    block and at `minconf` 0 every unconfirmed output counts. Hence
+    `z_gettotalbalance(0).transparent = balance + unconfirmed_balance − locked`, and the same for the ECC part,
+    the post-quantum part and each scheme (the post-quantum figures follow the rule of the field they split), where
+    the identity's exceptions are by design: *locked* (`lockunspent`) coins count in `getwalletinfo` and not in the
+    by-depth calls (nor in `z_getbalance`); *immature* coinbase counts in neither (it is `immature_balance`, then
+    `balance_ecc`/`transparent_ecc` once mature); *watch-only* coins count only in `z_gettotalbalance` with
+    `includeWatchonly` and in `z_getbalance` of the address, never in `getwalletinfo`. All pinned by the test.
 - **`z_importpqkey`** takes a dump's whole `pqseed=` line and refuses it when its `owner=`/`addr=`/
   `yecaddr=` do not name the key the seed makes under the line's scheme (the scheme decides the key;
   both schemes take a 48-byte seed). **`vault_release`** refuses a 66-hex pqkeyid as the recipient
