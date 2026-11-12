@@ -1048,7 +1048,8 @@ UniValue sendfrom(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendfrom \"fromaccount\" \"tozcashaddress\" amount ( minconf \"comment\" \"comment-to\" )\n"
             "\nDEPRECATED (use sendtoaddress). Sent an amount from an account to a Ycash address.\n"
-            "The amount is a real and is rounded to the nearest 0.00000001."
+            "The amount is a real and is rounded to the nearest 0.00000001.\n"
+            "Ordinary (ECC) coins only, as sendtoaddress."
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"fromaccount\"       (string, required) MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
@@ -3023,6 +3024,8 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                             "This will not modify existing inputs, and will add one change output to the outputs.\n"
                             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
                             "The inputs added will not be signed, use signrawtransaction for that.\n"
+                            "The inputs added are ordinary (ECC) coins only: a post-quantum coin is added only when the transaction already names\n"
+                            "it; with too few ECC coins the call is refused, naming the post-quantum value (spend it with z_sendmany).\n"
                             "Note that all existing inputs must have their previous output transaction be in the wallet.\n"
                             "Note that all inputs selected must be of standard form and P2SH scripts must be"
                             "in the wallet using importaddress or addmultisigaddress (to calculate fees).\n"
