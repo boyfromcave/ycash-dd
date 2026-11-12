@@ -543,6 +543,42 @@ leg_rule_tags_interm() {
   echo "IT-8: the in-term promise is the spec copy's collateral bullet"
 }
 
+# ── dependency advisories: the two ignore lists agree ─────────────────────────────────────────
+
+# RustSec IDs accepted in osv-scanner.toml that cargo-deny never sees, one per line with the reason
+# (SECURITY-CI.md: every other RustSec ID accepted there is also in contrib/secops/deny-node.toml).
+OSV_ONLY=$(sed 's/[[:space:]]*#.*$//' <<'EOF_OSV_ONLY' | grep -v '^$' || true
+RUSTSEC-2024-0436   # contrib/yellowback/attest/Cargo.lock only (its own deny.toml accepts it); not in the root graph
+EOF_OSV_ONLY
+)
+
+leg_secops() {
+  # The two ignore lists cannot drift (combined security audit, 2026-11-11: RUSTSEC-2026-0486 was in
+  # osv-scanner.toml only): every RustSec ID cargo-deny ignores is accepted by OSV-Scanner too, and every
+  # RustSec ID OSV-Scanner accepts is ignored by cargo-deny unless OSV_ONLY names it. GHSA IDs are
+  # OSV-only by nature (cargo-deny reads the RustSec database).
+  local osv deny x bad=""
+  osv=$(grep -oE '^id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' osv-scanner.toml | cut -d'"' -f2 | sort -u)
+  deny=$(grep -oE '\{ *id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' contrib/secops/deny-node.toml | cut -d'"' -f2 | sort -u)
+  if [ -z "$osv" ] || [ -z "$deny" ]; then echo "could not read the ignore lists"; return 1; fi
+  for x in $deny; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  $x is ignored in contrib/secops/deny-node.toml but not accepted in osv-scanner.toml"
+  done
+  for x in $osv; do
+    grep -qx -- "$x" <<< "$deny" && continue
+    grep -qx -- "$x" <<< "$OSV_ONLY" && continue
+    bad="$bad
+  $x is accepted in osv-scanner.toml but not ignored in contrib/secops/deny-node.toml (add it with the same reason, or to OSV_ONLY with why cargo-deny never sees it)"
+  done
+  for x in $OSV_ONLY; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  OSV_ONLY names $x, which osv-scanner.toml does not accept"
+  done
+  echo "RustSec ignores: $(wc -l <<< "$osv" | tr -d ' ') in osv-scanner.toml, $(wc -l <<< "$deny" | tr -d ' ') in deny-node.toml, $(wc -w <<< "$OSV_ONLY" | tr -d ' ') OSV-only by name"
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
 # ── attribution and naming ────────────────────────────────────────────────────────────────────
 
 leg_attribution() {
@@ -739,6 +775,7 @@ leg block "documents (fork-local, P4)" leg_documents
 leg block "RPC contract (P7; rpcversion of this line)" leg_contract
 leg block "attribution: The Ycash developers on every fork file, no upstream notice touched" leg_attribution
 leg block "naming: no ycash6 / DigiDollar / ydollar in src/ (AGENTS.md rule 6)" leg_naming
+leg block "advisory ignores: osv-scanner.toml and contrib/secops/deny-node.toml agree (SECURITY-CI.md)" leg_secops
 leg block "PQ secret wipes: Falcon DRBG state, slhdsa-c slh_var_t (local patch P3)" leg_pq_wipes
 leg block "rule -> test tags (v2 plan §7)" leg_rule_tags
 leg block "rule -> test tags, v3 identifiers (v3 plan §7)" leg_rule_tags_v3
