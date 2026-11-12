@@ -404,6 +404,9 @@ bool ContextualCheckInputs(const CTransaction& tx, CValidationState &state, cons
                            std::vector<CScriptCheck> *pvChecks = NULL,
                            std::shared_ptr<const vault::SetSnapshot> vaultSnapshot = nullptr);
 
+/** ZIP 216: true for the two 32-byte Jubjub encodings this line's decoder accepts but are non-canonical */
+bool IsNonCanonicalJubjubEncoding(const unsigned char* p);
+
 /** Check a transaction contextually against a set of consensus rules */
 bool ContextualCheckTransaction(const CTransaction& tx, CValidationState &state,
                                 const CChainParams& chainparams, int nHeight, bool isMined,

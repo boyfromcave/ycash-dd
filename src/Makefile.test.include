@@ -137,6 +137,7 @@ BITCOIN_TESTS =\
   test/pq_crypto_tests.cpp \
   test/sha256compress_tests.cpp \
   test/vault_script_tests.cpp \
+  test/zip216_tests.cpp \
   test/yellowback_address_tests.cpp \
   test/yellowback_attest_tests.cpp \
   test/yellowback_bundle_tests.cpp \
