@@ -911,6 +911,21 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
     return nSigOps;
 }
 
+bool IsNonCanonicalJubjubEncoding(const unsigned char* p)
+{
+    // ZIP 216. Jubjub encodes a point as v (255 bits, little-endian) and the sign bit of u.
+    // jubjub 0.5.1 (this line) already rejects v >= q and a v off the curve; the only encodings it
+    // accepts that jubjub 0.10 (the 6.x and kogany lines) rejects are the two with u = 0 and the
+    // sign bit set, (0, 1) and (0, -1).
+    static const unsigned char V_ONE_SIGN[32] = {
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+    static const unsigned char V_MINUS_ONE_SIGN[32] = {
+        0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
+        0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33, 0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0xf3};
+    return memcmp(p, V_ONE_SIGN, 32) == 0 || memcmp(p, V_MINUS_ONE_SIGN, 32) == 0;
+}
+
 /**
  * Check a transaction contextually against a set of consensus rules valid at a given block height.
  *
@@ -949,6 +964,8 @@ bool ContextualCheckTransaction(
     bool heartwoodActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_HEARTWOOD);
     bool canopyActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_CANOPY);
     bool futureActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_ZFUTURE);
+    // ZIP 216 and the non-identity coinbase pk_d, which the 6.x and kogany lines enforce at every height.
+    const bool zip216Active = true;
 
     assert(!saplingActive || overwinterActive); // Sapling cannot be active unless Overwinter is
     assert(!heartwoodActive || saplingActive);  // Heartwood cannot be active unless Sapling is
@@ -1077,6 +1094,17 @@ bool ContextualCheckTransaction(
                         DOS_LEVEL_BLOCK,
                         error("ContextualCheckTransaction(): coinbase output description has invalid outCiphertext"),
                         REJECT_INVALID, "bad-cb-output-desc-invalid-outct");
+                }
+
+                // ZIP 216, and pk_d must not be the identity (as Sapling output recovery decodes it).
+                // A pk_d outside the prime-order subgroup already fails the note commitment check.
+                static const uint256 JUBJUB_IDENTITY = uint256S("01");
+                if (zip216Active && (IsNonCanonicalJubjubEncoding(outPlaintext->pk_d.begin()) ||
+                                     outPlaintext->pk_d == JUBJUB_IDENTITY)) {
+                    return state.DoS(
+                        DOS_LEVEL_BLOCK,
+                        error("ContextualCheckTransaction(): coinbase output description has an invalid pk_d"),
+                        REJECT_INVALID, "bad-cb-output-desc-invalid-ct");
                 }
 
                 // SaplingNotePlaintext::decrypt() checks note commitment validity.
@@ -1250,6 +1278,19 @@ bool ContextualCheckTransaction(
     if (!tx.vShieldedSpend.empty() ||
         !tx.vShieldedOutput.empty())
     {
+        // ZIP 216: the R half of every RedJubjub signature must be a canonical encoding.
+        // Not a ban in the mempool: a v4.5.0 peer relays such a transaction in good faith.
+        bool nonCanonicalR = IsNonCanonicalJubjubEncoding(tx.bindingSig.data());
+        for (const SpendDescription &spend : tx.vShieldedSpend) {
+            nonCanonicalR = nonCanonicalR || IsNonCanonicalJubjubEncoding(spend.spendAuthSig.data());
+        }
+        if (zip216Active && nonCanonicalR) {
+            return state.DoS(
+                isMined ? DOS_LEVEL_BLOCK : 0,
+                error("ContextualCheckTransaction(): Sapling signature with a non-canonical R"),
+                REJECT_INVALID, "bad-sapling-bundle-authorization");
+        }
+
         auto ctx = librustzcash_sapling_verification_ctx_init();
 
         for (const SpendDescription &spend : tx.vShieldedSpend) {
