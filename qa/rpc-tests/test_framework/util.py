@@ -745,14 +745,6 @@ def tarfile_extractall(tgz, path):
     tgz.extractall(path=path, members=members)
 
 
-def seed_restored_balance_ecc(settled):
-    """getwalletinfo's balance_ecc of a wallet restored from its seed alone (wallet_balance_by_type.py), given the
-    original wallet's view ``settled``. A line difference: ycash-dd's ECC keys are random keypool keys, not derived
-    from the seed, so the restore finds no ECC coin: 0. (ycash6 supplies its own body: its keypool keys come from the
-    seed and the rescan re-finds some of them.)"""
-    return Decimal(0)
-
-
 # Line helpers for wallet_address_matrix.py, which is byte-identical on both C++ node lines (beta2 D-2, D-6). ycash6's
 # util.py defines the same names for 6.x: z_sendmany_opid passes the privacy policy AllowFullyTransparent and a fee of
 # None (the wallet's ZIP-317 fee) unless one is given, z_mergetoaddress_call passes NoPrivacy, a lone Sapling output is

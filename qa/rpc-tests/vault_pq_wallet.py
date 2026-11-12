@@ -15,8 +15,9 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
   conventional fee (audit 04/N-1)): the conventional fee (~27,500 zat) at the default rate, size-priced on a node
   with -pqfeerate=0.001;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
-  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size, the ZIP-317
-  conventional fee);
+  wallet spends it with z_sendmany from its address (the stock sends select ECC coins only, beta2 audit M-1) and
+  prices it itself when fundrawtransaction funds a raw transaction naming it, each at max(DEFAULT_FEE,
+  -pqfeerate x size, the ZIP-317 conventional fee);
 - ANY_TADDR in z_sendmany and z_mergetoaddress selects ECC coins only, never a TX_PQPKH coin (a PQ coin is spent
   when its address is named, beta2 D-2/D-6: wallet_address_matrix.py);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
@@ -272,6 +273,21 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000, conventional_fee(tx)), (fee, size)
         self.mine(1)
         assert (pq_txid, pq_vout) not in [(u['txid'], u['vout']) for u in pq_unspent(n1)]   # spent; the change returns to pq_addr
+
+        print('node 1 prices a PQ input itself (CreateTransaction): fundrawtransaction naming its PQ change coin')
+        change = [u for u in pq_unspent(n1) if u['address'] == pq_addr]
+        assert_equal(len(change), 1)
+        named = {'txid': change[0]['txid'], 'vout': change[0]['vout']}
+        funded = n1.fundrawtransaction(n1.createrawtransaction([named], {n0.getnewaddress(): Decimal(change[0]['amount']) / 2}))
+        signed = n1.signrawtransaction(funded['hex'])
+        assert_equal(signed['complete'], True)
+        txid = n1.sendrawtransaction(signed['hex'])
+        tx = self.tx_of(txid, 1)
+        assert_equal([{'txid': i['txid'], 'vout': i['vout']} for i in tx['vin']], [named])
+        size = len(tx['hex']) // 2
+        fee = zat(funded['fee'])
+        assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000, conventional_fee(tx)), (fee, size)
+        self.mine(1)
         if others:
             n1.lockunspent(True, others)
 
