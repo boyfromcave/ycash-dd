@@ -118,6 +118,9 @@ BASE_SCRIPTS= [
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',
     'vault_pq_wallet_restore.py',
+    # vault_lock's funding address "from" (beta2 D-3): P2PKH, PQ (both schemes) and Sapling sources, a reorg,
+    # the owner spend of each V, the refusals.
+    'vault_lock_from.py',
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -hdseedfile.
     'wallet_pq_address.py',
