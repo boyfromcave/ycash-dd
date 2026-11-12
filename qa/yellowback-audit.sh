@@ -16,9 +16,11 @@
 #            cross-line byte identity of the golden vectors, and the consensus-diff report.
 #   auto     (default) upgrade when src/vault/ exists, harden otherwise.
 #
-# Usage: qa/yellowback-audit.sh [--mode harden|upgrade|auto] [--out DIR]
+# Usage: qa/yellowback-audit.sh [--mode harden|upgrade|auto] [--out DIR] [--require-cross-line]
 #   --out DIR   where the upgrade mode writes consensus-diff.patch and consensus-diff.txt
 #               (default: a fresh directory under ${TMPDIR:-/tmp})
+#   --require-cross-line   the cross-line leg fails instead of printing NOT CHECKED when no other line
+#               is set or found (CI fails it either way)
 # Refs it needs (CI fetches them; a missing ref is an error, never a vacuous pass):
 #   ycash-legacy (branch, = upstream v4.5.0) and yellowback-v3-baseline (tag).
 # Upgrade-mode inputs (CI sets them; locally a leg whose input is missing says NOT CHECKED and,
@@ -27,7 +29,11 @@
 #                        default: ../.. when it holds scripts/extract_spec.py (a wt/<name> worktree)
 #   YB_OTHER_LINE_REF    a ref in THIS repository holding the other node line (CI fetches ycash6 into it)
 #   YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV   or another local repository and a revision in it
-#                        (e.g. YB_OTHER_LINE_DIR=../../ycash6 YB_OTHER_LINE_REV=upgrade/vault)
+#                        (e.g. YB_OTHER_LINE_DIR=../ycash6 YB_OTHER_LINE_REV=upgrade/vault)
+#   neither set: the other line's checkout at the conventional sibling path is used when it exists
+#   (../ycash6 beside the ycash-dd main tree, ../up6-<suffix> beside a wt/up-<suffix> worktree), at the
+#   branch of this checkout's name unless that branch is merged already, else upgrade/vault
+#   (qa/yellowback-other-line-branch.py decides and says why). NOT CHECKED only when nothing is found.
 # The functional-test lists are read from the workflow file itself (its top-level env), the one
 # place they are declared.
 # Path lists ($frozen, $pure, $(existing ...)) are word-split on purpose; no path here holds a space.
@@ -39,13 +45,15 @@ cd "$(dirname "$0")/.."
 
 mode=auto
 out=""
+require_cross_line=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --mode=*) mode="${1#--mode=}"; shift ;;
     --out) out="${2:-}"; shift 2 ;;
     --out=*) out="${1#--out=}"; shift ;;
-    -h|--help) sed -n '6,32p' "$0"; exit 0 ;;
+    --require-cross-line) require_cross_line=1; shift ;;
+    -h|--help) sed -n '6,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -193,21 +201,58 @@ leg_determinism() {
 
 # ── registration: executable, registered, run by a CI job ────────────────────────────────────
 
-leg_registration() {
-  # rpc-tests.py exec's a script directly, so it must be executable, and it must be run by some job:
-  # registered-but-never-run is how the v2 enforcement suite and then the whole v3 attestation suite
-  # sat silent in CI.
-  local f n
-  for f in qa/rpc-tests/yellowback_*.py qa/rpc-tests/vault_*.py; do
+# Fork-added functional scripts deliberately run by no CI job (item 1 of the CI-hardening lane, beta2
+# list items 69, 59). One name per line, each with its reason; anything not named here that the fork
+# added under qa/rpc-tests/ must be executable, registered and run. Empty on this line today.
+REGISTRATION_EXCLUDE=$(sed 's/[[:space:]]*#.*$//' <<'EOF_EXCLUDE' | grep -v '^$' || true
+EOF_EXCLUDE
+)
+
+# Every functional script the fork owns: each top-level qa/rpc-tests/*.py added relative to $LEGACY
+# (the fork delta from the merge base, as the attribution leg reads it, here including what is staged,
+# modified or untracked in the working tree, so a script not yet committed is seen locally), plus the
+# yellowback_*/vault_* prefixes, minus REGISTRATION_EXCLUDE. Derived mechanically, so a wallet_*.py or
+# any other new name is covered.
+fork_scripts() {
+  { git diff --no-renames --name-only --diff-filter=A "$(git merge-base "$LEGACY" HEAD)" -- qa/rpc-tests
+    git ls-files --others --exclude-standard -- qa/rpc-tests
+    git ls-files -- 'qa/rpc-tests/yellowback_*.py' 'qa/rpc-tests/vault_*.py'
+  } | { grep -E '^qa/rpc-tests/[^/]+\.py$' || true; } | sort -u | while read -r f; do
     [ -e "$f" ] || continue
-    [ -x "$f" ] || { echo "$f is not executable; chmod +x it"; return 1; }
-    n=$(basename "$f" .py)
-    grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; return 1; }
-    case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $NIGHTLY_SCRIPTS " in
-      *" $n "*) ;;
-      *) echo "$n is in qa/rpc-tests/ but no CI job runs it (add it to YELLOWBACK_SCRIPTS or NIGHTLY_SCRIPTS in $WF)"; return 1 ;;
-    esac
+    grep -qx -- "$(basename "$f" .py)" <<< "$REGISTRATION_EXCLUDE" && continue
+    echo "$f"
   done
+}
+
+leg_registration() {
+  # rpc-tests.py exec's a script directly, so it must be executable IN GIT (a checkout takes the mode
+  # from the index, not from the author's disk), and it must be run by some job: registered-but-never-run
+  # is how the v2 enforcement suite, then the whole v3 attestation suite, then wallet_yed_held_guard sat
+  # silent in CI. A push-tier script also needs a measured weight in qa/yellowback-ci-shard.py.
+  local f n mode bad="" count=0 x
+  for x in $REGISTRATION_EXCLUDE; do
+    [ -e "qa/rpc-tests/$x.py" ] || { echo "REGISTRATION_EXCLUDE names $x, which is not in qa/rpc-tests/"; return 1; }
+  done
+  while read -r f; do
+    count=$((count + 1))
+    n=$(basename "$f" .py)
+    mode=$(git ls-files -s -- "$f" | cut -d' ' -f1)
+    [ "$mode" = 100755 ] || bad="$bad
+  $f is mode ${mode:-untracked} in git, not 100755 (chmod +x it, then git add it)"
+    grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || bad="$bad
+  $n is not registered in qa/pull-tester/rpc-tests.py"
+    case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $NIGHTLY_SCRIPTS $STOCK_BASELINE " in
+      *" $n "*) ;;
+      *) bad="$bad
+  $n is in qa/rpc-tests/ but no CI job runs it (add it to YELLOWBACK_SCRIPTS or NIGHTLY_SCRIPTS in $WF, or to REGISTRATION_EXCLUDE with the reason)" ;;
+    esac
+    case " $YELLOWBACK_SCRIPTS $STOCK_BASELINE " in
+      *" $n "*) grep -qE "^[[:space:]]+\"$n\":" qa/yellowback-ci-shard.py || bad="$bad
+  $n runs in the push tier but has no weight in qa/yellowback-ci-shard.py (WEIGHTS)" ;;
+    esac
+  done < <(fork_scripts)
+  echo "fork-owned functional scripts checked: $count (excluded by name: $(wc -w <<< "$REGISTRATION_EXCLUDE" | tr -d ' '))"
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
   # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every name a
   # job passes it must be registered there (ported from ycash6, audit I-1).
   for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE $NIGHTLY_SCRIPTS; do
@@ -504,6 +549,42 @@ leg_rule_tags_interm() {
   echo "IT-8: the in-term promise is the spec copy's collateral bullet"
 }
 
+# ── dependency advisories: the two ignore lists agree ─────────────────────────────────────────
+
+# RustSec IDs accepted in osv-scanner.toml that cargo-deny never sees, one per line with the reason
+# (SECURITY-CI.md: every other RustSec ID accepted there is also in contrib/secops/deny-node.toml).
+OSV_ONLY=$(sed 's/[[:space:]]*#.*$//' <<'EOF_OSV_ONLY' | grep -v '^$' || true
+RUSTSEC-2024-0436   # contrib/yellowback/attest/Cargo.lock only (its own deny.toml accepts it); not in the root graph
+EOF_OSV_ONLY
+)
+
+leg_secops() {
+  # The two ignore lists cannot drift (combined security audit, 2026-11-11: RUSTSEC-2026-0486 was in
+  # osv-scanner.toml only): every RustSec ID cargo-deny ignores is accepted by OSV-Scanner too, and every
+  # RustSec ID OSV-Scanner accepts is ignored by cargo-deny unless OSV_ONLY names it. GHSA IDs are
+  # OSV-only by nature (cargo-deny reads the RustSec database).
+  local osv deny x bad=""
+  osv=$(grep -oE '^id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' osv-scanner.toml | cut -d'"' -f2 | sort -u)
+  deny=$(grep -oE '\{ *id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' contrib/secops/deny-node.toml | cut -d'"' -f2 | sort -u)
+  if [ -z "$osv" ] || [ -z "$deny" ]; then echo "could not read the ignore lists"; return 1; fi
+  for x in $deny; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  $x is ignored in contrib/secops/deny-node.toml but not accepted in osv-scanner.toml"
+  done
+  for x in $osv; do
+    grep -qx -- "$x" <<< "$deny" && continue
+    grep -qx -- "$x" <<< "$OSV_ONLY" && continue
+    bad="$bad
+  $x is accepted in osv-scanner.toml but not ignored in contrib/secops/deny-node.toml (add it with the same reason, or to OSV_ONLY with why cargo-deny never sees it)"
+  done
+  for x in $OSV_ONLY; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  OSV_ONLY names $x, which osv-scanner.toml does not accept"
+  done
+  echo "RustSec ignores: $(wc -l <<< "$osv" | tr -d ' ') in osv-scanner.toml, $(wc -l <<< "$deny" | tr -d ' ') in deny-node.toml, $(wc -w <<< "$OSV_ONLY" | tr -d ' ') OSV-only by name"
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
 # ── attribution and naming ────────────────────────────────────────────────────────────────────
 
 leg_attribution() {
@@ -535,7 +616,9 @@ leg_attribution() {
   done
   [ -z "$exempt" ] || echo "frozen-set files exempt from the modified-file rule:$exempt"
   local removed
-  removed=$(git diff "$LEGACY...HEAD" -- src qa contrib zcutil doc | grep -E '^-[^-].*Copyright.*(Bitcoin|Zcash|Satoshi)' || true)
+  # -a: the diff is text even where a file holds a stray NUL (GNU grep would print "binary file matches"
+  # and hide the line).
+  removed=$(git diff "$LEGACY...HEAD" -- src qa contrib zcutil doc | grep -aE '^-[^-].*Copyright.*(Bitcoin|Zcash|Satoshi)' || true)
   [ -z "$removed" ] || bad="$bad
   removed or altered upstream notice: $removed"
   [ -z "$bad" ] || { echo "$bad"; return 1; }
@@ -547,9 +630,9 @@ leg_naming() {
   # upstream file; the retired working name (YDollar / ydollar / yd_) appears nowhere. Checked on the
   # lines the fork adds to src/ (upstream's own text is not ours to rename).
   local added
-  added=$(git diff "$LEGACY...HEAD" -- src ':!src/test/data' | grep '^+' | grep -v '^+++' || true)
-  ! printf '%s\n' "$added" | grep -nE '\bycash6\b|[Yy][Dd]ollar|\byd_' || return 1
-  ! printf '%s\n' "$added" | grep -E '[Dd]igi[Dd]ollar|DIGIDOLLAR|\bDD\b' | grep -Ev '^\+[[:space:]]*(//|\*|/\*)' || return 1
+  added=$(git diff "$LEGACY...HEAD" -- src ':!src/test/data' | grep -a '^+' | grep -av '^+++' || true)
+  ! printf '%s\n' "$added" | grep -anE '\bycash6\b|[Yy][Dd]ollar|\byd_' || return 1
+  ! printf '%s\n' "$added" | grep -aE '[Dd]igi[Dd]ollar|DIGIDOLLAR|\bDD\b' | grep -aEv '^\+[[:space:]]*(//|\*|/\*)' || return 1
 }
 
 leg_pq_wipes() {
@@ -569,10 +652,28 @@ leg_pq_wipes() {
 
 # ── upgrade line only ─────────────────────────────────────────────────────────────────────────
 
+find_other_line() {   # find_other_line <other main-tree name> <other worktree prefix> <this worktree prefix>
+  # The same function on both node lines. Sets YB_OTHER_LINE_DIR and YB_OTHER_LINE_REV when the other
+  # line's checkout sits at the conventional sibling path; leaves them unset otherwise.
+  local here me branch dir="" rev
+  here=$(pwd -P); me=$(basename "$here")
+  case "$me" in
+    "$3"*) dir="$here/../$2${me#"$3"}" ;;
+    *) dir="$here/../$1" ;;
+  esac
+  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || { echo "no other line at the sibling path $dir"; return 0; }
+  dir=$(cd "$dir" && pwd -P)
+  branch=$(git symbolic-ref --short -q HEAD || echo upgrade/vault)
+  rev=$(python3 qa/yellowback-other-line-branch.py --dir "$dir" --branch "$branch") || return 0
+  YB_OTHER_LINE_DIR=$dir YB_OTHER_LINE_REV=$rev
+  echo "other line found at the sibling path (committed state only; uncommitted changes there are not read)"
+}
+
 leg_cross_line() {
   # Both node lines replay the same golden vectors: byte-identical files, or one line's consensus
   # implementation has moved without the other (AGENTS.md "two node lines, one overlay").
   local f mine other
+  [ -n "${YB_OTHER_LINE_REF:-}" ] || [ -n "${YB_OTHER_LINE_DIR:-}" ] || find_other_line ycash6 up6- up-
   if [ -n "${YB_OTHER_LINE_REF:-}" ]; then
     show() { git show "$YB_OTHER_LINE_REF:$1"; }
     echo "other line: $YB_OTHER_LINE_REF ($(git rev-parse --short "$YB_OTHER_LINE_REF^{commit}"))"
@@ -580,8 +681,8 @@ leg_cross_line() {
     show() { git -C "$YB_OTHER_LINE_DIR" show "$YB_OTHER_LINE_REV:$1"; }
     echo "other line: $YB_OTHER_LINE_DIR at $YB_OTHER_LINE_REV ($(git -C "$YB_OTHER_LINE_DIR" rev-parse --short "$YB_OTHER_LINE_REV^{commit}"))"
   else
-    echo "NOT CHECKED: no other node line (set YB_OTHER_LINE_REF, or YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV)"
-    in_ci && return 1; return 0
+    echo "NOT CHECKED: no other node line (set YB_OTHER_LINE_REF, or YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV, or check it out at the sibling path)"
+    in_ci && return 1; [ "$require_cross_line" = 0 ] || { echo "--require-cross-line: NOT CHECKED is a failure"; return 1; }; return 0
   fi
   local rc=0
   # Vectors, qa goldens, pqkey, the spec and the three overlay trees (audit W3-P-2).
@@ -680,6 +781,7 @@ leg block "documents (fork-local, P4)" leg_documents
 leg block "RPC contract (P7; rpcversion of this line)" leg_contract
 leg block "attribution: The Ycash developers on every fork file, no upstream notice touched" leg_attribution
 leg block "naming: no ycash6 / DigiDollar / ydollar in src/ (AGENTS.md rule 6)" leg_naming
+leg block "advisory ignores: osv-scanner.toml and contrib/secops/deny-node.toml agree (SECURITY-CI.md)" leg_secops
 leg block "PQ secret wipes: Falcon DRBG state, slhdsa-c slh_var_t (local patch P3)" leg_pq_wipes
 leg block "rule -> test tags (v2 plan §7)" leg_rule_tags
 leg block "rule -> test tags, v3 identifiers (v3 plan §7)" leg_rule_tags_v3
