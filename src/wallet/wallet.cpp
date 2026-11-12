@@ -15,6 +15,8 @@
 #include "vault/node.h"
 #include "vault/state.h"
 #include "vault/template.h"
+#include "yellowback/payload.h"
+#include "yellowback/wallet.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
 #include "consensus/consensus.h"
@@ -1507,7 +1509,7 @@ void CWallet::AddToSaplingSpends(const uint256& nullifier, const uint256& wtxid)
     SyncMetaData<uint256>(range);
 }
 
-#ifdef YCASH_WR
+// Built in every configuration (not only YCASH_WR): EraseUnbroadcastTx uses them too.
 void CWallet::RemoveFromSpends(const uint256& wtxid)
 {
     RemoveFromTransparentSpends(wtxid);
@@ -1571,7 +1573,6 @@ void CWallet::RemoveFromSaplingSpends(const uint256& wtxid)
         }
     }
 }
-#endif // YCASH_WR
 
 void CWallet::AddToSpends(const uint256& wtxid)
 {
@@ -3266,6 +3267,42 @@ void CWallet::EraseFromWallet(const uint256 &hash)
             CWalletDB(strWalletFile).EraseTx(hash);
     }
     return;
+}
+
+bool CWallet::EraseUnbroadcastTx(const uint256& txid)
+{
+    AssertLockHeld(cs_wallet);
+    std::map<uint256, CWalletTx>::iterator it = mapWallet.find(txid);
+    if (it == mapWallet.end()) return true;
+    // The wallet file first: if its record stays, everything stays, so memory shows what a restart would load.
+    if (fFileBacked && !CWalletDB(strWalletFile).EraseTx(txid)) return false;
+    const CWalletTx& wtx = it->second;
+    // Cached balances: the outputs this transaction spent become spendable again (reads the nullifier maps below
+    // before they change; the spent notes belong to other transactions).
+    MarkAffectedTransactionsDirty(wtx);
+    // mapTxSpends, mapTxSproutNullifiers, mapTxSaplingNullifiers: every entry whose value is this txid. A stale one
+    // makes the next transaction spending the same coin run SyncMetaData, whose mapWallet[] would recreate this
+    // txid as an empty CWalletTx with no wallet bound (review H-1: RelayWalletTransaction asserts on it).
+    RemoveFromSpends(txid);
+    // mapSproutNullifiersToNotes, mapSaplingNullifiersToNotes: entries naming this transaction's own notes (set only
+    // once a note's position is known, so normally none for an unmined transaction).
+    for (std::map<uint256, JSOutPoint>::iterator n = mapSproutNullifiersToNotes.begin(); n != mapSproutNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSproutNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    for (std::map<uint256, SaplingOutPoint>::iterator n = mapSaplingNullifiersToNotes.begin(); n != mapSaplingNullifiersToNotes.end();) {
+        if (n->second.hash == txid) n = mapSaplingNullifiersToNotes.erase(n);
+        else ++n;
+    }
+    // setSiftedSprout, setSiftedSapling: the witness updates at every block do mapWallet.at() on each member.
+    setSiftedSprout.erase(txid);
+    setSiftedSapling.erase(txid);
+    // Nothing else names it: this line has no wtxOrdered (OrderedTxItems sorts mapWallet on each call), no
+    // mapRequestCount and no recipient mappings; setExWallet holds only deleted transactions; locked coins and notes
+    // name the inputs' outpoints and belong to the operation that built the transaction, which releases them;
+    // Yellowback's yecLocks are taken only after an accepted commit.
+    mapWallet.erase(it);
+    return true;
 }
 
 
@@ -5814,6 +5851,23 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                     }
                     return false;
                 }
+                // Beta2, the Yellowback second check (review m2): a YED token, vault or carrier whose coin lock was
+                // removed (yed_unlockcoin) is never spent as plain YEC; consensus would burn its YED. Nothing to
+                // check where Yellowback is not live; otherwise index lookups of the selected coins only. No other
+                // coin is tried: lock it again (yed_lockcoins) to spend the rest.
+                {
+                    std::vector<COutPoint> selected;
+                    for (const std::pair<const CWalletTx*, unsigned int>& pcoin : setCoins) {
+                        // an input the caller named (fundrawtransaction's own inputs) is the caller's choice
+                        if (coinControl && coinControl->IsSelected(pcoin.first->GetHash(), pcoin.second)) continue;
+                        selected.emplace_back(pcoin.first->GetHash(), pcoin.second);
+                    }
+                    const std::string refusal = YellowbackInputRefusal(selected, false);
+                    if (!refusal.empty()) {
+                        strFailReason = refusal;
+                        return false;
+                    }
+                }
                 for (std::pair<const CWalletTx*, unsigned int> pcoin : setCoins)
                 {
                     CAmount nCredit = pcoin.first->vout[pcoin.second].nValue;
@@ -7801,6 +7855,19 @@ void CWallet::VaultCheckJoins(const CTransaction& tx, const CBlock* pblock)
     }
 }
 
+bool CWallet::MarkYedHeld()
+{
+    if (fYedHeld.exchange(true)) return true;
+    if (!fFileBacked) return true;
+    if (!CWalletDB(strWalletFile).WriteYedHeld()) {
+        fYedHeld = false;   // try again at the next YED output or holder key
+        LogPrintf("yellowback: could not write the has-held-YED marker to %s\n", strWalletFile);
+        return false;
+    }
+    LogPrintf("yellowback: this wallet now holds YED or a YED holder key; marker \"yedheld\" written to %s\n", strWalletFile);
+    return true;
+}
+
 bool WalletHoldsVaultMemberKey(const CWallet& wallet)
 {
     auto snap = vault::TipSnapshot();
@@ -7853,4 +7920,59 @@ bool CWallet::EraseAtomicSwap(const std::string& swapId)
     // Remove from database
     CWalletDB walletdb(strWalletFile);
     return walletdb.EraseAtomicSwap(swapId);
+}
+
+// Does the payload of `tx` give output n YED (a MINT's vault and token outputs, a TRANSFER's or REDEEM's assignments)?
+// What stage (ii) of the Yellowback wallet layer pre-locks (YellowbackWallet::PreLock), for a transaction the index has
+// not judged yet: unconfirmed, or any transaction while the index is unhealthy.
+static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
+{
+    std::optional<yellowback::FoundPayload> fp = yellowback::FindPayload(tx);
+    if (!fp.has_value()) return false;
+    if (fp->payload.type == yellowback::PayloadType::MINT) return n == 0 || n == 1;
+    if (fp->payload.type == yellowback::PayloadType::TRANSFER || fp->payload.type == yellowback::PayloadType::REDEEM) {
+        for (const yellowback::Assignment& a : fp->payload.assignments) {
+            if (a.vout == n) return true;
+        }
+    }
+    return false;
+}
+
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict, std::vector<COutPoint>* refusedOut)
+{
+    if (refusedOut) refusedOut->clear();
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index() || inputs.empty()) return "";
+    yellowback::YellowbackIndex& index = *yw->Index();
+    CWallet& wallet = *yw->Wallet();
+    std::vector<COutPoint> refused;
+    {
+        LOCK(wallet.cs_wallet);                 // lock order (N25): cs_wallet before cs_yellowback
+        LOCK(index.cs_yellowback);
+        const bool healthy = index.IsHealthy();
+        if (!healthy && strict) {
+            return "refusing to spend as plain YEC while the Yellowback index is unhealthy (" + index.UnhealthyReason() +
+                   "): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback";
+        }
+        yellowback::State st(index.View());
+        for (const COutPoint& o : inputs) {
+            bool yed = false;
+            if (healthy) yed = st.GetToken(o).has_value() || st.GetVault(o).has_value();
+            if (!yed && (!healthy || !st.GetTxLog(o.hash).has_value())) {
+                // not judged by the index (unconfirmed, or the index unhealthy): what its payload assigns
+                std::map<uint256, CWalletTx>::const_iterator it = wallet.mapWallet.find(o.hash);
+                yed = it != wallet.mapWallet.end() && AssignedByYellowbackPayload(it->second, o.n);
+            }
+            if (yed) refused.push_back(o);
+        }
+    }
+    for (const COutPoint& o : inputs) {
+        if (std::find(refused.begin(), refused.end(), o) == refused.end() && yw->GetCarrier(o).has_value()) refused.push_back(o);
+    }
+    if (refused.empty()) return "";
+    if (refusedOut) *refusedOut = refused;
+    std::string list;
+    for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+    return "refusing to spend a Yellowback outpoint as plain YEC: " + list +
+           " (its YED would burn; lock it again with yed_lockcoins)";
 }

@@ -148,8 +148,8 @@ void YellowbackWallet::RemoveOrphan(const uint256& txid)
     LOCK(wallet->cs_wallet);
     if (!wallet->mapWallet.count(txid)) return;
     LogPrint("yellowback", "removing %s: recorded by CommitTransaction, refused by the mempool\n", txid.ToString());
-    wallet->EraseFromWallet(txid);   // wallet.dat and mapWallet (file-backed wallets)
-    wallet->mapWallet.erase(txid);   // and mapWallet when not file-backed; mapTxSpends entries are ignored once it is gone
+    // Review H-1: the shared erase, which drops the spend indexes too (a stale one recreated an empty entry later).
+    if (!wallet->EraseUnbroadcastTx(txid)) LogPrintf("yellowback: could not erase %s from the wallet file; kept\n", txid.ToString());
 }
 
 void YellowbackWallet::LockSpentYec(const CTransaction& tx)
@@ -584,6 +584,10 @@ void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)
         wallet->LockCoin(o);
         ourLocks.insert(o);
     }
+    // beta2 item 32: wallet.dat remembers it has held YED. A lock cannot be refused, so a failed write is logged
+    // (and retried at the next YED output).
+    if (!outs.empty() && !wallet->MarkYedHeld())
+        LogPrintf("yellowback: ERROR: LockOwn could not record in the wallet that it has held YED\n");
 }
 
 void YellowbackWallet::PreLock(const CTransaction& tx)
@@ -638,6 +642,8 @@ void YellowbackWallet::Reconcile()
             if (!wallet->IsLockedCoin(o.hash, o.n)) wallet->LockCoin(o);
             ourLocks.insert(o);
         }
+        if (!tokensMine.empty() && !wallet->MarkYedHeld())   // beta2 item 32; logged, as in LockOwn
+            LogPrintf("yellowback: ERROR: Reconcile could not record in the wallet that it has held YED\n");
         for (COutPoint o : release) {
             wallet->UnlockCoin(o);
             ourLocks.erase(o);

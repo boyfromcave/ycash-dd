@@ -1,4 +1,5 @@
 // Copyright (c) 2016 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -12,6 +13,7 @@
 #include "zcash/JoinSplit.hpp"
 #include "zcash/Address.hpp"
 #include "wallet.h"
+#include "wallet/asyncrpcoperation_common.h"
 #include "wallet/paymentdisclosure.h"
 
 #include <array>
@@ -72,7 +74,8 @@ public:
         std::vector<SendManyRecipient> zOutputs,
         int minDepth,
         CAmount fee = DEFAULT_FEE,
-        UniValue contextInfo = NullUniValue);
+        UniValue contextInfo = NullUniValue,
+        bool feeExplicit = false);
     virtual ~AsyncRPCOperation_sendmany();
 
     // We don't want to be copied or moved around
@@ -102,6 +105,9 @@ private:
     bool useanyutxo_;
     bool isfromtaddr_;
     bool isfromzaddr_;
+    bool isfrompq_;           // a post-quantum (TX_PQPKH) from address (beta2 D-2; reverses quantum spec A-15)
+    bool feeExplicit_;        // the caller set the fee: a PQ spend refuses a fee below its need instead of raising it
+    std::vector<PQBuilderInput> pq_inputs_;   // signed after Build() (SignPQBuilderInputs)
     CTxDestination fromtaddr_;
     PaymentAddress frompaymentaddress_;
     SpendingKey spendingkey_;
@@ -127,6 +133,9 @@ private:
     bool find_utxos(bool fAcceptCoinbase, TxValues& txValues);
     // Load transparent inputs into the transaction or the transactionBuilder (in case of have it)
     bool load_inputs(TxValues& txValues);
+
+    // A PQ from address: select its coins and settle the fee on the transaction's real size (beta2 D-2).
+    void select_pq_inputs(TxValues& txValues, CAmount sendAmount);
     std::array<unsigned char, ZC_MEMO_SIZE> get_memo_from_hex_string(std::string s);
     bool main_impl();
 

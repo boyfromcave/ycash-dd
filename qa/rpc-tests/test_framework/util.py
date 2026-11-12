@@ -705,6 +705,17 @@ def signing_branch_id(node):
     before it."""
     return int(node.getblockchaininfo()['consensus']['nextblock'], 16)
 
+# Line constants of the scripts shared byte-identical with ycash6 (vault_lock_from.py, wallet_pq_fee_cap.py,
+# wallet_yed_ecc_token.py). ycash6's util.py defines the same names for 6.x: its shielding z_sendmany takes the
+# -feepolicy fee (None), its Sapling builder pads a lone output to two, and its refusals read "Insufficient funds: have
+# 0.00, need", "is greater than the maximum fee allowed by this instance" (refused before building) and
+# "SendTransaction: Transaction commit failed:: tx-expiring-soon".
+SHIELDING_SEND_FEE = Decimal('0.0001')   # the explicit fee of a shielding z_sendmany
+ONE_NOTE_SAPLING_OUTPUTS = 1             # Sapling outputs of a bundle with one real output (no padding on v4.5.0)
+STOCK_FEE_OVER_MAXTXFEE = 'CommitTransaction failed'   # an ECC z_sendmany fee above -maxtxfee: the commit is refused
+PQ_EXPIRING_COMMIT_REFUSAL = 'SendTransaction: CommitTransaction failed'   # the operation error when the mempool refuses a commit as expiring soon
+EMPTY_ECC_SOURCE_REFUSAL = 'Insufficient transparent funds, no UTXOs found for taddr from address.'   # z_sendmany from an ECC address with no coin
+
 def tarfile_extractall(tgz, path):
     """Extract the archive ``tgz`` under ``path`` without letting a member escape it.
 
@@ -742,3 +753,40 @@ def seed_restored_balance_ecc(settled):
     its own body: its transparent keys come from the seed and the restore re-finds every ECC coin, so it returns the
     original's balance_ecc there (and ismine true)."""
     return Decimal(0)
+
+
+# Line helpers for wallet_address_matrix.py, which is byte-identical on both C++ node lines (beta2 D-2, D-6). ycash6's
+# util.py defines the same names for 6.x: z_sendmany_opid passes the privacy policy AllowFullyTransparent and a fee of
+# None (the wallet's ZIP-317 fee) unless one is given, z_mergetoaddress_call passes NoPrivacy, a lone Sapling output is
+# padded to two (2 actions), the coinbase-only refusal reads "coinbase outputs will not be selected", z_mergetoaddress
+# takes notes only at nAnchorConfirmations (3) deep, and PRIVACY_POLICY is True.
+PRIVACY_POLICY = False                 # v4.5.0: z_sendmany and z_mergetoaddress take no privacy policy (D-5 is 6.x only)
+LONE_SAPLING_OUTPUT_ACTIONS = 1        # ZIP-317 logical actions of one Sapling output with no Sapling spend
+Z_MERGE_NOTE_DEPTH = 1                 # the depth from which z_mergetoaddress merges a Sapling note
+COINBASE_ONLY_TRANSPARENT_REFUSAL = 'Could not find any non-coinbase UTXOs to spend'
+
+
+def z_sendmany_opid(node, fromaddr, amounts, minconf=1, fee=None):
+    """z_sendmany with the documented arguments; returns the operation id. ``amounts`` is [(address, amount)]. A fee
+    of None leaves the wallet's default (v4.5.0: DEFAULT_FEE, raised to what a post-quantum input needs)."""
+    args = [fromaddr, [{'address': a, 'amount': v} for a, v in amounts], minconf]
+    if fee is not None:
+        args.append(fee)
+    return node.z_sendmany(*args)
+
+
+def z_mergetoaddress_call(node, fromaddrs, toaddr, fee=None, limit=None):
+    """z_mergetoaddress with the documented arguments (v4.5.0: no privacy policy); returns the RPC's result."""
+    assert fee is not None or limit is None, 'v4.5.0 takes the limit only after an explicit fee'
+    args = [fromaddrs, toaddr]
+    if fee is not None:
+        args.append(fee)
+    if limit is not None:
+        args.append(limit)
+    return node.z_mergetoaddress(*args)
+
+def lockunspent_true(node):
+    """`lockunspent true`: unlock every locked coin (the Yellowback layer re-applies its own locks). v4.5.0 takes the
+    single argument; ycash6's body unlocks each listed outpoint itself (its argument table needs both arguments and it
+    refuses an overlay outpoint, yed-locked-outpoint)."""
+    assert node.lockunspent(True)
