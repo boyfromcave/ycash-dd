@@ -4,189 +4,262 @@ release-notes at release time)
 Notable changes
 ===============
 
-Wallet follow-ups, second round (beta2)
----------------------------------------
+This is the reference node line (ycashd 4.5.0 with the proposed vault upgrade and Ycash Yellowback
+(YED)). It is built and tested beside ycash6 (ycashd 6.22.0-beta2, the release line), and gives the
+same answers and error strings. No activation height is set on mainnet. None of the changes below
+is a consensus change: they are in the wallet, the RPCs, the address text and the tests.
 
-- **No lock outlives a vault transaction (audit L-1).** `vault_lock` "from" a transparent or post-quantum address
-  locked the coins of an accepted lock for good (until a restart or `lockunspent true`), so a lock that expired or
-  was evicted unmined left them out of `listunspent`, `z_gettotalbalance` and every send. The vault RPCs now record
-  an accepted transaction in the wallet at once, as a send does, and keep no coin lock for it: its inputs are spent
-  by an unconfirmed transaction while it is in the mempool or the chain, and spendable again when it leaves the
-  mempool unmined. The same holds for the coins the default funding picks (`vault_lock` without "from", `set_*`,
-  `vault_release`, ...); the Sapling notes of a lock "from" a `ys1…` address were already released at the end of the call, and are now kept spent by the recorded transaction. A coin locked with `lockunspent` is never unlocked. The YEC inputs the
-  Yellowback wallet locks for a YED transaction (F-1) are handed back within about a second once it is mined or has
-  left the mempool unmined; they used to wait for the next YED build.
-- **`yed_mint` checks the whole mint before its carrier (YEW-FIX item 5).** A wallet that cannot fund the mint's
-  collateral, its fees and its carrier from the source (the default transparent coins, an `s1…` "from" or a `ys1…`
-  "from") is refused before anything is broadcast: `insufficient-yec: the mint needs <total> YEC (collateral <c>,
-  fees <f> with its carrier's), checked before its carrier is broadcast; nothing was sent: need …, have …`. It used
-  to broadcast the carrier and fail at the MINT.
-- **`z_validateaddress` answers for a post-quantum address (audit L-4).** It said `isvalid: false`; it now gives
-  ``type` "pq"`, `ismine`, and `validateaddress`'s `pqscheme`, `pqschemename` and `pqkeyhash`. Its answers for
-  Sprout, Sapling addresses are unchanged.
-- **The post-quantum fee cap is checked first (audit L-5).** `z_sendmany` from a post-quantum address with an
-  explicit fee above the post-quantum cap answers `Fee … is above the … cap on a post-quantum spend (…)` even when
-  the fee is also above the sum of the outputs (the upstream "greater than the sum of outputs" check used to answer
-  first), as ycash6 does.
-- **Help signatures.** The first help line of `getnewaddress`, `signrawtransaction` (`branchid`), `stop` (`detach`,
-  ignored), `yed_getbalance` and `yed_listunspent` (an ignored argument), `z_listoperationids` (`status`) and
-  `zcbenchmark` (its third argument) now names every argument the call accepts.
+Post-quantum addresses show their scheme (`rpcversion` 9)
+---------------------------------------------------------
 
-Post-quantum addresses show their scheme (D-9, `rpcversion` 9)
--------------------------------------------------------------
-
-- **New prefixes.** A post-quantum address now names its signature scheme in its third character:
-  `sqf…` (FN-DSA-512, Falcon) and `sqs…` (SLH-DSA-SHA2-128s) on mainnet, `tqf…`/`tqs…` on testnet,
-  `rqf…`/`rqs…` on regtest; the YED form is `ybf…`/`ybs…` (mainnet), `ytf…`/`yts…`, `yrf…`/`yrs…`. Still 53
-  characters. The key, the script it pays and every balance are unchanged: only the text differs.
-- **The earlier text form is no longer accepted.** An address in the form used before this release
-  (`sq…`/`tq…`/`rq…` or `yb…`/`yt…`/`yr…` at 53 characters, whose third character did not name the scheme) is
-  refused by `sendtoaddress`, `validateaddress`, `yed_send` and every other RPC. Get the new string for a key
-  you already hold with `getaddressesbyaccount ""` or `listreceivedbyaddress 0 true` (the wallet lists it in the new form); for a key in a
-  wallet dump, `z_importpqkey` with the dump's whole `pqseed=` line returns it (`address`). The one exception:
-  `z_importpqkey` still accepts a dump line whose `addr=`/`yecaddr=` are in the earlier form, so old dumps import.
-- **Wallets upgrade their address book once.** A wallet's post-quantum address-book entries written by an
-  earlier build are rewritten under the new form at the first start (labels kept; logged once).
-- **Nothing prints the earlier form.** A wallet or data directory carried over from an earlier build shows its
-  post-quantum addresses only in the new form, in every RPC result and in the address book; the keys, coins,
-  balances and the address index are untouched (they are keyed by the key hash, not by the text). Going back to an
-  earlier build after the first start is not supported for the address book: that build cannot read the rewritten
-  entries, so it shows the post-quantum addresses (in the earlier form) without their labels, while keys and coins
-  stay spendable. Keep a backup of `wallet.dat` from before the upgrade if you may need to go back.
-- **`rpcversion` 9.** `yed_getinfo.params.pqAddressVersion` and `.params.pq.plainAddressVersion` were hex
-  strings and are now objects keyed by scheme number (`{"1": "<hex>", "2": "<hex>"}`), one 3-byte version
-  each. Clients that build or check post-quantum addresses must read them this way or use
+- **New prefixes.** A post-quantum address names its signature scheme in its third character:
+  `sqf…` (FN-DSA-512) and `sqs…` (SLH-DSA-SHA2-128s) on mainnet, `tqf…`/`tqs…` on testnet,
+  `rqf…`/`rqs…` on regtest. The YED form is `ybf…`/`ybs…` (mainnet), `ytf…`/`yts…`, `yrf…`/`yrs…`.
+  Still 53 characters. The key, the script it pays and every balance are unchanged.
+- **The earlier text form is refused** by `sendtoaddress`, `validateaddress`, `yed_send` and every
+  other RPC. Get the new string for a key you hold with `getaddressesbyaccount ""` or
+  `listreceivedbyaddress 0 true`. For a key in a wallet dump, `z_importpqkey` with the dump's whole
+  `pqseed=` line returns it; it still accepts a dump line whose `addr=`/`yecaddr=` are in the
+  earlier form.
+- **Wallets rewrite their address book once.** Post-quantum address-book entries written by an
+  earlier build are rewritten in the new form at the first start (labels kept; logged once). An
+  earlier build cannot read the rewritten entries: it shows those addresses without their labels,
+  while keys and coins stay spendable. Back up `wallet.dat` before the first start.
+- **`rpcversion` 9.** `yed_getinfo.params.pqAddressVersion` and `.params.pq.plainAddressVersion`
+  change from hex strings to objects keyed by scheme number (`{"1": "<hex>", "2": "<hex>"}`), one
+  3-byte version each. Clients that build or check post-quantum addresses read them this way or use
   `src/test/data/pq_address_vectors.json`.
 
-Plain-YEC post-quantum addresses (`sq…`)
-----------------------------------------
+Send YEC between every address type (beta2 D-2, D-4, D-6)
+---------------------------------------------------------
 
-- **Inputs spending PQ coins carry no address** in `getblockdeltas`, `getspentinfo` and
+- **`z_sendmany`** takes an ECC (`s1…`), Sapling (`ys1…`) or post-quantum (either scheme) from
+  address, and any mix of ECC, Sapling and post-quantum recipients.
+- A post-quantum from address spends only its own coins (largest first, mature only: `minconf`
+  applies). Its change returns to the same address. Sapling change stays a Sapling note.
+- Its fee is the wallet's rule for a post-quantum input: max(the default fee, `-pqfeerate` × size,
+  the ZIP-317 conventional fee). That is about 27,000 zat for one SLH-DSA input and 5,500 zat for one
+  FN-DSA input. The default fee is raised to it; an explicit fee below it is refused. Change below
+  the post-quantum dust threshold goes to the fee.
+- An explicit fee above the post-quantum cap answers `Fee … is above the … cap on
+  a post-quantum spend (…)` even when the fee is also above the sum of the outputs (the inherited
+  "greater than the sum of outputs" check used to answer first), as ycash6 does.
+- At most 100 post-quantum inputs (`MAX_PQ_INPUTS_PER_TX`) fit one transaction.
+- The post-quantum inputs are signed with no global lock held (an SLH-DSA signature takes about
+  0.3 s). The wallet checks before and after that the inputs are still unspent and the next block's
+  rules unchanged.
+- `ANY_TADDR` still selects ECC coins only.
+- **`z_mergetoaddress`** merges a named post-quantum source (at most 100 inputs per call, fewer if
+  the standard sigop limit needs it; the rest are reported as remaining) and pays a post-quantum
+  destination. Post-quantum coins are never merged with Sprout notes or into a Sprout address.
+- `z_shieldcoinbase` still refuses a post-quantum source.
+- This line has no privacy-policy argument.
+- The error strings (the same on every line) are in `doc/yellowback-rpc.md`.
+
+`sendtoaddress`, `sendmany`, `sendfrom` and `fundrawtransaction` spend ECC coins only
+--------------------------------------------------------------------------------------------------------
+
+The beta2 decision, confirmed by the Yellowback lead architect on 2026-11-12: the stock transparent
+sends are the ECC calls, and `z_sendmany` is the road for every coin type.
+
+- `sendtoaddress`, `sendmany` and `sendfrom` never select a post-quantum coin. Before, they did, and
+  sent its change to a new ECC key. Spend a post-quantum coin with `z_sendmany` from its address,
+  which returns the change to it. Funds spread over several post-quantum addresses: merge them first
+  with `z_mergetoaddress`, or send from each in turn.
+- `fundrawtransaction` adds ECC coins only. A post-quantum input stays only when the transaction
+  already names it; `-sendchangeback=1` applies to such a named input.
+- When the ECC coins do not cover the amount and the wallet holds post-quantum coins, the call is
+  refused with `Insufficient funds in ordinary transparent addresses; this wallet also holds
+  <amount> YEC at post-quantum addresses: send from one with z_sendmany, which returns the change
+  to it`. The amount counts only coins `z_sendmany` would spend. A coinbase shortfall is added:
+  `; its coinbase funds can only be spent after they have been sent to a zaddr`.
+- Not changed by this rule: `z_sendmany`/`z_mergetoaddress` from a post-quantum address,
+  `vault_lock "from"` a post-quantum address, the `yed_*` YEC funding (which can still select
+  post-quantum coins), and inputs a raw transaction names.
+
+Fund a vault from any address type (beta2 D-3)
+-----------------------------------------------
+
+- `vault_lock` takes an optional `"from"`: an ECC, post-quantum or Sapling address of this wallet.
+  Change returns to it. Without `"from"` the funding is unchanged.
+- `yed_mint`'s funding address is unchanged (ECC or Sapling).
+
+Balances and listings by address type
+-------------------------------------
+
+- `z_gettotalbalance` adds `transparent_ecc`, `transparent_pq` and `pq_by_scheme`.
+- `getwalletinfo` adds `balance_ecc`, `balance_pq`, `unconfirmed_balance_ecc`,
+  `unconfirmed_balance_pq` and `pq_by_scheme`. Existing fields keep their meaning.
+- `listreceivedbyaddress` adds `pqscheme` and `pqschemename` to a post-quantum address.
+- **`z_getbalance`** takes a post-quantum address of either scheme. It **refuses a transparent
+  address the wallet does not hold** (ECC or post-quantum, no key and no watch-only script) with
+  `From address does not belong to this node, transparent or post-quantum key or watch-only script
+  not found.` (-5, `RPC_INVALID_ADDRESS_OR_KEY`). **This changes inherited v4.5.0 behaviour**, which
+  answered `0`. A watch-only address still answers.
+- **`z_validateaddress`** answers for a post-quantum address. It said
+  `isvalid: false`; it now gives `type` `"pq"`, `ismine`, and `validateaddress`'s `pqscheme`,
+  `pqschemename` and `pqkeyhash`.
+
+`getnewaddress` takes the type first
+------------------------------------
+
+- `getnewaddress pq`, `getnewaddress pqslh`, `getnewaddress p2pkh`. `getnewaddress "" pq` still
+  works.
+- Any other first string is refused with `Accounts are unsupported; the first argument is the
+  address type, "p2pkh", "pq" or "pqslh" (lower case), or "" followed by the type` (-11, the code it
+  had before; the message was `Accounts are unsupported`).
+- The help no longer says that `z_sendmany`, `z_shieldcoinbase` and
+  `z_mergetoaddress` never pay or spend a post-quantum address. The first help line of
+  `getnewaddress`, `signrawtransaction` (`branchid`), `stop` (`detach`, ignored), `yed_getbalance`
+  and `yed_listunspent`, `z_listoperationids` (`status`) and `zcbenchmark` names every argument the
+  call accepts.
+
+Keeping YED from being spent as plain YEC
+-----------------------------------------
+
+Yellowback is **live** where the vault upgrade and a YED attestor set are configured for the network
+(regtest: `-yellowbackattestorset`). `-yellowback=0` does not turn a configured Yellowback off; it
+only acknowledges a leftover index or a wallet that has held YED.
+
+- Where Yellowback is live, every send that selects coins itself (`z_sendmany`, `z_mergetoaddress`,
+  `sendtoaddress`, `sendmany`, `vault_lock "from"`, the vault fee funding) leaves out a coin that
+  the Yellowback index knows as a YED token, vault or carrier, also when its coin lock was removed
+  with `yed_unlockcoin`. While the index is unhealthy, a send from a post-quantum address is refused.
+- **The has-held-YED guard.** A wallet that has held YED, or issued a YED holder key, carries a mark
+  in `wallet.dat` (`getwalletinfo` `yed_held`). Where Yellowback is not live, it refuses to load:
+  `This wallet has held YED, but Yellowback is not live with these options, so its YED outputs
+  cannot be locked. Start with the network's attestor set (regtest -yellowbackattestorset) to keep
+  those outputs locked, or with -yellowback=0 to acknowledge that they are spendable as plain YEC.`
+  With `-yellowback=0` it loads with a warning (also in `getinfo` `errors`), and `getwalletinfo`
+  `yed_unlocked` is true. Do not leave `-yellowback=0` in a configuration file.
+- **Outputs the index has not judged yet.** An output of this wallet in a
+  transaction the index has not judged (unconfirmed, its block above the index tip, a disconnected
+  block, or any transaction while the index is unhealthy) is read by the transaction's own payload
+  (a MINT's vault and token, the outputs a TRANSFER or REDEEM assigns, a claim cancel's re-created
+  vault and every output that can be its refund token). It is locked and refused with `refusing to
+  spend an output that may carry YED as plain YEC before the Yellowback index judges its
+  transaction: <txid>:<n>[, …] (its transaction's payload may give it YED, which would burn; wait
+  for its block to be judged, or name the outpoint in a raw transaction sent with allowyedburn)`.
+  Once the block is judged, the index's records decide: an output it gave YED stays locked, every
+  other output is released.
+- **Blocks below the start height count as judged.** A transaction confirmed
+  below the `UPGRADE_VAULT` activation height, which the index never evaluates, counts as judged with
+  no YED.
+- **Where Yellowback is not live**, no coin-selecting send spends an output its
+  transaction's payload may give YED, whether or not the wallet carries the mark: `sendtoaddress`,
+  `sendmany`, `sendfrom` and the coins `fundrawtransaction` adds leave it out and, short of funds,
+  say `Insufficient funds; this wallet also holds <n> output(s) that may carry YED, which no send
+  spends as plain YEC while Yellowback is not live: <txid>:<n>[, …] (its transaction's payload may
+  give it YED, which would burn; to spend it deliberately, name the outpoint in a raw
+  transaction)`; `z_sendmany`, `z_mergetoaddress`, the vault fee funding and `vault_lock "from"`
+  refuse with `refusing to spend an output that may carry YED as plain YEC while Yellowback is not
+  live: <txid>:<n>[, …] (its transaction's payload may give it YED, which would burn; to spend it
+  deliberately, name the outpoint in a raw transaction)`. Conservative: a claim cancel's own YEC
+  change, or a payment in a transaction carrying a copied payload, stays out of every coin-selecting
+  send there; spend it with a raw transaction (or `fundrawtransaction`) that names it.
+- **The raw-send check.** `sendrawtransaction` without `allowyedburn` also
+  counts an output of this wallet that the index has not judged and whose payload may give it YED;
+  when its figure is unknown (a claim cancel's refund) it refuses with `yed-burn-refused: this
+  transaction spends output(s) of this wallet whose transaction the Yellowback index has not judged
+  yet and whose payload may give them YED (<outpoints>); whatever YED they carry would be destroyed.
+  Pass allowyedburn = true to send it anyway.` It also acts while the index is unhealthy (before, it
+  then let every raw transaction through).
+- `vault_send` and `set_sendact` refuse a coin named in `allowinputs` that is a
+  YED token, vault or carrier of this wallet; a deliberate burn goes through
+  `sendrawtransaction … allowyedburn`.
+
+Vault funding and coin locks
+----------------------------
+
+- **No lock outlives a vault transaction.** The vault RPCs record an accepted transaction in the
+  wallet at once, as a send does, and keep no coin lock for it: its inputs count as spent while it
+  is in the mempool or the chain, and are spendable again when it leaves the mempool unmined (before,
+  `vault_lock "from"` a transparent or post-quantum address kept them locked until a restart). The
+  same holds for the default funding (`vault_lock` without `"from"`, `set_*`, `vault_release`, …).
+  The YEC inputs the Yellowback wallet locks for a YED transaction are handed back within about a
+  second once it is mined or has left the mempool unmined.
+- `vault_lock "from"` (new in beta2): `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2)
+  address cannot be spent before Falcon is active at the next block` answer -5
+  (`RPC_INVALID_ADDRESS_OR_KEY`), as `z_sendmany` does.
+- The default vault funding skips coinbase that must be shielded and releases the coins it locked
+  when the call fails for any reason. A coin locked with `lockunspent` is never released. The
+  coinbase refusal names the route: `z_shieldcoinbase, then z_sendmany to a transparent address, or
+  vault_lock "from" the shielded address`.
+- `yed_mint` checks the whole mint (collateral, fees, carrier) before its carrier is broadcast:
+  `insufficient-yec: the mint needs <total> YEC (collateral <c>, fees <f> with its carrier's),
+  checked before its carrier is broadcast; nothing was sent: need …, have …`. It used to broadcast
+  the carrier and fail at the MINT. `yed_mint` and its carrier lock the Sapling notes they spend
+  until they commit or fail.
+
+Defects fixed
+-------------
+
+- **The node could stop after an erased send.** Erasing a wallet transaction (the Yellowback orphan
+  removal) left its entries in the spend index; a later send of the same coins created an empty
+  wallet transaction, and the next re-broadcast stopped ycashd with `Assertion failed: (pwallet)`.
+  No funds were at risk. One erase function now clears every index.
+- **A refused post-quantum send could be paid twice.** A post-quantum send whose fee was above the
+  mempool's cap was written to the wallet, refused by the mempool, and broadcast again at the next
+  start, after the user had sent again. The fee cap is now checked before signing and again under
+  the node's locks, and a send the mempool refuses is erased from the wallet.
+- **An unconfirmed claim-cancel refund could be spent as plain YEC** (the
+  wallet's pre-lock did not cover it), and where Yellowback is not live a coin-selecting send could
+  burn a cancel's refund token.
+- The Windows build of the unit tests and of the `-yellowbacktestfault` crash path (no `SIGKILL` on
+  Windows; locals named after `windows.h` macros), kept identical to ycash6 (#175).
+
+Plain-YEC post-quantum addresses: notes carried from beta 1
+-----------------------------------------------------------
+
+- **Inputs spending post-quantum coins carry no address** in `getblockdeltas`, `getspentinfo` and
   `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
-  Hash160, and a `TX_PQPKH` key hash is 32 bytes, so the index cannot name it from the input side.
-  `getaddressdeltas` (and `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as
-  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form.
-- **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` that synced before this
-  build: the address index of earlier blocks holds no `TX_PQPKH` outputs until it is rebuilt.
-- **`createrawtransaction` takes an `sq…` output** without the wallet's payability checks (Falcon
-  activation, the PQ dust threshold); relay policy still refuses a non-standard or dust output. Prefer `sendtoaddress`/`sendmany`, which check.
-- **`yed_getnewaddress "pq"` now files holder keys in the address book** (under the `sq…` form, so
-  the YEC their token outputs carry is not taken for change); holder keys issued by an earlier build
-  are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
-  out).
-- **`sendtoaddress` and `sendmany` spend ordinary (ECC) coins only** (beta2, audit M-1). They never select a
-  post-quantum coin (they used to, and sent its change to a new ECC key); a post-quantum coin is spent with
-  `z_sendmany` from its `sq…` address, which returns the change to it (D-4) and signs with no wallet lock held. When
-  the ECC coins do not cover the amount and the wallet holds post-quantum coins, the call is refused with
-  `Insufficient funds in ordinary transparent addresses; this wallet also holds <amount> YEC at post-quantum
-  addresses: send from one with z_sendmany, which returns the change to it`.
-- `fundrawtransaction` adds ordinary (ECC) coins only (beta2 review LOW-1): a post-quantum input stays only when
-  the transaction already names it; with too few ECC coins it is refused with the message above.
-- The amount in that refusal counts only post-quantum coins `z_sendmany` would spend (confirmed, FN-DSA only
-  once Falcon is active, no Yellowback outpoint); when every one is a Yellowback outpoint the Yellowback refusal
-  naming them is given instead. A coinbase shortfall is added to the message (`; its coinbase funds can only be
-  spent after they have been sent to a zaddr`) instead of hiding it (review LOW-2, LOW-3).
-- Where Yellowback is not live (no YED attestor set configured for the network; `-yellowback=0` does not turn a
-  configured Yellowback off, it only acknowledges a leftover index or a wallet that has held YED), no coin-selecting
-  send spends an output the Yellowback rules give YED (`sendtoaddress`, `sendmany`, `sendfrom`, the coins
-  `fundrawtransaction` adds, `z_sendmany`, `z_mergetoaddress`, the vault fee funding, `vault_lock "from"`), whether or not
-  the wallet carries the "has held YED" mark: a wallet restored from its seed phrase where Yellowback is not live has no
-  mark and was not protected before (beta2 item 9). The wallet recognises such an output from its transaction alone, with
-  no index: a MINT's vault and token outputs, the outputs a TRANSFER or REDEEM payload assigns, and for a claim cancel
-  (CANCEL_COSIGN) the re-created vault and every output that can be its refund token (the refund goes to a holder only
-  the index records, so each non-zero output at index 1 or above that is the first to pay its script is counted: the
-  cancel's own YEC change is treated as YED too). The same list pre-locks this wallet's outputs of a transaction the index
-  has not judged yet where Yellowback is live (the claim cancel's refund was missing from it: an unconfirmed refund could
-  be spent). The stock sends leave such an output out and, short of funds, say so: `Insufficient funds; this wallet also
-  holds <n> output(s) that may carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[,
-  …] (its transaction's payload may give it YED, which would burn; to spend it deliberately, name the outpoint in a raw
-  transaction)`; the others refuse with `refusing to spend an output that may carry YED as plain YEC while Yellowback is
-  not live: <txid>:<n>[, …] (its transaction's payload may give it YED, which would burn; to spend it deliberately, name
-  the outpoint in a raw transaction)`. Because the check reads only the transaction, it is conservative: an output a
-  payload names that the index would not have given YED (an invalid or over-assigned transfer, a payment from a third
-  party in a transaction that carries a copied payload, a claim cancel's YEC change) is kept out of every coin-selecting
-  send for good where Yellowback is not live (there is no index to judge it); such an output is spent by a raw
-  transaction, or `fundrawtransaction`, that names it. Where Yellowback is live the same reading applies only until the
-  index judges the transaction (unconfirmed, its block above the index tip, a disconnected block, any transaction while
-  the index is unhealthy): those outputs are pre-locked and refused with `refusing to spend an output that may carry YED
-  as plain YEC before the Yellowback index judges its transaction: <txid>:<n>[, …] (…)`. Once the index has applied the
-  transaction's block, its own records decide: an output it gave YED stays locked, and every other output is released
-  and spendable, including the outputs of a transaction that carries a payload but touched no Yellowback state (before,
-  such a payment stayed locked, and after a restart a send that selected it was refused). `sendrawtransaction` without
-  `allowyedburn` reads the same way: besides this wallet's YED tokens it now counts an output of this wallet that the
-  index has not judged and whose transaction's payload may give it YED (before, an unconfirmed incoming YED output could
-  be burned by a raw transaction with no flag); when the amount is unknown (a claim cancel's refund before its block is
-  judged) it refuses with `yed-burn-refused: this transaction spends output(s) of this wallet whose transaction the
-  Yellowback index has not judged yet and whose payload may give them YED (<outpoints>); whatever YED they carry would
-  be destroyed. Pass allowyedburn = true to send it anyway.` This check
-  also acts while the Yellowback index is unhealthy (before, it then let every raw transaction through): every input
-  that is an output of this wallet its transaction's payload may give YED is counted then. A transaction confirmed in
-  a block below the Yellowback start height (the `UPGRADE_VAULT` activation height), which the index never evaluates,
-  counts as judged with no YED: a copied payload mined before activation does not keep the coin refused.
-- `vault_send` and `set_sendact` refuse a coin named by `allowinputs` that is a Yellowback outpoint (a YED
-  token, vault or carrier of this wallet), with the Yellowback refusal; a deliberate burn goes through
-  `sendrawtransaction … allowyedburn` (beta2 audit L-3).
-- `vault_lock "from"`: `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2) address cannot
-  be spent before Falcon is active at the next block` now answer -5 (`RPC_INVALID_ADDRESS_OR_KEY`), the code
-  `z_sendmany` gives the same conditions (were -4 and -8; beta2 audit L-5).
-- The vault RPCs release the coins their default funding locked when the call fails for any reason (an unknown
-  `setid`, a signing failure, a conflicting build, a refused broadcast), and only those: a coin locked with
-  `lockunspent` is never released (beta2 review LOW-4). Two coins stay locked as before: a fee input of a remembered build that
-  `vault_refee` re-locks after a failed re-funding, and the fee coins of a build returned by `rebuild=true` after
-  this wallet signed the earlier one (locked until spent, released with `lockunspent`, or a restart). The coinbase refusal of that funding names the full
-  route: `z_shieldcoinbase, then z_sendmany to a transparent address, or vault_lock "from" the shielded address`
-  (LOW-5).
-- **`z_sendmany` is the any-to-any call for plain YEC (beta2 D-2; quantum spec A-15 reversed).** From an
-  ECC (`s1…`), Sapling (`ys1…`) or post-quantum (`sq…`, either scheme) address to any mix of ECC, Sapling
-  and PQ recipients. A PQ from address spends that address's own coins (largest first, mature only:
-  `minconf` applies); its inputs are signed after the Sapling proofs are made, with no wallet lock held
-  while proving, under the vault script flags of the next block; its change returns to the same `sq…`
-  address (D-4; Sapling change stays a Sapling note, ECC change is unchanged). Its fee follows the rule
-  the wallet uses for a PQ input (as `fundrawtransaction` prices one): max(the default fee, `-pqfeerate` × size, the ZIP-317 conventional
-  fee), about 27,000 zat for one SLH-DSA input and 5,500 for one FN-DSA input; the default fee is raised to
-  it, an explicit fee below it is refused, change below the PQ dust threshold goes to the fee, and at most
-  100 PQ inputs (`MAX_PQ_INPUTS_PER_TX`) fit one transaction, within the standard sigop limit. The PQ inputs are
-  signed with no global lock held (an SLH-DSA signature takes ~0.3 s); the wallet re-checks before and after that
-  the inputs are still unspent and the next block's rules unchanged. A PQ recipient amount below the PQ dust
-  threshold (priced on the spend size of its scheme) is refused. `ANY_TADDR` still selects ECC coins only.
-- **`z_mergetoaddress` follows (D-6):** a named `sq…` source merges its coins (at most 100 per call, and
-  only as many inputs as keep the policy sigops, P2SH redeem scripts included, within the standard limit; the
-  rest are reported as remaining), an `sq…` destination receives the merge, with the same fee rule. PQ coins
-  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` still refuses a PQ source (D-7).
-- The error strings of these paths (the same on every line):
-  `post-quantum addresses can be spent from only once the vault upgrade is active at the next block`;
-  `an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block`;
-  `From address does not belong to this node, post-quantum key not found.`;
-  `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet);
-  `Invalid parameter, amount <x> is below the dust threshold <y> of a post-quantum output`;
-  `Fee <x> is below the <y> this post-quantum spend needs`;
-  `This send needs <n> post-quantum inputs, more than the <m> one transaction may carry; combine the address's coins first with z_mergetoaddress`;
-  `This transaction needs <n> signature operations, more than the <m> a standard transaction allows; spend fewer inputs`;
-  `A post-quantum from address cannot pay a Sprout address`;
-  `Post-quantum coins cannot be merged with Sprout notes or into a Sprout address`;
-  `The next block's rules changed while this transaction was built (a reorg or a network upgrade); send it again`;
-  `A post-quantum input was spent while this transaction was built; send it again`. A PQ recipient before the vault upgrade or
-  Falcon keeps its `… can be paid only once …` strings.
-- **`z_getbalance` refuses a transparent address the wallet does not hold** (ECC or post-quantum: no key and no
-  watch-only script) with `From address does not belong to this node, transparent or post-quantum key or watch-only
-  script not found.` (`RPC_INVALID_ADDRESS_OR_KEY`). **This changes inherited v4.5.0 behaviour**: it answered `0`
-  for such an address. A watch-only address still answers; a foreign Sapling address was already refused.
-- **Post-quantum keys are filed in the address book when first paid**: a key of the wallet that receives a
-  `TX_PQPKH` output without an address-book entry is filed (purpose `receive`), so a seed-only restore treats its
-  receipts as receipts, not change (a vault, intent or channel owner key stays out, even when paid a `TX_PQPKH`
-  output); keys paid before this release are filed once when the wallet loads; a fresh YED holder key is filed when
-  drawn. Where Yellowback is live (the network has a vault height and a YED attestor set),
-  `listreceivedbyaddress` and `validateaddress` mark a YED holder key with `"yed_holder": true`.
+  Hash160, and a `TX_PQPKH` key hash is 32 bytes. `getaddressdeltas`, `getaddressutxos`,
+  `getaddressbalance` and `getaddresstxids` name them as requested.
+- **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` whose address index was
+  built by a build before 6.22.0-beta1: the index of earlier blocks holds no `TX_PQPKH` outputs
+  until it is rebuilt. D-9 needs no reindex: the index is keyed by the key hash, not the text.
+- **`createrawtransaction` takes a post-quantum output** without the wallet's payability checks
+  (Falcon activation, the post-quantum dust threshold); relay policy still refuses a non-standard or
+  dust output.
+- **`yed_getnewaddress "pq"` files holder keys in the address book** under their plain-YEC form, so
+  the YEC their token outputs carry is not taken for change. Holder keys issued by an earlier build
+  are not added retroactively.
+- **Post-quantum keys are filed in the address book when first paid** (purpose `receive`), so a
+  seed-only restore treats their receipts as receipts, not change. A vault, intent or channel owner
+  key stays out. Keys paid before this release are filed once when the wallet loads. Where
+  Yellowback is live, `listreceivedbyaddress` and `validateaddress` mark a YED
+  holder key with `"yed_holder": true`.
 - **Seed-only restore (`-hdseedfile`)** restores the seed's first Sapling address and its
-  post-quantum keys up to a gap of `PQ_KEY_LOOKAHEAD` = 20 unused keys per scheme: a key beyond 20
-  unused ones in a row is not re-found. Recover such keys by issuing PQ addresses past the gap
-  (`getnewaddress "" "pq"`) and running `rescanblockchain`; further Sapling addresses likewise with
-  `z_getnewaddress` before `rescanblockchain`. On an existing wallet the option is ignored when the
-  seed matches (checked by fingerprint, so a locked wallet starts too) and refused when it does not.
-- **`-sendchangeback=1`** returns a PQ input's change to its `sq…` address; the change's dust check
-  uses the PQ spend size (`GetPQDustThreshold`), as relay policy does.
-- **`z_importpqkey`** takes a dump's whole `pqseed=` line and refuses it when its `owner=`/`addr=`/
-  `yecaddr=` do not name the key the seed makes under the line's scheme (the scheme decides the key;
-  both schemes take a 48-byte seed). **`vault_release`** refuses a 66-hex pqkeyid as the recipient
-  (pass the address or the script).
+  post-quantum keys up to a gap of 20 unused keys per scheme (`PQ_KEY_LOOKAHEAD`). Recover keys
+  beyond the gap by issuing addresses past it (`getnewaddress pq`, `z_getnewaddress`) and running
+  `rescanblockchain`. On an existing wallet the option is ignored when the seed matches and refused
+  when it does not.
+- **`-sendchangeback=1`** returns a post-quantum input's change to its address; the change's dust
+  check uses the post-quantum spend size.
+- **`z_importpqkey`** takes a dump's whole `pqseed=` line and refuses it when its
+  `owner=`/`addr=`/`yecaddr=` do not name the key the seed makes. **`vault_release`** refuses a
+  66-hex pqkeyid as the recipient (pass the address or the script).
 
+Known limitations
+-----------------
+
+- **A seed-only restore recovers no transparent coins on this line, by design.** Its transparent
+  keys are random, not derived from the seed (`-hdseedfile` help: "Transparent keypool keys and
+  imported keys are not seed-derived"). Back up `wallet.dat`. ycash6 derives them from the seed.
+- **A seed restore does not restore the has-held-YED mark.** A wallet restored on a node where
+  Yellowback is not live loads without the guard. Coin-selecting sends leave its YED outputs out,
+  but a raw transaction that names one spends it as plain YEC and burns its YED. Restore a wallet
+  that has held YED only on a node where Yellowback is live. The mark also does not cover a rescan
+  or key import done where Yellowback is not live, nor a wallet last used by a build before the
+  mark existed.
+- **A raw spend in the first moment after a YED payment arrives** is not counted by the raw-send
+  check: the wallet records the incoming transaction a moment (normally
+  under a second) after the mempool accepts it.
+- **The mint pre-check's figure is for the current coins**: topping the address
+  up with a new coin adds one input and its fee, so funding exactly the named `need` can be refused
+  once more; add a margin.
+- **The `yed_*` YEC funding can still spend post-quantum coins**; the ECC-only
+  rule covers the stock sends.
+- **No YED attestor set on any public network**: Yellowback is live only on regtest with
+  `-yellowbackattestorset`.
+- **Wallet encryption is experimental** (`-experimentalfeatures -developerencryptwallet`).
