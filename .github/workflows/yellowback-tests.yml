@@ -154,7 +154,9 @@ env:
   # copy and the contract's new fields come from.
   # 698870c (#22) amends fees spec section 5.1: fee publication follows price trust, so HALT-2 alone keeps the
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
-  WORKSPACE_COMMIT: 698870c998e2534f45461f5bb98773d014e96829
+  # 0c95229 (yellowback#43, D-9) adds the generator's prefix line (rpcversion 9: yed_getinfo's pqAddressVersion /
+  # pq.plainAddressVersion as objects keyed by scheme, docs/plans/yellowback-pq-prefix-rpc-delta.md section 4.12).
+  WORKSPACE_COMMIT: 0c952297195a00494ee0a41b6bb930b2c85b63e4
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.
