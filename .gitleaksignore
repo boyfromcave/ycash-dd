@@ -139,3 +139,29 @@ ccddd22e4e4891005d363223abb2ff31565f6697:README_CROSS_CHAIN_SWAP_GUIDE.md:generi
 
 # contrib/yellowback/devnet/testnet_join.py (N2 join mode): the line builds ycash.conf text from a format string, "rpcpassword=%s" % password beside "rpcbind=127.0.0.1"; the password is random per devnet at run time, nothing is committed. Reshaped in the next commit.
 5d54224244cba74e721567f0e4ddbcb1bfdef5cb:contrib/yellowback/devnet/testnet_join.py:generic-api-key:99
+
+# src/test/data/pq_address_vectors.json: the shared post-quantum address vectors (quantum spec 4.1, D-9): public key hashes and addresses, no secrets.
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:51
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:60
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:105
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:114
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:159
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:168
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:213
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:222
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:267
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:276
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:321
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:330
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:375
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:384
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:429
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:438
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:483
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:492
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:537
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:546
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:591
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:600
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:645
+de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:654
