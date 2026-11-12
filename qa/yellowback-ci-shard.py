@@ -80,6 +80,33 @@ WEIGHTS = {
     "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
     "wallet_yed_held_guard": 150,       # estimate (2026-11-11): several restarts, three copied wallets
     "zmq_concurrent_test": 100,         # 45 s stress + the window build (2026-10-11, M-series laptop)
+    # Not measured yet: DEFAULT written out (2026-11-11), so the split is unchanged and the audit's
+    # registration leg can require a row for every push-tier script the fork owns. Replace with a measurement.
+    "lightwalletd_only":        240,
+    "stopatheight":             240,
+    "testnet_ceremony":         240,
+    "vault_dos":                240,
+    "vault_policy":             240,
+    "vault_pq":                 240,
+    "vault_pq_relay":           240,
+    "vault_pq_reorg":           240,
+    "vault_pq_wallet":          240,
+    "vault_pq_wallet_restore":  240,
+    "vault_refee":              240,
+    "vault_undo_prune":         240,
+    "wallet_pq_address":        240,
+    "ycash_bootstrap":          240,
+    "yellowback_attest_bond":   240,
+    "yellowback_attest_evict":  240,
+    "yellowback_attest_live":   240,
+    "yellowback_attest_rejoin":  240,
+    "yellowback_cancel_limit":  240,
+    "yellowback_fees":          240,
+    "yellowback_fees_reaccept":  240,
+    "yellowback_lightwalletd":  240,
+    "yellowback_pq":            240,
+    "yellowback_pq_dayone":     240,
+    "z_validateaddress_nowallet":  240,
 }
 DEFAULT = 240
 
