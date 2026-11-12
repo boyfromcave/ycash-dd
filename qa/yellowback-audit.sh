@@ -16,9 +16,11 @@
 #            cross-line byte identity of the golden vectors, and the consensus-diff report.
 #   auto     (default) upgrade when src/vault/ exists, harden otherwise.
 #
-# Usage: qa/yellowback-audit.sh [--mode harden|upgrade|auto] [--out DIR]
+# Usage: qa/yellowback-audit.sh [--mode harden|upgrade|auto] [--out DIR] [--require-cross-line]
 #   --out DIR   where the upgrade mode writes consensus-diff.patch and consensus-diff.txt
 #               (default: a fresh directory under ${TMPDIR:-/tmp})
+#   --require-cross-line   the cross-line leg fails instead of printing NOT CHECKED when no other line
+#               is set or found (CI fails it either way)
 # Refs it needs (CI fetches them; a missing ref is an error, never a vacuous pass):
 #   ycash-legacy (branch, = upstream v4.5.0) and yellowback-v3-baseline (tag).
 # Upgrade-mode inputs (CI sets them; locally a leg whose input is missing says NOT CHECKED and,
@@ -27,7 +29,11 @@
 #                        default: ../.. when it holds scripts/extract_spec.py (a wt/<name> worktree)
 #   YB_OTHER_LINE_REF    a ref in THIS repository holding the other node line (CI fetches ycash6 into it)
 #   YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV   or another local repository and a revision in it
-#                        (e.g. YB_OTHER_LINE_DIR=../../ycash6 YB_OTHER_LINE_REV=upgrade/vault)
+#                        (e.g. YB_OTHER_LINE_DIR=../ycash6 YB_OTHER_LINE_REV=upgrade/vault)
+#   neither set: the other line's checkout at the conventional sibling path is used when it exists
+#   (../ycash6 beside the ycash-dd main tree, ../up6-<suffix> beside a wt/up-<suffix> worktree), at the
+#   branch of this checkout's name unless that branch is merged already, else upgrade/vault
+#   (qa/yellowback-other-line-branch.py decides and says why). NOT CHECKED only when nothing is found.
 # The functional-test lists are read from the workflow file itself (its top-level env), the one
 # place they are declared.
 # Path lists ($frozen, $pure, $(existing ...)) are word-split on purpose; no path here holds a space.
@@ -39,13 +45,15 @@ cd "$(dirname "$0")/.."
 
 mode=auto
 out=""
+require_cross_line=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --mode=*) mode="${1#--mode=}"; shift ;;
     --out) out="${2:-}"; shift 2 ;;
     --out=*) out="${1#--out=}"; shift ;;
-    -h|--help) sed -n '6,32p' "$0"; exit 0 ;;
+    --require-cross-line) require_cross_line=1; shift ;;
+    -h|--help) sed -n '6,38p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -600,10 +608,28 @@ leg_pq_wipes() {
 
 # ── upgrade line only ─────────────────────────────────────────────────────────────────────────
 
+find_other_line() {   # find_other_line <other main-tree name> <other worktree prefix> <this worktree prefix>
+  # The same function on both node lines. Sets YB_OTHER_LINE_DIR and YB_OTHER_LINE_REV when the other
+  # line's checkout sits at the conventional sibling path; leaves them unset otherwise.
+  local here me branch dir="" rev
+  here=$(pwd -P); me=$(basename "$here")
+  case "$me" in
+    "$3"*) dir="$here/../$2${me#"$3"}" ;;
+    *) dir="$here/../$1" ;;
+  esac
+  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || { echo "no other line at the sibling path $dir"; return 0; }
+  dir=$(cd "$dir" && pwd -P)
+  branch=$(git symbolic-ref --short -q HEAD || echo upgrade/vault)
+  rev=$(python3 qa/yellowback-other-line-branch.py --dir "$dir" --branch "$branch") || return 0
+  YB_OTHER_LINE_DIR=$dir YB_OTHER_LINE_REV=$rev
+  echo "other line found at the sibling path (committed state only; uncommitted changes there are not read)"
+}
+
 leg_cross_line() {
   # Both node lines replay the same golden vectors: byte-identical files, or one line's consensus
   # implementation has moved without the other (AGENTS.md "two node lines, one overlay").
   local f mine other
+  [ -n "${YB_OTHER_LINE_REF:-}" ] || [ -n "${YB_OTHER_LINE_DIR:-}" ] || find_other_line ycash6 up6- up-
   if [ -n "${YB_OTHER_LINE_REF:-}" ]; then
     show() { git show "$YB_OTHER_LINE_REF:$1"; }
     echo "other line: $YB_OTHER_LINE_REF ($(git rev-parse --short "$YB_OTHER_LINE_REF^{commit}"))"
@@ -611,8 +637,8 @@ leg_cross_line() {
     show() { git -C "$YB_OTHER_LINE_DIR" show "$YB_OTHER_LINE_REV:$1"; }
     echo "other line: $YB_OTHER_LINE_DIR at $YB_OTHER_LINE_REV ($(git -C "$YB_OTHER_LINE_DIR" rev-parse --short "$YB_OTHER_LINE_REV^{commit}"))"
   else
-    echo "NOT CHECKED: no other node line (set YB_OTHER_LINE_REF, or YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV)"
-    in_ci && return 1; return 0
+    echo "NOT CHECKED: no other node line (set YB_OTHER_LINE_REF, or YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV, or check it out at the sibling path)"
+    in_ci && return 1; [ "$require_cross_line" = 0 ] || { echo "--require-cross-line: NOT CHECKED is a failure"; return 1; }; return 0
   fi
   local rc=0
   # Vectors, qa goldens, pqkey, the spec and the three overlay trees (audit W3-P-2).
