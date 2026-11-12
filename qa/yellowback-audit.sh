@@ -189,21 +189,58 @@ leg_determinism() {
 
 # ── registration: executable, registered, run by a CI job ────────────────────────────────────
 
-leg_registration() {
-  # rpc-tests.py exec's a script directly, so it must be executable, and it must be run by some job:
-  # registered-but-never-run is how the v2 enforcement suite and then the whole v3 attestation suite
-  # sat silent in CI.
-  local f n
-  for f in qa/rpc-tests/yellowback_*.py qa/rpc-tests/vault_*.py; do
+# Fork-added functional scripts deliberately run by no CI job (item 1 of the CI-hardening lane, beta2
+# list items 69, 59). One name per line, each with its reason; anything not named here that the fork
+# added under qa/rpc-tests/ must be executable, registered and run. Empty on this line today.
+REGISTRATION_EXCLUDE=$(sed 's/[[:space:]]*#.*$//' <<'EOF_EXCLUDE' | grep -v '^$' || true
+EOF_EXCLUDE
+)
+
+# Every functional script the fork owns: each top-level qa/rpc-tests/*.py added relative to $LEGACY
+# (the fork delta from the merge base, as the attribution leg reads it, here including what is staged,
+# modified or untracked in the working tree, so a script not yet committed is seen locally), plus the
+# yellowback_*/vault_* prefixes, minus REGISTRATION_EXCLUDE. Derived mechanically, so a wallet_*.py or
+# any other new name is covered.
+fork_scripts() {
+  { git diff --no-renames --name-only --diff-filter=A "$(git merge-base "$LEGACY" HEAD)" -- qa/rpc-tests
+    git ls-files --others --exclude-standard -- qa/rpc-tests
+    git ls-files -- 'qa/rpc-tests/yellowback_*.py' 'qa/rpc-tests/vault_*.py'
+  } | { grep -E '^qa/rpc-tests/[^/]+\.py$' || true; } | sort -u | while read -r f; do
     [ -e "$f" ] || continue
-    [ -x "$f" ] || { echo "$f is not executable; chmod +x it"; return 1; }
-    n=$(basename "$f" .py)
-    grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; return 1; }
-    case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $NIGHTLY_SCRIPTS " in
-      *" $n "*) ;;
-      *) echo "$n is in qa/rpc-tests/ but no CI job runs it (add it to YELLOWBACK_SCRIPTS or NIGHTLY_SCRIPTS in $WF)"; return 1 ;;
-    esac
+    grep -qx -- "$(basename "$f" .py)" <<< "$REGISTRATION_EXCLUDE" && continue
+    echo "$f"
   done
+}
+
+leg_registration() {
+  # rpc-tests.py exec's a script directly, so it must be executable IN GIT (a checkout takes the mode
+  # from the index, not from the author's disk), and it must be run by some job: registered-but-never-run
+  # is how the v2 enforcement suite, then the whole v3 attestation suite, then wallet_yed_held_guard sat
+  # silent in CI. A push-tier script also needs a measured weight in qa/yellowback-ci-shard.py.
+  local f n mode bad="" count=0 x
+  for x in $REGISTRATION_EXCLUDE; do
+    [ -e "qa/rpc-tests/$x.py" ] || { echo "REGISTRATION_EXCLUDE names $x, which is not in qa/rpc-tests/"; return 1; }
+  done
+  while read -r f; do
+    count=$((count + 1))
+    n=$(basename "$f" .py)
+    mode=$(git ls-files -s -- "$f" | cut -d' ' -f1)
+    [ "$mode" = 100755 ] || bad="$bad
+  $f is mode ${mode:-untracked} in git, not 100755 (chmod +x it, then git add it)"
+    grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || bad="$bad
+  $n is not registered in qa/pull-tester/rpc-tests.py"
+    case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $NIGHTLY_SCRIPTS $STOCK_BASELINE " in
+      *" $n "*) ;;
+      *) bad="$bad
+  $n is in qa/rpc-tests/ but no CI job runs it (add it to YELLOWBACK_SCRIPTS or NIGHTLY_SCRIPTS in $WF, or to REGISTRATION_EXCLUDE with the reason)" ;;
+    esac
+    case " $YELLOWBACK_SCRIPTS $STOCK_BASELINE " in
+      *" $n "*) grep -qE "^[[:space:]]+\"$n\":" qa/yellowback-ci-shard.py || bad="$bad
+  $n runs in the push tier but has no weight in qa/yellowback-ci-shard.py (WEIGHTS)" ;;
+    esac
+  done < <(fork_scripts)
+  echo "fork-owned functional scripts checked: $count (excluded by name: $(wc -w <<< "$REGISTRATION_EXCLUDE" | tr -d ' '))"
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
   # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every name a
   # job passes it must be registered there (ported from ycash6, audit I-1).
   for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE $NIGHTLY_SCRIPTS; do
