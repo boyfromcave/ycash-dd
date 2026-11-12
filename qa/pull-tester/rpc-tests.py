@@ -137,6 +137,7 @@ BASE_SCRIPTS= [
     # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
     'wallet_yed_ecc_token.py',
     'wallet_beta2_followups.py',
+    'wallet_beta2_followups2.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',

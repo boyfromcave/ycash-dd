@@ -190,8 +190,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 2)
         throw runtime_error(
-            "getnewaddress ( \"type\" )\n"
-            "getnewaddress ( \"account\" \"type\" )\n"
+            "getnewaddress ( \"type\"|\"account\" ( \"type\" ) )\n"
             "\nReturns a new Ycash address for receiving payments.\n"
             "\nArguments (the type may come first, getnewaddress pq, or second after the empty account, getnewaddress \"\" pq):\n"
             "1. \"type\"|\"account\" (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
@@ -3114,7 +3113,10 @@ UniValue zc_benchmark(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() < 2) {
         throw runtime_error(
-            "zcbenchmark benchmarktype samplecount\n"
+            "zcbenchmark benchmarktype samplecount ( arg )\n"
+            "\n"
+            "arg (optional): the thread count for createjoinsplit and solveequihash, the JoinSplit hex for\n"
+            "verifyjoinsplit.\n"
             "\n"
             "Runs a benchmark of the selected type samplecount times,\n"
             "returning the running times of each sample.\n"
@@ -4641,6 +4643,11 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             nFee = AmountFromValue( params[3] );
         }
 
+        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
+        // than build, sign and fail at the commit. Checked before the upstream checks below (audit L-5), so a fee above
+        // the cap gets the message the 6.x line gives, which says what to do.
+        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
+
         // Check that the user specified fee is not absurd.
         // This allows amount=0 (and all amount < nDefaultFee) transactions to use the default network fee
         // or anything less than nDefaultFee instead of being forced to use a custom fee and leak metadata
@@ -4654,9 +4661,6 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the sum of outputs %s and also greater than the default fee", FormatMoney(nFee), FormatMoney(nTotalOut)));
             }
 	}
-        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
-        // than build, sign and fail at the commit.
-        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
     }
 
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
@@ -5581,7 +5585,7 @@ UniValue z_listoperationids(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "z_listoperationids\n"
+            "z_listoperationids ( \"status\" )\n"
             "\nReturns the list of operation ids currently known to the wallet.\n"
             "\nArguments:\n"
             "1. \"status\"         (string, optional) Filter result by the operation's state e.g. \"success\".\n"

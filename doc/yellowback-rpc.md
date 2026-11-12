@@ -346,7 +346,7 @@ YED form): what node operators and clients should know.**
     Yellowback-locked outpoints; a token whose lock was removed with `yed_unlockcoin` is not marked until it is
     locked again); the field is absent otherwise. (ECC keys are keypool keys, not derived from
     the seed: a seed-only restore does not recover ECC coins; the first Sapling address and the PQ keys it does.) `z_listaddresses` lists the Sapling addresses.
-    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. This line has no
+    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. `z_validateaddress` answers for a post-quantum address too (audit L-4; it said `isvalid: false`): `type` (dd) / `address_type` (6.x) `"pq"`, `ismine`, and validateaddress's `pqscheme`, `pqschemename`, `pqkeyhash`; its answers for Sprout, Sapling and unified addresses are unchanged. This line has no
     `listaddresses` (the 6.x line's call, which gains the same `pqscheme`/`pqschemename` per PQ address there).
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, now documented and
     pinned by `qa/rpc-tests/wallet_balance_by_type.py`). *Spendable now* (`getwalletinfo.balance`, `getbalance`
@@ -1934,7 +1934,10 @@ from that address's confirmed notes, largest-first — blocks for the proving ti
 confirmed from `yed_estimatecollateral`; the node refuses `collateral-above-max` at preflight,
 before the carrier, and again when the MINT is built on the confirmed carrier — then the carrier
 lapses and `yed_sweepcarriers` reclaims it — so a block or a price move between the estimate and
-the call never locks more than was agreed). Builds the §3.5
+the call never locks more than was agreed). Before the carrier is broadcast the preflight also dry-runs the
+selection of the whole mint (collateral, token, pool and attestor fees, the MINT's and the carrier's network fees) on
+the same source, and refuses `insufficient-yec` with nothing sent (beta2; it used to broadcast the carrier and fail
+at the MINT). Builds the §3.5
 MINT at `R = tip − REF_LAG` after the MINTPOL-1 gate (`Snapshots[R].activation == ACTIVE`,
 `haltMask == 0`, the cap has room), draws one fresh key for the vault owner and the token output,
 locks the token output, commits. `vault` is `"<txid>:0"`; `payee` is the FEE-W choice (or the
