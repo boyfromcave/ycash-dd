@@ -180,13 +180,20 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `yed_getnewaddress`'s and `z_getnewaddress`'s are, so `PQ` is refused with this message), and a type given first and again second is
   refused with `the address type is given first, so there is no second argument (getnewaddress pq, or
   getnewaddress "" pq)`.
+- **`sendtoaddress` and `sendmany` spend ordinary (ECC) coins only** (beta2, audit M-1). They never select a
+  post-quantum coin (they used to, and sent its change to a new ECC key); a post-quantum coin is spent with
+  `z_sendmany` from its `sq…` address, which returns the change to it (D-4) and signs with no wallet lock held. When
+  the ECC coins do not cover the amount and the wallet holds post-quantum coins, the call is refused with
+  `Insufficient funds in ordinary transparent addresses; this wallet also holds <amount> YEC at post-quantum
+  addresses: send from one with z_sendmany, which returns the change to it`. `fundrawtransaction` (coin control)
+  is unchanged.
 - **`z_sendmany` is the any-to-any call for plain YEC (beta2 D-2; quantum spec A-15 reversed).** From an
   ECC (`s1…`), Sapling (`ys1…`) or post-quantum (`sq…`, either scheme) address to any mix of ECC, Sapling
   and PQ recipients. A PQ from address spends that address's own coins (largest first, mature only:
   `minconf` applies); its inputs are signed after the Sapling proofs are made, with no wallet lock held
   while proving, under the vault script flags of the next block; its change returns to the same `sq…`
   address (D-4; Sapling change stays a Sapling note, ECC change is unchanged). Its fee follows the rule
-  `sendtoaddress` uses for a PQ input: max(the default fee, `-pqfeerate` × size, the ZIP-317 conventional
+  the wallet uses for a PQ input (as `fundrawtransaction` prices one): max(the default fee, `-pqfeerate` × size, the ZIP-317 conventional
   fee), about 27,000 zat for one SLH-DSA input and 5,500 for one FN-DSA input; the default fee is raised to
   it, an explicit fee below it is refused, change below the PQ dust threshold goes to the fee, and at most
   100 PQ inputs (`MAX_PQ_INPUTS_PER_TX`) fit one transaction, within the standard sigop limit. The PQ inputs are

@@ -203,8 +203,8 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                     yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                     Needs the vault upgrade active at the next block and an unlocked wallet.\n"
-            "                     A post-quantum address receives plain YEC; sendtoaddress/sendmany spend it (fee by size),\n"
-            "                     z_sendmany, z_shieldcoinbase and z_mergetoaddress never do.\n"
+            "                     A post-quantum address receives plain YEC; z_sendmany and z_mergetoaddress spend it (fee by\n"
+            "                     size, change back to it); sendtoaddress, sendmany and z_shieldcoinbase never do.\n"
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new Ycash address\n"
             "\nExamples:\n"
@@ -539,6 +539,8 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendtoaddress \"zcashaddress\" amount ( \"comment\" \"comment-to\" subtractfeefromamount )\n"
             "\nSend an amount to a given address. The amount is a real and is rounded to the nearest 0.00000001\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() +
             "\nArguments:\n"
             "1. \"zcashaddress\"  (string, required) The Ycash address to send to.\n"
@@ -1114,6 +1116,8 @@ UniValue sendmany(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendmany \"fromaccount\" {\"address\":amount,...} ( minconf \"comment\" [\"address\",...] )\n"
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"fromaccount\"         (string, required) MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
@@ -4877,7 +4881,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         }
         if (IsPQKeyDestination(taddr)) {
             // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use z_sendmany");
         }
     }
 
