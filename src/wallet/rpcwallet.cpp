@@ -4880,7 +4880,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address, should be a taddr or \"*\".");
         }
         if (IsPQKeyDestination(taddr)) {
-            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
+            // z_shieldcoinbase spends coinbase only; a post-quantum source is spent with z_sendmany (beta2 D-2).
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use z_sendmany");
         }
     }
