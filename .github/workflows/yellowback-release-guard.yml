@@ -12,7 +12,10 @@
 # parameters, only the invariants, R8's branch IDs among them; an rc R3-R6, the testnet's R7 and
 # R8's split height H_S; a final release R1-R8) and every compared Vault field matches ycash6
 # (v<version> when that tag already exists, otherwise upgrade/vault).
-# A workflow_dispatch run only warns.
+# A workflow_dispatch run with input release_version (e.g. 6.22.0-beta2) is the proving run of a
+# pairing tag before it is pushed: the dispatched commit is checked exactly as the tag
+# vault-params/v<release_version> would be, and it fails where the tag would. Without the input, a
+# dispatch only warns.
 #
 # Order: tag ycash-dd vault-params/v6.22.N first (this guard must pass), then tag ycash6 v6.22.N.
 name: yellowback release guard
@@ -22,6 +25,11 @@ on:
     tags:
       - 'vault-params/*'
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'prove the pairing tag vault-params/v<this> on the dispatched commit (e.g. 6.22.0-beta2); empty: warn only'
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -37,11 +45,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Refuse an off-line pairing tag and compare Vault parameters
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           set -euo pipefail
           url="https://github.com/boyfromcave/ycash6.git"
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            ver="${GITHUB_REF_NAME#vault-params/v}"
+          if [ "${GITHUB_REF_TYPE}" = tag ] || [ -n "${RELEASE_VERSION:-}" ]; then
+            if [ "${GITHUB_REF_TYPE}" = tag ]; then
+              ver="${GITHUB_REF_NAME#vault-params/v}"
+            else
+              ver="$RELEASE_VERSION"
+              echo "proving run: $(git rev-parse HEAD) checked as the tag vault-params/v${ver} would be"
+            fi
             # The version names the stage; the guard below refuses anything that is not a 6.22.x
             # release version before any ref is built from it.
             python3 qa/yellowback-vault-params.py stage "$ver" >/dev/null || {
