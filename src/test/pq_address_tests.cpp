@@ -256,9 +256,9 @@ BOOST_AUTO_TEST_CASE(pqpkh_address_index_key)
         BOOST_CHECK(GetScriptForPQKey(CPQKeyID(scheme == 1 ? 2 : 1, id.hash)).AddressHash() != s.AddressHash());
     }
     // A near-miss (wrong final opcode) stays UNKNOWN; P2PKH stays P2PKH.
-    CScript near = GetScriptForPQKey(RandomPQId(1));
-    near[34] = OP_CHECKSIG;
-    BOOST_CHECK_EQUAL(near.GetType(), CScript::UNKNOWN);
+    CScript nearMiss = GetScriptForPQKey(RandomPQId(1));
+    nearMiss[34] = OP_CHECKSIG;
+    BOOST_CHECK_EQUAL(nearMiss.GetType(), CScript::UNKNOWN);
     CKey k;
     k.MakeNewKey(true);
     BOOST_CHECK_EQUAL(GetScriptForDestination(k.GetPubKey().GetID()).GetType(), CScript::P2PKH);
