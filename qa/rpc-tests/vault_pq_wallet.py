@@ -275,7 +275,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         assert (pq_txid, pq_vout) not in [(u['txid'], u['vout']) for u in pq_unspent(n1)]   # spent; the change returns to pq_addr
 
         print('node 1 prices a PQ input itself (CreateTransaction): fundrawtransaction naming its PQ change coin')
-        change = [u for u in pq_unspent(n1) if u['address'] == pq_addr]
+        change = n1.listunspent(1, 9999999, [pq_addr])     # the z_sendmany change, back at its address
         assert_equal(len(change), 1)
         named = {'txid': change[0]['txid'], 'vout': change[0]['vout']}
         funded = n1.fundrawtransaction(n1.createrawtransaction([named], {n0.getnewaddress(): Decimal(change[0]['amount']) / 2}))
