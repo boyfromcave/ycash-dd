@@ -8004,6 +8004,7 @@ bool CWallet::EraseAtomicSwap(const std::string& swapId)
 // not judged yet: unconfirmed, or any transaction while the index is unhealthy.
 static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
 {
+    if (tx.IsCoinBase()) return false;          // TX-0: a coinbase registers nothing, whatever its outputs carry
     std::optional<yellowback::FoundPayload> fp = yellowback::FindPayload(tx);
     if (!fp.has_value()) return false;
     if (fp->payload.type == yellowback::PayloadType::MINT) return n == 0 || n == 1;
