@@ -47,6 +47,7 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
     wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 
 ACTIVATION = 205
@@ -250,7 +251,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         self.mine(1)
         assert self.tx_of(r['txid'])['confirmations'] >= 1
 
-        print('node 1 spends the PQPKH coin through sendtoaddress: max(DEFAULT_FEE, -pqfeerate x size)')
+        print('node 1 spends the PQPKH coin with z_sendmany from its address: max(DEFAULT_FEE, -pqfeerate x size)')
         n1 = self.nodes[1]
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n1.listunspent() if not (u['txid'] == pq_txid and u['vout'] == pq_vout)]
         if others:
@@ -261,7 +262,8 @@ class VaultPQWalletTest(BitcoinTestFramework):
         wait_and_assert_operationid_status(n1, opid, 'failed', 'Could not find any non-coinbase UTXOs to spend.')
         assert_raises_rpc('Could not find any funds to merge', n1.z_mergetoaddress, ['ANY_TADDR'], n0.getnewaddress())
         assert_equal(len(pq_unspent(n1)), 1)                           # still unspent, still the wallet's
-        txid = n1.sendtoaddress(n0.getnewaddress(), 1)
+        pq_addr = pq_unspent(n1)[0]['address']        # sendtoaddress spends ECC coins only (beta2 audit M-1)
+        txid = wait_and_assert_operationid_status(n1, z_sendmany_opid(n1, pq_addr, [(n0.getnewaddress(), 1)]))
         tx = self.tx_of(txid, 1)
         assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(pq_txid, pq_vout)])
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
@@ -269,7 +271,7 @@ class VaultPQWalletTest(BitcoinTestFramework):
         fee = -zat(n1.gettransaction(txid)['fee'])
         assert fee >= max(DEFAULT_FEE, HIGH_RATE * size // 1000, conventional_fee(tx)), (fee, size)
         self.mine(1)
-        assert_equal(pq_unspent(n1), [])
+        assert (pq_txid, pq_vout) not in [(u['txid'], u['vout']) for u in pq_unspent(n1)]   # spent; the change returns to pq_addr
         if others:
             n1.lockunspent(True, others)
 
