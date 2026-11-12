@@ -62,6 +62,7 @@ WEIGHTS = {
     "wallet_pq_fee_cap": 60,            # measured 2026-11-11: two restarts, a merge, a capped send
     "wallet_yed_ecc_token": 90,         # measured 2026-11-11: Yellowback live late, a mint and a transfer
     "wallet_beta2_followups": 150,      # estimate (2026-11-11): two nodes, several restarts (beta2 wallet follow-ups)
+    "wallet_beta2_followups2": 240,     # estimate (2026-11-12): three nodes, YED activation, Sapling proofs (follow-ups, second round)
     "vault_lock_from": 240,             # measured 2026-11-11 (232 s, laptop): four funding paths, SLH-DSA signing, a reorg
     "yellowback_pricefeed": 150,
     "yellowback_quote": 150,
