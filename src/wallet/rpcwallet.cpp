@@ -4645,7 +4645,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
 
         // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
         // than build, sign and fail at the commit. Checked before the upstream checks below (audit L-5), so a fee above
-        // the cap gets the message ycash6 gives, which says what to do.
+        // the cap gets the message the 6.x line gives, which says what to do.
         if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
 
         // Check that the user specified fee is not absurd.
