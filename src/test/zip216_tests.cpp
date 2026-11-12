@@ -40,15 +40,10 @@
 
 namespace {
 
-// Where the rule starts. As written (option a') it holds at every height, so the switch is false.
-// Option (a), the rule from Vault activation, is this switch set to true together with the
-// main.cpp line that defines zip216Active; nothing else in this file changes. Every case runs with
-// UPGRADE_VAULT active from VAULT_HEIGHT and checks at H (after it); the boundary case checks
-// VAULT_HEIGHT - 1 and VAULT_HEIGHT.
-const bool ZIP216_FROM_VAULT = false;
+// The rule holds at every height. Every case runs with UPGRADE_VAULT active from VAULT_HEIGHT and
+// checks at H, after it; enforced_before_and_at_vault also checks VAULT_HEIGHT - 1.
 const int VAULT_HEIGHT = 20;
 const int H = VAULT_HEIGHT + 1;
-bool RuleActiveAt(int nHeight) { return !ZIP216_FROM_VAULT || nHeight >= VAULT_HEIGHT; }
 
 void ActivateVault() { UpdateNetworkUpgradeParameters(Consensus::UPGRADE_VAULT, VAULT_HEIGHT); }
 void DeactivateVault()
@@ -573,7 +568,7 @@ BOOST_AUTO_TEST_CASE(valid_transaction_with_noncanonical_R_on_any_spend)
             BOOST_CHECK_MESSAGE(OldVerifierAccepts(mtx, built.sighash), what);
             for (bool isMined : {true, false}) {
                 Verdict v = Check(mtx, H, isMined);
-                if (nonCanonical && RuleActiveAt(H)) {
+                if (nonCanonical) {
                     BOOST_CHECK_MESSAGE(!v.ok, what);
                     BOOST_CHECK_EQUAL(v.reason, "bad-sapling-bundle-authorization");
                     BOOST_CHECK_EQUAL(v.dos, isMined ? 100 : 0);
@@ -594,10 +589,9 @@ BOOST_AUTO_TEST_CASE(valid_transaction_with_noncanonical_R_on_any_spend)
     RegtestDeactivateSapling();
 }
 
-BOOST_AUTO_TEST_CASE(activation_boundary)
+BOOST_AUTO_TEST_CASE(enforced_before_and_at_vault)
 {
-    // Ready for option (a): at VAULT_HEIGHT - 1 the rule applies only when it holds at every
-    // height, at VAULT_HEIGHT always. As written (every height) both heights reject.
+    // The rule does not depend on the epoch: before Vault and at its activation height alike.
     RegtestActivateSapling();
     ActivateVault();
     const Consensus::Params& consensus = Params().GetConsensus();
@@ -608,8 +602,8 @@ BOOST_AUTO_TEST_CASE(activation_boundary)
             NonceZeroSig(NONCANON_V_ONE, built.rsk[1], mtx.vShieldedSpend[1].rk, built.sighash);
         BOOST_CHECK(OldVerifierAccepts(mtx, built.sighash));
         Verdict v = Check(mtx, h, true);
-        BOOST_CHECK_EQUAL(v.ok, !RuleActiveAt(h));
-        BOOST_CHECK_EQUAL(v.reason, RuleActiveAt(h) ? "bad-sapling-bundle-authorization" : "");
+        BOOST_CHECK(!v.ok);
+        BOOST_CHECK_EQUAL(v.reason, "bad-sapling-bundle-authorization");
     }
     DeactivateVault();
     RegtestDeactivateSapling();
@@ -618,10 +612,8 @@ BOOST_AUTO_TEST_CASE(activation_boundary)
     ActivateVault();
     const OutputDescription real = RealOutput();
     for (int h : {VAULT_HEIGHT - 1, VAULT_HEIGHT}) {
-        // without the rule an identity pk_d passes recovery and fails only at the borrowed proof
         Verdict v = Check(ShieldedCoinbase(OutputTo(real, Point(CANON_V_ONE))), h, true);
-        BOOST_CHECK_EQUAL(v.reason, RuleActiveAt(h) ? "bad-cb-output-desc-invalid-ct"
-                                                    : "bad-txns-sapling-output-description-invalid");
+        BOOST_CHECK_EQUAL(v.reason, "bad-cb-output-desc-invalid-ct");
     }
     DeactivateVault();
     RegtestDeactivateHeartwood();

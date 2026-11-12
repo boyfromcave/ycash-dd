@@ -964,9 +964,6 @@ bool ContextualCheckTransaction(
     bool heartwoodActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_HEARTWOOD);
     bool canopyActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_CANOPY);
     bool futureActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_ZFUTURE);
-    // ZIP 216 and the non-identity coinbase pk_d, which the 6.x and kogany lines enforce at every height.
-    // Kept while gating at UPGRADE_VAULT is still an open choice: that option changes only this line.
-    const bool zip216Active = true;
 
     assert(!saplingActive || overwinterActive); // Sapling cannot be active unless Overwinter is
     assert(!heartwoodActive || saplingActive);  // Heartwood cannot be active unless Sapling is
@@ -1100,8 +1097,8 @@ bool ContextualCheckTransaction(
                 // ZIP 216, and pk_d must not be the identity (as Sapling output recovery decodes it).
                 // A pk_d outside the prime-order subgroup already fails the note commitment check.
                 static const uint256 JUBJUB_IDENTITY = uint256S("01");
-                if (zip216Active && (IsNonCanonicalJubjubEncoding(outPlaintext->pk_d.begin()) ||
-                                     outPlaintext->pk_d == JUBJUB_IDENTITY)) {
+                if (IsNonCanonicalJubjubEncoding(outPlaintext->pk_d.begin()) ||
+                    outPlaintext->pk_d == JUBJUB_IDENTITY) {
                     return state.DoS(
                         DOS_LEVEL_BLOCK,
                         error("ContextualCheckTransaction(): coinbase output description has an invalid pk_d"),
@@ -1285,7 +1282,7 @@ bool ContextualCheckTransaction(
         for (const SpendDescription &spend : tx.vShieldedSpend) {
             nonCanonicalR = nonCanonicalR || IsNonCanonicalJubjubEncoding(spend.spendAuthSig.data());
         }
-        if (zip216Active && nonCanonicalR) {
+        if (nonCanonicalR) {
             return state.DoS(
                 isMined ? DOS_LEVEL_BLOCK : 0,
                 error("ContextualCheckTransaction(): Sapling signature with a non-canonical R"),
