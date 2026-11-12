@@ -15,6 +15,7 @@
 #include "main.h"
 #include "net.h"
 #include "netbase.h"
+#include "policy/policy.h"
 #include "proof_verifier.h"
 #include "rpc/server.h"
 #include "timedata.h"
@@ -157,6 +158,31 @@ void EnsurePQRecipientPayable(const CTxDestination& dest)
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "an FN-DSA-512 (scheme 2) post-quantum address can be paid only once Falcon is active at the next block");
 }
 
+void EnsurePQSourceSpendable(const CTxDestination& dest)
+{
+    const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest);
+    if (!pq) return;
+    AssertLockHeld(cs_main);
+    AssertLockHeld(pwalletMain->cs_wallet);
+    const int next = chainActive.Height() + 1;
+    if (!Params().GetConsensus().NetworkUpgradeActive(next, Consensus::UPGRADE_VAULT))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "post-quantum addresses can be spent from only once the vault upgrade is active at the next block");
+    if (pq->scheme == pq::SCHEME_FN_DSA_512 && !IsPQFalconActive(Params().GetConsensus(), next))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block");
+    if (!pwalletMain->HavePQKey(*pq))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, post-quantum key not found.");
+    EnsureWalletIsUnlocked();
+}
+
+void EnsurePQAmountNotDust(const CTxDestination& dest, CAmount amount)
+{
+    if (!IsPQKeyDestination(dest)) return;
+    const CTxOut out(amount, GetScriptForDestination(dest));
+    const CAmount dust = GetPQDustThreshold(out, ::minRelayTxFee);
+    if (amount < dust)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid parameter, amount %s is below the dust threshold %s of a post-quantum output", FormatMoney(amount), FormatMoney(dust)));
+}
+
 UniValue getnewaddress(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -164,12 +190,16 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 2)
         throw runtime_error(
+            "getnewaddress ( \"type\" )\n"
             "getnewaddress ( \"account\" \"type\" )\n"
             "\nReturns a new Ycash address for receiving payments.\n"
-            "\nArguments:\n"
-            "1. \"account\"        (string, optional) DEPRECATED. If provided, it MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
+            "\nArguments (the type may come first, getnewaddress pq, or second after the empty account, getnewaddress \"\" pq):\n"
+            "1. \"type\"|\"account\" (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
+            "                     argument. Or the DEPRECATED account: the empty string \"\" (the default account), which may be\n"
+            "                     followed by the type. Any other string is refused (\"Accounts are unsupported\"); the type\n"
+            "                     names are lower case.\n"
             "2. \"type\"           (string, optional, default \"p2pkh\") \"p2pkh\" (a keypool key), or \"pq\": a post-quantum address\n"
-            "                     (sq… mainnet, tq… testnet, rq… regtest; 53 characters) from the wallet's HD seed, FN-DSA-512 once\n"
+            "                     (53 characters, its prefix showing the network and the scheme) from the wallet's HD seed, FN-DSA-512 once\n"
             "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                     yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                     Needs the vault upgrade active at the next block and an unlocked wallet.\n"
@@ -179,18 +209,34 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "\"zcashaddress\"    (string) The new Ycash address\n"
             "\nExamples:\n"
             + HelpExampleCli("getnewaddress", "")
+            + HelpExampleCli("getnewaddress", "pq")
             + HelpExampleCli("getnewaddress", "\"\" \"pq\"")
-            + HelpExampleRpc("getnewaddress", "")
+            + HelpExampleRpc("getnewaddress", "\"pq\"")
         );
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
-    // Parse the account first so we don't generate a key if there's an error
+    // Parse the arguments first so we don't generate a key if there's an error. The first slot is the
+    // address type (beta2 item 10: getnewaddress pq, as yed_getnewaddress takes its type first) or the old
+    // account placeholder, which AccountFromValue accepts only as "": a type name was never a valid account,
+    // so no call that worked before changes meaning.
     string strAccount;
-    if (params.size() > 0)
-        strAccount = AccountFromValue(params[0]);
-
-    const std::string type = params.size() > 1 && !params[1].isNull() ? params[1].get_str() : "p2pkh";
+    std::string type = "p2pkh";
+    if (params.size() > 0 && params[0].isStr() &&
+        (params[0].get_str() == "p2pkh" || params[0].get_str() == "pq" || params[0].get_str() == "pqslh")) {
+        if (params.size() > 1 && !params[1].isNull())
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "the address type is given first, so there is no second argument (getnewaddress pq, or getnewaddress \"\" pq)");
+        type = params[0].get_str();
+    } else {
+        // A first string that is neither "" nor a type name: the old refusal, naming the valid types (a type
+        // name in another case, "PQ", lands here too).
+        if (params.size() > 0 && params[0].isStr() && !params[0].get_str().empty())
+            throw JSONRPCError(RPC_WALLET_ACCOUNTS_UNSUPPORTED, "Accounts are unsupported; the first argument is the address type, \"p2pkh\", \"pq\" or \"pqslh\" (lower case), or \"\" followed by the type");
+        if (params.size() > 0)
+            strAccount = AccountFromValue(params[0]);
+        if (params.size() > 1 && !params[1].isNull())
+            type = params[1].get_str();
+    }
     if (type == "pq" || type == "pqslh") {
         // A plain-YEC post-quantum address (D-Q-20): the TX_PQPKH key a PQ YED address names, from the PQ key
         // chain (DerivePQSeed). Scheme by the holder policy (quantum spec A-13): Falcon once active, else SLH-DSA.
@@ -1226,6 +1272,130 @@ UniValue addmultisigaddress(const UniValue& params, bool fHelp)
 }
 
 
+// ---------------------------------------------------------------------------------------------------------------
+// Balances and listings by address type (beta2 item 15, address plan W1.5/W2): helpers shared by getwalletinfo,
+// z_gettotalbalance, z_getbalance and listreceivedbyaddress. Every post-quantum figure is the TX_PQPKH share of the
+// existing transparent figure next to it, counted by the same rule; the ECC figure is the rest (P2PKH, P2SH),
+// computed as transparent minus post-quantum so the two always add up to the existing field.
+// ---------------------------------------------------------------------------------------------------------------
+
+//! The schemes a balance split reports, always both and in this order (an unused scheme shows zero).
+static const uint8_t PQ_BALANCE_SCHEMES[] = {pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512};
+
+std::string PQSchemeName(uint8_t scheme)
+{
+    switch (scheme) {
+        case pq::SCHEME_SLH_DSA_SHA2_128S: return "SLH-DSA-SHA2-128s";
+        case pq::SCHEME_FN_DSA_512:        return "FN-DSA-512";
+        default:                           return "unknown";
+    }
+}
+
+//! The post-quantum scheme of a TX_PQPKH output script, or nullopt for any other script. The template is checked
+//! by its bytes, as script/standard.cpp MatchPayToPQKeyHash checks it (quantum spec §2.1: 0x20 <keyHash:32>
+//! OP_1|OP_2 OP_CHECKPQSIG, 35 bytes), so the balance calls pay a byte compare per output, not a Solver call.
+static std::optional<uint8_t> PQSchemeOfScript(const CScript& s)
+{
+    if (s.size() == 35 && s[0] == 32 && (s[33] == OP_1 || s[33] == OP_2) && s[34] == OP_CHECKPQSIG)
+        return (uint8_t)CScript::DecodeOP_N((opcodetype)s[33]);
+    return std::nullopt;
+}
+
+//! Post-quantum amounts by scheme (index = scheme byte).
+struct PQAmounts {
+    CAmount byScheme[3] = {0, 0, 0};
+    void Add(uint8_t scheme, CAmount v) { if (scheme < 3) byScheme[scheme] += v; }
+    CAmount Total() const { return byScheme[1] + byScheme[2]; }
+};
+
+//! getBalanceTaddr("", minDepth, ignoreUnspendable) and its post-quantum part, in its one AvailableCoins pass
+//! (unspent, not locked by lockunspent, mature, depth >= minDepth; watch-only too unless ignoreUnspendable).
+struct TransparentSplit {
+    CAmount total = 0;
+    PQAmounts pq;
+};
+static TransparentSplit AvailableTransparentSplit(int minDepth, bool ignoreUnspendable)
+{
+    TransparentSplit r;
+    std::vector<COutput> vecOutputs;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    pwalletMain->AvailableCoins(vecOutputs, false, NULL, true);
+    for (const COutput& out : vecOutputs) {
+        if (out.nDepth < minDepth) continue;
+        if (ignoreUnspendable && !out.fSpendable) continue;
+        const CTxOut& txout = out.tx->vout[out.i];
+        r.total += txout.nValue;
+        if (auto scheme = PQSchemeOfScript(txout.scriptPubKey)) r.pq.Add(*scheme, txout.nValue);
+    }
+    return r;
+}
+
+//! CWallet::GetBalance() and CWallet::GetUnconfirmedBalance(), with their post-quantum parts, in one pass over
+//! mapWallet (the two functions make one pass each). Same rules: balance = the cached available credit of every
+//! trusted transaction; unconfirmed = that of every non-final one, or of depth 0 and not trusted. Only a
+//! transaction with a nonzero available credit has its outputs looked at for TX_PQPKH (unspent, ISMINE_SPENDABLE,
+//! as CWalletTx::GetAvailableCredit counts them).
+struct WalletBalanceSplit {
+    CAmount balance = 0, unconfirmed = 0;
+    PQAmounts pqBalance, pqUnconfirmed;
+};
+static WalletBalanceSplit GetWalletBalanceSplit()
+{
+    WalletBalanceSplit r;
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    for (const std::pair<const uint256, CWalletTx>& item : pwalletMain->mapWallet) {
+        const CWalletTx& wtx = item.second;
+        const bool trusted = wtx.IsTrusted();
+        const bool unconfirmed = !CheckFinalTx(wtx) || (!trusted && wtx.GetDepthInMainChain() == 0);
+        if (!trusted && !unconfirmed) continue;
+        // Review m6: both parts in ONE fresh pass (the credit uncached, as the PQ part always was), so the ECC/PQ split
+        // and balance agree whatever the transaction's credit cache says; the cost is that of the PQ loop already here.
+        const CAmount credit = wtx.GetAvailableCredit(false);
+        PQAmounts pqTx;
+        if (credit != 0) {
+            for (unsigned int i = 0; i < wtx.vout.size(); i++) {
+                const CTxOut& txout = wtx.vout[i];
+                auto scheme = PQSchemeOfScript(txout.scriptPubKey);
+                if (!scheme || pwalletMain->IsSpent(item.first, i)) continue;
+                pqTx.Add(*scheme, pwalletMain->GetCredit(txout, ISMINE_SPENDABLE));
+            }
+        }
+        if (trusted) r.balance += credit; else r.unconfirmed += credit;
+        PQAmounts& pq = trusted ? r.pqBalance : r.pqUnconfirmed;
+        for (uint8_t scheme : {1, 2}) pq.Add(scheme, pqTx.byScheme[scheme]);
+    }
+    return r;
+}
+
+//! Adds "pqscheme" (number) and "pqschemename" to an object that names a post-quantum address.
+static void PushPQScheme(UniValue& obj, uint8_t scheme)
+{
+    obj.pushKV("pqscheme", (int)scheme);
+    obj.pushKV("pqschemename", PQSchemeName(scheme));
+}
+
+std::set<CScript> YedHolderScripts()
+{
+    std::set<CScript> out;
+    yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
+    if (!yw || !yw->Index()) return out;
+    // Review m3: the wallet's own Yellowback-locked outpoints, each looked up in the index, so the cost follows the
+    // wallet's tokens rather than every token on the network. A token whose lock was removed (yed_unlockcoin) is not
+    // marked until the next reconciliation locks it again.
+    const std::set<COutPoint> locked = yw->Locked();
+    LOCK(yw->Wallet()->cs_wallet);          // lock order (N25): cs_wallet before cs_yellowback
+    LOCK(yw->Index()->cs_yellowback);
+    if (!yw->Index()->IsHealthy()) return out;
+    yellowback::State st(yw->Index()->View());
+    for (const COutPoint& o : locked) {
+        std::optional<yellowback::TokenRecord> t = st.GetToken(o);
+        if (t.has_value() && yw->IsMineScript(t->scriptPubKey)) out.insert(t->scriptPubKey);
+    }
+    return out;
+}
+
+// ------------------------------------------- end of the by-type helpers -------------------------------------------
+
 struct tallyitem
 {
     CAmount nAmount;
@@ -1293,9 +1463,19 @@ UniValue ListReceived(const UniValue& params, bool fByAccounts)
     // Reply
     UniValue ret(UniValue::VARR);
     std::map<std::string, tallyitem> mapAccountTally;
-    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook) {
+    const std::set<CScript> yedHolders = YedHolderScripts();
+    // The address book, plus (beta2 item 15) every post-quantum key of this wallet that received coins without an
+    // address-book entry: a wallet restored from its seed (-hdseedfile) finds its PQ keys by rescan but does not
+    // file them, and they must still be listed. They go under the default account "".
+    std::vector<std::pair<CTxDestination, std::string>> listed;
+    for (const std::pair<CTxDestination, CAddressBookData>& item : pwalletMain->mapAddressBook)
+        listed.emplace_back(item.first, item.second.name);
+    for (const std::pair<CTxDestination, tallyitem>& t : mapTally)
+        if (std::get_if<CPQKeyID>(&t.first) && !pwalletMain->mapAddressBook.count(t.first))
+            listed.emplace_back(t.first, std::string());
+    for (const std::pair<CTxDestination, std::string>& item : listed) {
         const CTxDestination& dest = item.first;
-        const std::string& strAccount = item.second.name;
+        const std::string& strAccount = item.second;
         std::map<CTxDestination, tallyitem>::iterator it = mapTally.find(dest);
         if (it == mapTally.end() && !fIncludeEmpty)
             continue;
@@ -1327,6 +1507,10 @@ UniValue ListReceived(const UniValue& params, bool fByAccounts)
             obj.pushKV("amount",        ValueFromAmount(nAmount));
             obj.pushKV("amountZat",     nAmount);
             obj.pushKV("confirmations", (nConf == std::numeric_limits<int>::max() ? 0 : nConf));
+            if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest))
+                PushPQScheme(obj, pq->scheme);    // beta2 item 15: a post-quantum address shows its scheme
+            if (yedHolders.count(GetScriptForDestination(dest)))
+                obj.pushKV("yed_holder", true);   // beta2: a YED holder key (the Yellowback index holds a token of this wallet at it)
             UniValue transactions(UniValue::VARR);
             if (it != mapTally.end())
             {
@@ -1383,12 +1567,22 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "    \"amount\" : x.xxx,                  (numeric) The total amount in " + CURRENCY_UNIT + " received by the address\n"
             "    \"amountZat\" : xxxx                 (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
             "    \"confirmations\" : n                (numeric) The number of confirmations of the most recent transaction included\n"
+            "    \"pqscheme\" : n,                    (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "    \"yed_holder\" : true,               (boolean) Where Yellowback is live, present only on a YED holder key: the Yellowback index holds a\n"
+            "                                         YED token of this wallet at this address (its token outputs are locked; see yed_listunspent)\n"
+            "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "    \"txids\" : [\"txid\", ...]            (array) The transactions that paid the address\n"
             "  }\n"
             "  ,...\n"
             "]\n"
+            "\nWith includeempty, this lists every transparent address of the wallet's address book, ECC and post-quantum,\n"
+            "and always every post-quantum address of the wallet that received coins (a seed restore does not file those)\n"
+            "(getnewaddress, getnewaddress \"\" \"pq\" / \"pqslh\"); z_listaddresses lists the shielded ones. amount is what an address\n"
+            "received; z_getbalance gives what it holds now.\n"
 
             "\nExamples:\n"
             + HelpExampleCli("listreceivedbyaddress", "")
+            + HelpExampleCli("listreceivedbyaddress", "0 true")
             + HelpExampleCli("listreceivedbyaddress", "6 true")
             + HelpExampleRpc("listreceivedbyaddress", "6, true, true")
         );
@@ -2426,6 +2620,19 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"balance\": xxxxxxx,         (numeric) the total confirmed transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"unconfirmed_balance\": xxx, (numeric) the total unconfirmed transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"immature_balance\": xxxxxx, (numeric) the total immature transparent balance of the wallet in " + CURRENCY_UNIT + "\n"
+            "  \"balance_ecc\": xxxxxxx,     (numeric) balance minus balance_pq: every coin of balance that is not post-quantum\n"
+            "                             (P2PKH, P2PK, P2SH)\n"
+            "  \"balance_pq\": xxxxxxx,      (numeric) the part of balance held by post-quantum addresses (TX_PQPKH)\n"
+            "  \"unconfirmed_balance_ecc\": xxx, (numeric) unconfirmed_balance minus unconfirmed_balance_pq\n"
+            "  \"unconfirmed_balance_pq\": xxx,  (numeric) the part of unconfirmed_balance held by post-quantum addresses\n"
+            "  \"pq_by_scheme\": [           (array) balance_pq and unconfirmed_balance_pq by scheme, both schemes always\n"
+            "    {\n"
+            "      \"pqscheme\": n,              (numeric) 1 or 2\n"
+            "      \"pqschemename\": \"name\",     (string) \"SLH-DSA-SHA2-128s\" (1) or \"FN-DSA-512\" (2)\n"
+            "      \"balance_pq\": xxx,          (numeric) this scheme's part of balance_pq\n"
+            "      \"unconfirmed_balance_pq\": xxx (numeric) this scheme's part of unconfirmed_balance_pq\n"
+            "    }, ...\n"
+            "  ],\n"
             "  \"shielded_balance\": xxxxxxx,  (numeric) the total confirmed shielded balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"shielded_unconfirmed_balance\": xxx, (numeric) the total unconfirmed shielded balance of the wallet in " + CURRENCY_UNIT + "\n"
             "  \"txcount\": xxxxxxx,         (numeric) the total number of transactions in the wallet\n"
@@ -2435,6 +2642,10 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"paytxfee\": x.xxxx,         (numeric) the transaction fee configuration, set in " + CURRENCY_UNIT + "/kB\n"
             "  \"seedfp\": \"uint256\",        (string) the BLAKE2b-256 hash of the HD seed\n"
             "}\n"
+            "\nbalance counts confirmed coins and this wallet's own unconfirmed outputs (a transaction whose every input\n"
+            "is this wallet's, such as change); unconfirmed_balance counts the other unconfirmed outputs (payments from\n"
+            "others). Post-quantum coins are transparent: balance = balance_ecc + balance_pq and\n"
+            "unconfirmed_balance = unconfirmed_balance_ecc + unconfirmed_balance_pq, by the same rule.\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
             + HelpExampleRpc("getwalletinfo", "")
@@ -2444,9 +2655,30 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("walletversion", pwalletMain->GetVersion());
-    obj.pushKV("balance",       ValueFromAmount(pwalletMain->GetBalance()));
-    obj.pushKV("unconfirmed_balance", ValueFromAmount(pwalletMain->GetUnconfirmedBalance()));
+    const WalletBalanceSplit split = GetWalletBalanceSplit();   // = GetBalance(), GetUnconfirmedBalance(), one pass
+    const CAmount nBalance = split.balance;
+    const CAmount nUnconfirmed = split.unconfirmed;
+    obj.pushKV("balance",       ValueFromAmount(nBalance));
+    obj.pushKV("unconfirmed_balance", ValueFromAmount(nUnconfirmed));
     obj.pushKV("immature_balance",    ValueFromAmount(pwalletMain->GetImmatureBalance()));
+    {
+        // The split by address type (beta2 item 15): ECC = the existing figure minus its post-quantum part.
+        const PQAmounts& pqBal = split.pqBalance;
+        const PQAmounts& pqUnc = split.pqUnconfirmed;
+        obj.pushKV("balance_ecc", ValueFromAmount(nBalance - pqBal.Total()));
+        obj.pushKV("balance_pq", ValueFromAmount(pqBal.Total()));
+        obj.pushKV("unconfirmed_balance_ecc", ValueFromAmount(nUnconfirmed - pqUnc.Total()));
+        obj.pushKV("unconfirmed_balance_pq", ValueFromAmount(pqUnc.Total()));
+        UniValue byScheme(UniValue::VARR);
+        for (uint8_t scheme : PQ_BALANCE_SCHEMES) {
+            UniValue s(UniValue::VOBJ);
+            PushPQScheme(s, scheme);
+            s.pushKV("balance_pq", ValueFromAmount(pqBal.byScheme[scheme]));
+            s.pushKV("unconfirmed_balance_pq", ValueFromAmount(pqUnc.byScheme[scheme]));
+            byScheme.push_back(s);
+        }
+        obj.pushKV("pq_by_scheme", byScheme);
+    }
     obj.pushKV("shielded_balance",    FormatMoney(getBalanceZaddr("", 1, INT_MAX)));
     obj.pushKV("shielded_unconfirmed_balance", FormatMoney(getBalanceZaddr("", 0, 0)));
     obj.pushKV("txcount",       (int)pwalletMain->mapWallet.size());
@@ -3628,8 +3860,12 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
             "\nCAUTION: If the wallet has only an incoming viewing key for this address, then spends cannot be"
             "\ndetected, and so the returned balance may be larger than the actual balance.\n"
             "\nArguments:\n"
-            "1. \"address\"      (string) The selected address. It may be a transparent or private address.\n"
-            "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times.\n"
+            "1. \"address\"      (string) The selected address. It may be a transparent address (ECC, or post-quantum of\n"
+            "                   either scheme) or a private address of this wallet. An address the wallet does not hold is refused:\n"
+            "                   transparent or post-quantum (no key and no watch-only script), or shielded (no spending or viewing\n"
+            "                   key). A watch-only transparent address answers.\n"
+            "2. minconf          (numeric, optional, default=1) Only include transactions confirmed at least this many times\n"
+            "                   (as z_gettotalbalance: unconfirmed own change is left out at 1 and counted at 0).\n"
             "3. inZat            (bool, optional, default=false) Get the result amount in " + MINOR_CURRENCY_UNIT + " (as an integer).\n"
             "\nResult:\n"
             "amount              (numeric) The total amount in " + CURRENCY_UNIT + "(or " + MINOR_CURRENCY_UNIT + " if inZat is true) received at this address.\n"
@@ -3668,6 +3904,12 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
         }
     }
 
+    // Beta2 (the lead architect, 2026-11-11): a transparent or post-quantum address this wallet does not hold is
+    // refused, as a shielded one is; v4.5.0 answered 0 for it. A watch-only one still answers.
+    if (fromTaddr && IsMine(*pwalletMain, GetScriptForDestination(taddr)) == ISMINE_NO) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, transparent or post-quantum key or watch-only script not found.");
+    }
+
     CAmount nBalance = 0;
     if (fromTaddr) {
         nBalance = getBalanceTaddr(fromaddress, nMinDepth, false);
@@ -3704,7 +3946,23 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
             "  \"transparent\": xxxxx,     (numeric) the total balance of transparent funds\n"
             "  \"private\": xxxxx,         (numeric) the total balance of shielded funds (in both Sprout and Sapling addresses)\n"
             "  \"total\": xxxxx,           (numeric) the total balance of both transparent and shielded funds\n"
+            "  \"transparent_ecc\": xxxxx, (numeric) transparent minus transparent_pq: every output of transparent that is not\n"
+            "                             post-quantum (P2PKH, P2PK, P2SH; with includeWatchonly any other watched script)\n"
+            "  \"transparent_pq\": xxxxx,  (numeric) the part of transparent held by post-quantum addresses (TX_PQPKH)\n"
+            "  \"pq_by_scheme\": [         (array) transparent_pq by scheme, both schemes always\n"
+            "    {\n"
+            "      \"pqscheme\": n,            (numeric) 1 or 2\n"
+            "      \"pqschemename\": \"name\",   (string) \"SLH-DSA-SHA2-128s\" (1) or \"FN-DSA-512\" (2)\n"
+            "      \"transparent_pq\": xxxxx   (numeric) this scheme's part of transparent_pq\n"
+            "    }, ...\n"
+            "  ]\n"
             "}\n"
+            "\nEvery figure counts an output by its confirmations alone: at minconf 1 (the default) an unconfirmed output\n"
+            "is left out even when it is this wallet's own change (getwalletinfo's balance counts that); minconf 0 counts\n"
+            "every unconfirmed output. Coins locked with lockunspent and immature coinbase are left out; includeWatchonly\n"
+            "adds watch-only coins (getwalletinfo counts locked coins and never watch-only ones). Post-quantum coins are\n"
+            "transparent: transparent = transparent_ecc + transparent_pq, each split counted by the same rule.\n"
+            "The amounts are strings, as transparent, private and total are.\n"
             "\nExamples:\n"
             "\nThe total amount in the wallet\n"
             + HelpExampleCli("z_gettotalbalance", "") +
@@ -3733,13 +3991,26 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     // but they don't because wtx.GetAmounts() does not handle tx where there are no outputs
     // pwalletMain->GetBalance() does not accept min depth parameter
     // so we use our own method to get balance of utxos.
-    CAmount nBalance = getBalanceTaddr("", nMinDepth, !fIncludeWatchonly);
+    const TransparentSplit tsplit = AvailableTransparentSplit(nMinDepth, !fIncludeWatchonly);   // = getBalanceTaddr("")
+    CAmount nBalance = tsplit.total;
     CAmount nPrivateBalance = getBalanceZaddr("", nMinDepth, INT_MAX, !fIncludeWatchonly);
     CAmount nTotalBalance = nBalance + nPrivateBalance;
     UniValue result(UniValue::VOBJ);
     result.pushKV("transparent", FormatMoney(nBalance));
     result.pushKV("private", FormatMoney(nPrivateBalance));
     result.pushKV("total", FormatMoney(nTotalBalance));
+    // The split by address type (beta2 item 15), by the rule transparent follows: ECC = transparent minus its PQ part.
+    const PQAmounts& pqBal = tsplit.pq;
+    result.pushKV("transparent_ecc", FormatMoney(nBalance - pqBal.Total()));
+    result.pushKV("transparent_pq", FormatMoney(pqBal.Total()));
+    UniValue byScheme(UniValue::VARR);
+    for (uint8_t scheme : PQ_BALANCE_SCHEMES) {
+        UniValue s(UniValue::VOBJ);
+        PushPQScheme(s, scheme);
+        s.pushKV("transparent_pq", FormatMoney(pqBal.byScheme[scheme]));
+        byScheme.push_back(s);
+    }
+    result.pushKV("pq_by_scheme", byScheme);
     return result;
 }
 
@@ -4101,18 +4372,20 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
             "\nChange generated from one or more transparent addresses flows to a new transparent"
             "\naddress, while change generated from a shielded address returns to itself."
+            "\nA post-quantum from address spends its own coins and its change returns to itself; the fee of"
+            "\nsuch a send is priced on its size (the default is raised to it, an explicit fee below it is refused)."
             "\nWhen sending coinbase UTXOs to a shielded address, change is not allowed."
             "\nThe entire value of the UTXO(s) must be consumed."
             + strprintf("\nBefore Sapling activates, the maximum number of zaddr outputs is %d due to transaction size limits.\n", Z_SENDMANY_MAX_ZADDR_OUTPUTS_BEFORE_SAPLING)
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
-            "1. \"fromaddress\"         (string, required) The transparent or shielded address to send the funds from.\n"
+            "1. \"fromaddress\"         (string, required) The transparent (ECC or post-quantum) or shielded address to send the funds from.\n"
             "                           The following special strings are also accepted:\n"
-            "                               - \"ANY_TADDR\": Select non-coinbase UTXOs from any transparent addresses belonging to the wallet.\n"
+            "                               - \"ANY_TADDR\": Select non-coinbase UTXOs from any ECC transparent addresses belonging to the wallet.\n"
             "                                              Use z_shieldcoinbase to shield coinbase UTXOs from multiple transparent addresses.\n"
             "2. \"amounts\"             (array, required) An array of json objects representing the amounts to send.\n"
             "    [{\n"
-            "      \"address\":address  (string, required) The address is a taddr or zaddr\n"
+            "      \"address\":address  (string, required) The address is a taddr (ECC or post-quantum) or zaddr\n"
             "      \"amount\":amount    (numeric, required) The numeric amount in " + CURRENCY_UNIT + " is the value\n"
             "      \"memo\":memo        (string, optional) If the address is a zaddr, raw data represented in hexadecimal string format\n"
             "    }, ... ]\n"
@@ -4141,10 +4414,8 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     } else {
         CTxDestination taddr = keyIO.DecodeDestination(fromaddress);
         fromTaddr = IsValidDestination(taddr);
-        if (IsPQKeyDestination(taddr)) {
-            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_sendmany cannot spend from a post-quantum address; use sendtoaddress or sendmany");
-        }
+        // A post-quantum from address spends its own TX_PQPKH coins (beta2 D-2; reverses quantum spec A-15).
+        EnsurePQSourceSpendable(taddr);
         if (!fromTaddr) {
             auto res = keyIO.DecodePaymentAddress(fromaddress);
             if (!IsValidPaymentAddress(res)) {
@@ -4259,6 +4530,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
         CAmount nAmount = AmountFromValue( av );
         if (nAmount < 0)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amount must be positive");
+        if (!isZaddr) EnsurePQAmountNotDust(taddr, nAmount);
 
         if (isZaddr) {
             zaddrRecipients.push_back( SendManyRecipient(address, nAmount, memo) );
@@ -4316,7 +4588,8 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     CTransaction tx(mtx);
     txsize += GetSerializeSize(tx, SER_NETWORK, tx.nVersion);
     if (fromTaddr) {
-        txsize += CTXIN_SPEND_DUST_SIZE;
+        const CTxDestination fromDest = keyIO.DecodeDestination(fromaddress);
+        txsize += IsPQKeyDestination(fromDest) ? PQSpendInputSize(std::get<CPQKeyID>(fromDest).scheme) : CTXIN_SPEND_DUST_SIZE;
         txsize += CTXOUT_REGULAR_SIZE;      // There will probably be taddr change
     }
     txsize += CTXOUT_REGULAR_SIZE * taddrRecipients.size();
@@ -4367,6 +4640,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the sum of outputs %s and also greater than the default fee", FormatMoney(nFee), FormatMoney(nTotalOut)));
             }
 	}
+        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
+        // than build, sign and fail at the commit.
+        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
     }
 
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
@@ -4402,7 +4678,7 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
 
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
-    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo) );
+    std::shared_ptr<AsyncRPCOperation> operation( new AsyncRPCOperation_sendmany(builder, contextualTx, fromaddress, taddrRecipients, zaddrRecipients, nMinDepth, nFee, contextInfo, params.size() > 3) );
     q->addOperation(operation);
     AsyncRPCOperationId operationId = operation->getId();
     return operationId;
@@ -4791,22 +5067,25 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             "\nparameter is set to zero will mean limit the number of UTXOs based on the size of the transaction.  Any limit is"
             "\nconstrained by the consensus rule defining a maximum transaction size of "
             + strprintf("%d bytes before Sapling, and %d", MAX_TX_SIZE_BEFORE_SAPLING, MAX_TX_SIZE_AFTER_SAPLING)
-            + "\nbytes once Sapling activates."
+            + "\nbytes once Sapling activates. A post-quantum address merges its own coins (at most "
+            + strprintf("%d", MAX_PQ_INPUTS_PER_TX) + " per transaction, within the"
+            + "\nstandard signature-operation limit); the fee of such a merge is priced on its size (the default is raised to it,"
+            + "\nan explicit fee below it is refused)."
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. fromaddresses         (array, required) A JSON array with addresses.\n"
             "                         The following special strings are accepted inside the array:\n"
-            "                             - \"ANY_TADDR\":   Merge UTXOs from any taddrs belonging to the wallet.\n"
+            "                             - \"ANY_TADDR\":   Merge UTXOs from any ECC taddrs belonging to the wallet (not post-quantum ones).\n"
             "                             - \"ANY_SPROUT\":  Merge notes from any Sprout zaddrs belonging to the wallet.\n"
             "                             - \"ANY_SAPLING\": Merge notes from any Sapling zaddrs belonging to the wallet.\n"
             "                         While it is possible to use a variety of different combinations of addresses and the above values,\n"
             "                         it is not possible to send funds from both sprout and sapling addresses simultaneously. If a special\n"
             "                         string is given, any given addresses of that type will be counted as duplicates and cause an error.\n"
             "    [\n"
-            "      \"address\"          (string) Can be a taddr or a zaddr\n"
+            "      \"address\"          (string) Can be a taddr (ECC or post-quantum) or a zaddr\n"
             "      ,...\n"
             "    ]\n"
-            "2. \"toaddress\"           (string, required) The taddr or zaddr to send the funds to.\n"
+            "2. \"toaddress\"           (string, required) The taddr (ECC or post-quantum) or zaddr to send the funds to.\n"
             "3. fee                   (numeric, optional, default="
             + strprintf("%s", FormatMoney(DEFAULT_FEE)) + ") The fee amount to attach to this transaction.\n"
             "4. transparent_limit     (numeric, optional, default="
@@ -4868,10 +5147,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             isFromNonSprout = true;
         } else {
             CTxDestination taddr = keyIO.DecodeDestination(address);
-            if (IsPQKeyDestination(taddr)) {
-                // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_mergetoaddress cannot spend from a post-quantum address; use sendtoaddress or sendmany");
-            }
+            // A post-quantum source spends its own TX_PQPKH coins (beta2 D-6; reverses quantum spec A-15).
+            EnsurePQSourceSpendable(taddr);
             if (IsValidDestination(taddr)) {
                 taddrs.insert(taddr);
                 isFromNonSprout = true;
@@ -4999,10 +5276,30 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
         estimatedTxSize += OUTPUTDESCRIPTION_SIZE;
     }
 
+    // Post-quantum inputs (beta2 D-6): at most MAX_PQ_INPUTS_PER_TX of them, and the policy sigops of the selected
+    // inputs (pq::SIGOP_COST per OP_CHECKPQSIG, a P2SH input's redeem-script sigops) within MAX_STANDARD_TX_SIGOPS,
+    // one left for the destination output's script. A coin past either limit stays for a later merge.
+    size_t numPQUtxos = 0;
+    unsigned int selectedSigOps = 1;
+
+    std::string yedRefusal;
     if (useAnyUTXO || taddrs.size() > 0) {
         // Get available utxos
         vector<COutput> vecOutputs;
         pwalletMain->AvailableCoins(vecOutputs, true, NULL, false, false);
+        // The Yellowback second check (review m2, audit L-ii): a YED token, vault or carrier whose coin lock was removed
+        // is never merged as plain YEC; the merge goes on with the other coins and is refused, naming them, only if
+        // nothing else is left to merge. A merge naming a post-quantum address is refused outright while the
+        // Yellowback index is unhealthy (as z_sendmany from one).
+        bool namesPQ = false;
+        for (const CTxDestination& d : taddrs) namesPQ = namesPQ || IsPQKeyDestination(d);
+        // only the coins this merge could take are judged (a PQ coin only from its named address)
+        vecOutputs.erase(std::remove_if(vecOutputs.begin(), vecOutputs.end(), [&](const COutput& out) {
+            CTxDestination a;
+            if (!out.fSpendable || !ExtractDestination(out.tx->vout[out.i].scriptPubKey, a)) return true;
+            return (IsPQKeyDestination(a) || taddrs.size() > 0) && !taddrs.count(a);
+        }), vecOutputs.end());
+        yedRefusal = DropYellowbackCoins(vecOutputs, namesPQ);
 
         // Find unspent utxos and update estimated size
         for (const COutput& out : vecOutputs) {
@@ -5016,8 +5313,14 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             if (!ExtractDestination(scriptPubKey, address)) {
                 continue;
             }
-            // z_mergetoaddress never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
-            if (IsPQKeyDestination(address)) {
+            // A TX_PQPKH coin is merged only from its named post-quantum address (beta2 D-6); ANY_TADDR
+            // merges ECC (P2PKH) coins only.
+            const bool isPQ = IsPQKeyDestination(address);
+            if (isPQ && !taddrs.count(address)) {
+                continue;
+            }
+            // Audit A-M2: a post-quantum coin worth no more than the fee its own input adds is not merged.
+            if (isPQ && out.tx->vout[out.i].nValue <= PQInputMarginalFee(std::get<CPQKeyID>(address).scheme)) {
                 continue;
             }
             // If taddr is not wildcard "*", filter utxos
@@ -5029,9 +5332,19 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
             CAmount nValue = out.tx->vout[out.i].nValue;
 
             if (!maxedOutUTXOsFlag) {
-                size_t increase = (std::get_if<CScriptID>(&address) != nullptr) ? CTXIN_SPEND_P2SH_SIZE : CTXIN_SPEND_DUST_SIZE;
+                size_t increase = isPQ ? PQSpendInputSize(std::get<CPQKeyID>(address).scheme) :
+                                  (std::get_if<CScriptID>(&address) != nullptr) ? CTXIN_SPEND_P2SH_SIZE : CTXIN_SPEND_DUST_SIZE;
+                unsigned int sigops = 0;
+                if (isPQ) {
+                    sigops = GetPQSigOpCount(scriptPubKey);
+                } else if (const CScriptID* sid = std::get_if<CScriptID>(&address)) {
+                    CScript redeem;
+                    sigops = pwalletMain->GetCScript(*sid, redeem) ? redeem.GetSigOpCount(true) : MAX_P2SH_SIGOPS;
+                }
                 if (estimatedTxSize + increase >= max_tx_size ||
-                    (mempoolLimit > 0 && utxoCounter > mempoolLimit))
+                    (mempoolLimit > 0 && utxoCounter > mempoolLimit) ||
+                    (isPQ && numPQUtxos >= MAX_PQ_INPUTS_PER_TX) ||
+                    selectedSigOps + sigops > MAX_STANDARD_TX_SIGOPS)
                 {
                     maxedOutUTXOsFlag = true;
                 } else {
@@ -5039,6 +5352,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
                     COutPoint utxo(out.tx->GetHash(), out.i);
                     utxoInputs.emplace_back(utxo, nValue, scriptPubKey);
                     mergedUTXOValue += nValue;
+                    selectedSigOps += sigops;
+                    if (isPQ) numPQUtxos++;
                 }
             }
 
@@ -5137,6 +5452,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     size_t numNotes = sproutNoteInputs.size() + saplingNoteInputs.size();
 
     if (numUtxos == 0 && numNotes == 0) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any funds to merge.");
     }
 
@@ -5149,6 +5465,36 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     }
 
     CAmount mergedValue = mergedUTXOValue + mergedNoteValue;
+
+    // A merge with post-quantum inputs pays the fee rule of a PQ spend on its real size (beta2 D-6): the default
+    // fee is raised to it, an explicit fee below it is refused.
+    if (numPQUtxos > 0) {
+        // The TransactionBuilder signs the PQ inputs after Build(); it has no Sprout path for them.
+        if (!sproutNoteInputs.empty() || isToSproutZaddr) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Post-quantum coins cannot be merged with Sprout notes or into a Sprout address");
+        }
+        std::vector<std::pair<CScript, CAmount>> shapeIns;
+        std::vector<CScript> prevScripts;
+        for (const MergeToAddressInputUTXO& t : utxoInputs) {
+            shapeIns.emplace_back(std::get<2>(t), std::get<1>(t));
+            prevScripts.push_back(std::get<2>(t));
+        }
+        std::vector<CTxOut> shapeOuts;
+        if (IsValidDestination(taddr)) shapeOuts.emplace_back(mergedValue, GetScriptForDestination(taddr));
+        const CTransaction shape = PQFeeShape(nextBlockHeight, shapeIns, shapeOuts, saplingNoteInputs.size(), isToSaplingZaddr ? 1 : 0);
+        EnsurePQShapeStandard(shape, prevScripts, numPQUtxos);
+        if (params.size() > 2) EnsurePQFeeWithinCap(nFee);   // beta2 (audit H1): never build what the commit refuses
+        const CAmount needed = PQBuilderFee(nFee, shape);
+        if (needed > nFee) {
+            if (params.size() > 2) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                    "Fee %s is below the %s this post-quantum spend needs", FormatMoney(nFee), FormatMoney(needed)));
+            }
+            nFee = needed;
+        }
+        EnsurePQFeeWithinCap(nFee);   // review L-1: the computed fee too, before anything is built or signed
+    }
+
     if (mergedValue < nFee) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
             strprintf("Insufficient funds, have %s, which is less than miners fee %s",
@@ -5160,6 +5506,7 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
     if (nFee > netAmount) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the net amount to be shielded %s", FormatMoney(nFee), FormatMoney(netAmount)));
     }
+    EnsurePQAmountNotDust(taddr, netAmount);
 
     // Keep record of parameters in context object
     UniValue contextInfo(UniValue::VOBJ);
@@ -5187,7 +5534,8 @@ UniValue z_mergetoaddress(const UniValue& params, bool fHelp)
 
     // Builder (used if Sapling addresses are involved)
     std::optional<TransactionBuilder> builder;
-    if (isToSaplingZaddr || saplingNoteInputs.size() > 0) {
+    // (and if any input is post-quantum: the builder path signs it after Build(), beta2 D-6)
+    if (isToSaplingZaddr || saplingNoteInputs.size() > 0 || numPQUtxos > 0) {
         builder = TransactionBuilder(Params().GetConsensus(), nextBlockHeight, pwalletMain);
     }
     // Create operation and add to global queue

@@ -455,18 +455,10 @@ namespace {
 /** At most this many Sapling notes in one mint (one spend proof each, seconds apiece). */
 const size_t MAX_SAPLING_SPENDS = 20;
 
-/** A funding source or collateral destination given as an address string (§4.6). */
-struct AddressChoice
-{
-    enum Kind { NONE, TRANSPARENT_ADDR, SAPLING } kind;
-    CKeyID keyId;                                   //!< TRANSPARENT_ADDR
-    libzcash::SaplingPaymentAddress sapling;        //!< SAPLING
-    std::string text;
-    AddressChoice() : kind(NONE) {}
-};
+} // namespace
 
-/** Parse "" / s1… / ys1…; anything else (a Yellowback yb… address, a Sprout zc… address) is refused. */
-AddressChoice ParseAddressChoice(const std::string& s, const char* what)
+/** "" / s1… / ys1… (and, with allowPQ, a plain-YEC post-quantum address); anything else is refused (txbuilder.h). */
+AddressChoice ParseAddressChoice(const std::string& s, const char* what, bool allowPQ)
 {
     AddressChoice c;
     c.text = s;
@@ -478,6 +470,13 @@ AddressChoice ParseAddressChoice(const std::string& s, const char* what)
         c.keyId = *id;
         return c;
     }
+    if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest)) {
+        if (allowPQ) {
+            c.kind = AddressChoice::PQ_ADDR;
+            c.pqKeyId = *pq;
+            return c;
+        }
+    }
     if (keyIO.IsValidPaymentAddressString(s)) {
         libzcash::PaymentAddress pa = keyIO.DecodePaymentAddress(s);
         if (const libzcash::SaplingPaymentAddress* sa = std::get_if<libzcash::SaplingPaymentAddress>(&pa)) {
@@ -485,10 +484,57 @@ AddressChoice ParseAddressChoice(const std::string& s, const char* what)
             c.sapling = *sa;
             return c;
         }
+        if (allowPQ) throw std::runtime_error(std::string("bad-address: ") + what + ": Sprout addresses are not supported");
         throw std::runtime_error(std::string("bad-address: ") + what + ": Sprout addresses are not supported; use an s1… or ys1… address");
     }
+    if (allowPQ) throw std::runtime_error(std::string("bad-address: ") + what + ": not a transparent P2PKH, post-quantum or Sapling address of this network");
     throw std::runtime_error(std::string("bad-address: ") + what + ": not a transparent (s1…) or Sapling (ys1…) address of this network");
 }
+
+void SelectSaplingNotes(CWallet& wallet, const AddressChoice& addr, CAmount needed, libzcash::SaplingExtendedSpendingKey& extsk,
+                        std::vector<SaplingNoteEntry>& sel, std::vector<SaplingWitness>& witnesses, uint256& anchor)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    libzcash::PaymentAddress pa = addr.sapling;
+    if (!std::visit(HaveSpendingKeyForPaymentAddress(&wallet), pa)) {
+        throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
+    }
+    std::optional<libzcash::SpendingKey> sk = std::visit(GetSpendingKeyForPaymentAddress(&wallet), pa);
+    if (!sk.has_value()) throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
+    extsk = std::get<libzcash::SaplingExtendedSpendingKey>(sk.value());
+
+    std::vector<SproutNoteEntry> sprout;
+    std::vector<SaplingNoteEntry> notes;
+    std::set<libzcash::PaymentAddress> filter;
+    filter.insert(pa);
+    wallet.GetFilteredNotes(sprout, notes, filter, 1, INT_MAX, true, true, true);
+    std::sort(notes.begin(), notes.end(), [](const SaplingNoteEntry& a, const SaplingNoteEntry& b) { return a.note.value() > b.note.value(); });
+    CAmount sum = 0;
+    CAmount available = 0;
+    for (const SaplingNoteEntry& e : notes) available += e.note.value();
+    for (const SaplingNoteEntry& e : notes) {
+        if (sum >= needed) break;
+        sel.push_back(e);
+        sum += e.note.value();
+    }
+    if (sum < needed) {
+        throw std::runtime_error(strprintf("insufficient-yec: need %s, have %s in confirmed Sapling notes at %s", FormatMoney(needed), FormatMoney(available), addr.text));
+    }
+    if (sel.size() > MAX_SAPLING_SPENDS) {
+        throw std::runtime_error(strprintf("too-many-notes: the transaction would spend %u Sapling notes (limit %u); consolidate with z_mergetoaddress first", (unsigned)sel.size(), (unsigned)MAX_SAPLING_SPENDS));
+    }
+    std::vector<SaplingOutPoint> ops;
+    for (const SaplingNoteEntry& e : sel) ops.push_back(e.op);
+    std::vector<std::optional<SaplingWitness>> maybe;
+    wallet.GetSaplingNoteWitnesses(ops, maybe, anchor);
+    for (size_t i = 0; i < maybe.size(); i++) {
+        if (!maybe[i].has_value()) throw std::runtime_error("missing witness for a Sapling note; retry after the next block");
+        witnesses.push_back(maybe[i].value());
+    }
+}
+
+namespace {
 
 struct Context
 {
@@ -559,12 +605,18 @@ struct Context
     }
 
     /** TOK-PQ (quantum spec F-7): from the Falcon height (judged at the next block) a YED output goes to a fresh
-     *  Falcon key of the wallet; nullopt before it (the caller's P2PKH key holds the YED, as before). */
-    std::optional<CPQKeyID> FreshPQHolder() const
+     *  Falcon key of the wallet; nullopt before it (the caller's P2PKH key holds the YED, as before). The key is filed
+     *  in the address book under `purpose`, as FreshKey files a P2PKH holder (beta2: its outputs are receipts, not
+     *  change, and the wallet lists it as its own address). */
+    std::optional<CPQKeyID> FreshPQHolder(const std::string& purpose) const
     {
         if (!params.IsPQFalconActive((int64_t)chainHeight + 1)) return std::nullopt;
         CPQKeyID id;
         if (!wallet.GetNewPQKey(pq::SCHEME_FN_DSA_512, id)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum holder key");
+        // Review m9: a holder key whose address-book entry cannot be written is not handed out (a seed restore would
+        // otherwise file its receipts as change); an in-memory wallet (unit tests) has nothing to write.
+        if (!wallet.SetAddressBook(id, "", purpose) && wallet.fFileBacked)
+            throw std::runtime_error("wallet-write: cannot record the post-quantum holder key in the address book");
         return id;
     }
 
@@ -572,7 +624,7 @@ struct Context
     CScript FreshHolderScript(const std::string& purpose, CPubKey& keyOut) const
     {
         keyOut = FreshKey(purpose);
-        const std::optional<CPQKeyID> pq = FreshPQHolder();
+        const std::optional<CPQKeyID> pq = FreshPQHolder(purpose);
         return pq.has_value() ? GetScriptForDestination(pq.value()) : GetScriptForDestination(keyOut.GetID());
     }
 
@@ -674,42 +726,7 @@ struct Context
     void SelectSapling(const AddressChoice& addr, CAmount needed, libzcash::SaplingExtendedSpendingKey& extsk,
                        std::vector<SaplingNoteEntry>& sel, std::vector<SaplingWitness>& witnesses, uint256& anchor) const
     {
-        libzcash::PaymentAddress pa = addr.sapling;
-        if (!std::visit(HaveSpendingKeyForPaymentAddress(&wallet), pa)) {
-            throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
-        }
-        std::optional<libzcash::SpendingKey> sk = std::visit(GetSpendingKeyForPaymentAddress(&wallet), pa);
-        if (!sk.has_value()) throw std::runtime_error("bad-address: no spending key for " + addr.text + " in this wallet");
-        extsk = std::get<libzcash::SaplingExtendedSpendingKey>(sk.value());
-
-        std::vector<SproutNoteEntry> sprout;
-        std::vector<SaplingNoteEntry> notes;
-        std::set<libzcash::PaymentAddress> filter;
-        filter.insert(pa);
-        wallet.GetFilteredNotes(sprout, notes, filter, 1, INT_MAX, true, true, true);
-        std::sort(notes.begin(), notes.end(), [](const SaplingNoteEntry& a, const SaplingNoteEntry& b) { return a.note.value() > b.note.value(); });
-        CAmount sum = 0;
-        CAmount available = 0;
-        for (const SaplingNoteEntry& e : notes) available += e.note.value();
-        for (const SaplingNoteEntry& e : notes) {
-            if (sum >= needed) break;
-            sel.push_back(e);
-            sum += e.note.value();
-        }
-        if (sum < needed) {
-            throw std::runtime_error(strprintf("insufficient-yec: need %s, have %s in confirmed Sapling notes at %s", FormatMoney(needed), FormatMoney(available), addr.text));
-        }
-        if (sel.size() > MAX_SAPLING_SPENDS) {
-            throw std::runtime_error(strprintf("too-many-notes: the mint would spend %u Sapling notes (limit %u); consolidate with z_mergetoaddress first", (unsigned)sel.size(), (unsigned)MAX_SAPLING_SPENDS));
-        }
-        std::vector<SaplingOutPoint> ops;
-        for (const SaplingNoteEntry& e : sel) ops.push_back(e.op);
-        std::vector<std::optional<SaplingWitness>> maybe;
-        wallet.GetSaplingNoteWitnesses(ops, maybe, anchor);
-        for (size_t i = 0; i < maybe.size(); i++) {
-            if (!maybe[i].has_value()) throw std::runtime_error("missing witness for a Sapling note; retry after the next block");
-            witnesses.push_back(maybe[i].value());
-        }
+        SelectSaplingNotes(wallet, addr, needed, extsk, sel, witnesses, anchor);
     }
 
     /** Sign vin[first .. first + prevs.size()) as P2PKH (the inputs after them — a carrier — are signed separately, after this). */
@@ -1467,7 +1484,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     // is no longer the holder: an SLH-DSA holder would cost an 8 KB scriptSig per transfer.
     CPQKeyID vaultOwner;
     if (!ctx.wallet.GetNewPQKey(pq::SCHEME_SLH_DSA_SHA2_128S, vaultOwner)) throw std::runtime_error("keypool-empty: cannot draw a post-quantum owner key");
-    std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder();
+    std::optional<CPQKeyID> pqHolder = ctx.FreshPQHolder("yellowback-vault");
     CPubKey owner;                                  // the P2PKH token key, drawn only before the Falcon height (review B I-3)
     if (!pqHolder.has_value()) owner = ctx.FreshKey("yellowback-vault");
     MintShape shape;
@@ -2015,12 +2032,17 @@ void DryRunBuilt(YellowbackWallet& yw, const BuiltTx& out)
     DryRunOrThrow(ctx, out);
 }
 
+CMutableTransaction ProveSapling(TransactionBuilder& builder)
+{
+    TransactionBuilderResult r = builder.Build();
+    if (r.IsError()) throw std::runtime_error("Sapling build failed: " + r.GetError());
+    return CMutableTransaction(r.GetTxOrThrow());
+}
+
 void FinishSapling(BuiltTx& out)
 {
     if (!out.builder.has_value()) return;
-    TransactionBuilderResult r = out.builder->Build();
-    if (r.IsError()) throw std::runtime_error("Sapling build failed: " + r.GetError());
-    out.tx = CMutableTransaction(r.GetTxOrThrow());
+    out.tx = ProveSapling(*out.builder);
     out.builder.reset();
     const uint256 txid = CTransaction(out.tx).GetHash();
     if (out.kind == BuiltKind::MINT) out.ownYedOutputs.push_back(COutPoint(txid, 1));   // provisional: SignBuiltInputs recomputes after the carrier is signed
