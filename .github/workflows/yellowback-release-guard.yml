@@ -55,14 +55,14 @@ jobs:
               ver="${GITHUB_REF_NAME#vault-params/v}"
             else
               ver="$RELEASE_VERSION"
-              echo "proving run: $(git rev-parse HEAD) checked as the tag vault-params/v${ver} would be"
             fi
             # The version names the stage; the guard below refuses anything that is not a 6.22.x
-            # release version before any ref is built from it.
+            # release version before any ref is built from it, or the value is echoed.
             python3 qa/yellowback-vault-params.py stage "$ver" >/dev/null || {
-              echo "refusing to release: $GITHUB_REF_NAME does not name a release version (vault-params/v6.22.N[-rcM|-betaM])"
+              echo "refusing to release: the version is not a release version (vault-params/v6.22.N[-rcM|-betaM])"
               exit 1
             }
+            [ "${GITHUB_REF_TYPE}" = tag ] || echo "proving run: $(git rev-parse HEAD) checked as the tag vault-params/v${ver} would be"
             set +e
             git ls-remote --exit-code --tags "$url" "refs/tags/v${ver}"
             lrc=$?
