@@ -11,8 +11,8 @@ script a PQ yrf…/yrs… names. The pre-D-9 form (4C51 || scheme || keyHash) is
 
 - getnewaddress "" "pq" / "pqslh": refused before the vault upgrade; after it an rq… address of the wallet's PQ key
   chain (SLH-DSA while Falcon is inactive), in the address book; validateaddress pqscheme / pqkeyhash;
-- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_sendmany /
-  z_shieldcoinbase / z_mergetoaddress from an rq… (A-15), -mineraddress=rq…;
+- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_shieldcoinbase
+  from an rq… (D-7; z_sendmany and z_mergetoaddress spend one since beta2 D-2/D-6), -mineraddress=rq…;
 - pay to rq… with sendtoaddress, sendmany and z_sendmany; receive (listunspent, getreceivedbyaddress,
   listreceivedbyaddress, z_getbalance); spend through coin selection (sendtoaddress) at
   max(DEFAULT_FEE, -pqfeerate x size);
@@ -167,9 +167,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('does not refer to key', n0.signmessage, a, 'hello')
         assert_equal(n0.z_listaddresses(), [])
         zaddr = n0.z_getnewaddress('sapling')   # node 0's first Sapling key (m/32'/coin'/0'): restored by B-1
-        assert_raises_rpc('z_sendmany cannot spend from a post-quantum address', n0.z_sendmany, a, [{'address': zaddr, 'amount': 1}])
+        # z_sendmany and z_mergetoaddress spend from a PQ address (beta2 D-2, D-6: wallet_address_matrix.py);
+        # z_shieldcoinbase still refuses one (D-7).
         assert_raises_rpc('z_shieldcoinbase cannot spend from a post-quantum address', n0.z_shieldcoinbase, a, zaddr)
-        assert_raises_rpc('z_mergetoaddress cannot spend from a post-quantum address', n0.z_mergetoaddress, [a], zaddr)
 
         print('pay to rq…: sendtoaddress, sendmany, z_sendmany')
         t1 = n1.getnewaddress()

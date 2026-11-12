@@ -262,8 +262,12 @@ leg_structure() {
   ! grep -n "throw\|assert(" src/yellowback/state.cpp src/yellowback/math.h || return 1
   # The overlay adds no networking to the node (anchored: UndoDisconnect( must not match).
   ! grep -nE "evhttp|socket|\bconnect\(" src/yellowback/*.cpp src/yellowback/*.h src/rpc/yellowback*.cpp | nocomment || return 1
-  # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22).
-  ! git grep -n "AddTransparentInputUnsigned\|SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || return 1
+  # The transaction_builder extension is called only by the Yellowback builder and its tests (§8.4 item 22),
+  # and, for AddTransparentInputUnsigned alone, by the z_sendmany / z_mergetoaddress post-quantum inputs
+  # signed after Build() (beta2 D-2, D-6: asyncrpcoperation_common.h, SignPQBuilderInputs).
+  ! git grep -n "SetLockTime(" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' || return 1
+  ! git grep -n "AddTransparentInputUnsigned" -- src ':!src/transaction_builder.h' ':!src/transaction_builder.cpp' ':!src/yellowback/' ':!src/test/yellowback_*' \
+      ':!src/wallet/asyncrpcoperation_common.h' ':!src/wallet/asyncrpcoperation_sendmany.cpp' ':!src/wallet/asyncrpcoperation_mergetoaddress.cpp' || return 1
 }
 
 leg_dos_harden() {

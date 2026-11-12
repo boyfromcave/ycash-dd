@@ -58,6 +58,9 @@ WEIGHTS = {
     "yellowback_chainviz": 200,
     "vault_slashing": 200,
     "vault_bridge": 200,
+    "wallet_address_matrix": 300,       # estimate (2026-11-10): 20 sends, five SLH-DSA spends, a reorg, three merges
+    "wallet_pq_fee_cap": 60,            # measured 2026-11-11: two restarts, a merge, a capped send
+    "wallet_yed_ecc_token": 90,         # measured 2026-11-11: Yellowback live late, a mint and a transfer
     "yellowback_pricefeed": 150,
     "yellowback_quote": 150,
     "wallet": 150,
@@ -71,6 +74,8 @@ WEIGHTS = {
     "reorg_limit": 40,
     "reindex": 40,
     "txn_doublespend": 30,
+    "wallet_balance_by_type": 90,       # estimate (2026-11-10): two nodes, one restart, two reorgs
+    "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
     "zmq_concurrent_test": 100,         # 45 s stress + the window build (2026-10-11, M-series laptop)
 }
 DEFAULT = 240
