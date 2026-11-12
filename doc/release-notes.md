@@ -178,9 +178,9 @@ Vault funding and coin locks
   same holds for the default funding (`vault_lock` without `"from"`, `set_*`, `vault_release`, …).
   The YEC inputs the Yellowback wallet locks for a YED transaction are handed back within about a
   second once it is mined or has left the mempool unmined.
-- `vault_lock "from"`: `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2)
-  address cannot be spent before Falcon is active at the next block` now answer -5
-  (`RPC_INVALID_ADDRESS_OR_KEY`), as `z_sendmany` does (were -4 and -8).
+- `vault_lock "from"` (new in beta2): `from: not an address of this wallet` and `from: an FN-DSA-512 (scheme 2)
+  address cannot be spent before Falcon is active at the next block` answer -5
+  (`RPC_INVALID_ADDRESS_OR_KEY`), as `z_sendmany` does.
 - The default vault funding skips coinbase that must be shielded and releases the coins it locked
   when the call fails for any reason. A coin locked with `lockunspent` is never released. The
   coinbase refusal names the route: `z_shieldcoinbase, then z_sendmany to a transparent address, or
