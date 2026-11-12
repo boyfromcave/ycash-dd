@@ -177,9 +177,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - name: Cache depends
@@ -393,9 +393,9 @@ jobs:
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py; audit 04/F-1)
         # vault_pq_reorg's Falcon spends come from the framework's signer, compiled with $CC on the fly;
         # without a compiler the script would SKIP. Installed explicitly, never inherited from the image.
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - name: Install Python test prerequisites
         # Mirrors scripts/bootstrap.sh in the workspace: the inherited qa/ framework imports simplejson
         # and pyblake2 (unmaintained; the stdlib blake2b has the same API, so a one-line shim stands in
@@ -664,9 +664,9 @@ jobs:
           printf '%s\n' '"""Shim: pyblake2 is unmaintained; Python 3.6+ has hashlib.blake2b with the same API."""' \
                         'from hashlib import blake2b, blake2s  # noqa: F401' > "$site/pyblake2.py"
       - name: Install a C compiler (the Falcon signer test_pq.py exercises; audit 04/F-1)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - name: Testnet tooling unit tests (testnet plan N2; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/profiles/test_ybprofile.py contrib/bootstrap/test_ycash_bootstrap.py contrib/testnet/ceremony/test_ceremony.py contrib/docker/ycashd/test_entrypoint.py contrib/yellowback/devnet/test_testnet_join.py
@@ -784,9 +784,9 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
       - name: Install build prerequisites
         if: steps.paths.outputs.run == 'true'
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -890,9 +890,9 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
       - name: Install build prerequisites
         if: steps.paths.outputs.run == 'true'
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils \
             automake libtinfo5 clang
       - name: Cache depends
@@ -996,9 +996,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -1187,7 +1187,7 @@ jobs:
         # every file copied into <Target>/crashes/ is replayed by the unit fuzz-replay tests forever.
         run: |
           set -e
-          sudo apt-get install -y clang
+          qa/yellowback-ci-apt.sh clang
           # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works" program
           # (int main) fails to link with it in CXXFLAGS ("cannot create executables"). Instrument with
           # fuzzer-no-link at configure time and add the runtime on the ycashd link alone, the way Bitcoin
@@ -1264,9 +1264,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -1357,9 +1357,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5 clang
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -1444,9 +1444,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
             automake libtinfo5 lcov
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -1588,9 +1588,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install build prerequisites
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libc6-dev m4 g++-multilib \
+          qa/yellowback-ci-apt.sh build-essential pkg-config libc6-dev m4 g++-multilib \
             autoconf libtool ncurses-dev unzip git python3 zlib1g-dev curl bsdmainutils automake libtinfo5 clang
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
