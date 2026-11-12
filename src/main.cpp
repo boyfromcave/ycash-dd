@@ -965,6 +965,7 @@ bool ContextualCheckTransaction(
     bool canopyActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_CANOPY);
     bool futureActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_ZFUTURE);
     // ZIP 216 and the non-identity coinbase pk_d, which the 6.x and kogany lines enforce at every height.
+    // Kept while gating at UPGRADE_VAULT is still an open choice: that option changes only this line.
     const bool zip216Active = true;
 
     assert(!saplingActive || overwinterActive); // Sapling cannot be active unless Overwinter is
