@@ -574,7 +574,9 @@ leg_attribution() {
   done
   [ -z "$exempt" ] || echo "frozen-set files exempt from the modified-file rule:$exempt"
   local removed
-  removed=$(git diff "$LEGACY...HEAD" -- src qa contrib zcutil doc | grep -E '^-[^-].*Copyright.*(Bitcoin|Zcash|Satoshi)' || true)
+  # -a: the diff is text even where a file holds a stray NUL (GNU grep would print "binary file matches"
+  # and hide the line).
+  removed=$(git diff "$LEGACY...HEAD" -- src qa contrib zcutil doc | grep -aE '^-[^-].*Copyright.*(Bitcoin|Zcash|Satoshi)' || true)
   [ -z "$removed" ] || bad="$bad
   removed or altered upstream notice: $removed"
   [ -z "$bad" ] || { echo "$bad"; return 1; }
@@ -586,9 +588,9 @@ leg_naming() {
   # upstream file; the retired working name (YDollar / ydollar / yd_) appears nowhere. Checked on the
   # lines the fork adds to src/ (upstream's own text is not ours to rename).
   local added
-  added=$(git diff "$LEGACY...HEAD" -- src ':!src/test/data' | grep '^+' | grep -v '^+++' || true)
-  ! printf '%s\n' "$added" | grep -nE '\bycash6\b|[Yy][Dd]ollar|\byd_' || return 1
-  ! printf '%s\n' "$added" | grep -E '[Dd]igi[Dd]ollar|DIGIDOLLAR|\bDD\b' | grep -Ev '^\+[[:space:]]*(//|\*|/\*)' || return 1
+  added=$(git diff "$LEGACY...HEAD" -- src ':!src/test/data' | grep -a '^+' | grep -av '^+++' || true)
+  ! printf '%s\n' "$added" | grep -anE '\bycash6\b|[Yy][Dd]ollar|\byd_' || return 1
+  ! printf '%s\n' "$added" | grep -aE '[Dd]igi[Dd]ollar|DIGIDOLLAR|\bDD\b' | grep -aEv '^\+[[:space:]]*(//|\*|/\*)' || return 1
 }
 
 leg_pq_wipes() {
