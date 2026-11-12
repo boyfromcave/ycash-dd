@@ -200,13 +200,20 @@ YED form): what node operators and clients should know.**
   `yed_getnewaddress`'s and `z_getnewaddress`'s are, so `PQ` is refused with this message), and a type given first and again second is
   refused with `the address type is given first, so there is no second argument (getnewaddress pq, or
   getnewaddress "" pq)`.
+- **`sendtoaddress` and `sendmany` spend ordinary (ECC) coins only** (beta2, audit M-1). They never select a
+  post-quantum coin (they used to, and sent its change to a new ECC key); a post-quantum coin is spent with
+  `z_sendmany` from its `sq…` address, which returns the change to it (D-4) and signs with no wallet lock held. When
+  the ECC coins do not cover the amount and the wallet holds post-quantum coins, the call is refused with
+  `Insufficient funds in ordinary transparent addresses; this wallet also holds <amount> YEC at post-quantum
+  addresses: send from one with z_sendmany, which returns the change to it`. `fundrawtransaction` (coin control)
+  is unchanged.
 - **`z_sendmany` is the any-to-any call for plain YEC (beta2 D-2; quantum spec A-15 reversed).** From an
   ECC (`s1…`), Sapling (`ys1…`) or post-quantum (`sq…`, either scheme) address to any mix of ECC, Sapling
   and PQ recipients. A PQ from address spends that address's own coins (largest first, mature only:
   `minconf` applies); its inputs are signed after the Sapling proofs are made, with no wallet lock held
   while proving, under the vault script flags of the next block; its change returns to the same `sq…`
   address (D-4; Sapling change stays a Sapling note, ECC change is unchanged). Its fee follows the rule
-  `sendtoaddress` uses for a PQ input: max(the default fee, `-pqfeerate` × size, the ZIP-317 conventional
+  the wallet uses for a PQ input (as `fundrawtransaction` prices one): max(the default fee, `-pqfeerate` × size, the ZIP-317 conventional
   fee), about 27,000 zat for one SLH-DSA input and 5,500 for one FN-DSA input; the default fee is raised to
   it, an explicit fee below it is refused, change below the PQ dust threshold goes to the fee, and at most
   100 PQ inputs (`MAX_PQ_INPUTS_PER_TX`) fit one transaction, within the standard sigop limit. The PQ inputs are
@@ -247,7 +254,26 @@ YED form): what node operators and clients should know.**
   `sendtoaddress`/`sendmany` are refused when the selection picked one:
   `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
   A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
-  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked.
+  (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked, except a coin `vault_send` /
+  `set_sendact` sign because `allowinputs` names it (audit L-3). Where Yellowback is not live (no YED attestor set configured; `-yellowback=0` only
+  acknowledges a leftover index or a marked wallet), the same coin-selecting calls leave out every output the
+  Yellowback rules may give YED, read from its transaction alone (no index; a claim cancel's re-created vault and every
+  output that can be its refund, its YEC change included, are counted), whether or not the wallet carries the "has held YED" mark (a seed restore, an imported key or a
+  wallet that never saw Yellowback live has none): `sendtoaddress`, `sendmany` and `fundrawtransaction` use the
+  other coins or report insufficient funds, naming the outputs left out (`Insufficient funds; this wallet also holds
+  <n> output(s) that may carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[, …] …`); `z_sendmany`, `z_mergetoaddress` and the vault fee funding are refused,
+  when they need one, with `refusing to spend an output
+  that may carry YED as plain YEC while Yellowback is not live: <txid>:<n>[, <txid>:<n>…] (its transaction's payload
+  may give it YED, which would burn; to spend it deliberately, name the outpoint in a raw transaction)` (beta2 item 9).
+  Where Yellowback is live, an output read from its payload alone (its transaction not yet judged by the index:
+  unconfirmed, its block above the index tip or disconnected, or any while the index is unhealthy) is refused with
+  `refusing to spend an output that may carry YED as plain YEC before the Yellowback index judges its transaction:
+  <txid>:<n>[, …] (its transaction's payload may give it YED, which would burn; wait for its block to be judged, or name
+  the outpoint in a raw transaction sent with allowyedburn)` (joined to the refusal above with `; ` when both apply).
+  A transaction whose block the index has applied is read from the index only: an output it gave no YED is plain YEC,
+  even when the transaction carries a payload (review 3 MEDIUM-1). So is a transaction confirmed in a block of the active
+  chain below the Yellowback start height (the `UPGRADE_VAULT` activation height): the index never evaluates such a block,
+  so no output in it is YED, whatever payload it carries.
   While the Yellowback index is unhealthy, every plain-YEC send or merge from a post-quantum address (and `vault_lock
   "from"`) is refused, deliberately: the coin locks are then not reconciled and cannot be trusted (the independent
   review of 2026-11-11 confirmed this). `refusing to spend as plain YEC while the Yellowback index is unhealthy
@@ -322,7 +348,7 @@ YED form): what node operators and clients should know.**
     Yellowback-locked outpoints; a token whose lock was removed with `yed_unlockcoin` is not marked until it is
     locked again); the field is absent otherwise. (ECC keys are keypool keys, not derived from
     the seed: a seed-only restore does not recover ECC coins; the first Sapling address and the PQ keys it does.) `z_listaddresses` lists the Sapling addresses.
-    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. This line has no
+    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. `z_validateaddress` answers for a post-quantum address too (audit L-4; it said `isvalid: false`): `type` (dd) / `address_type` (6.x) `"pq"`, `ismine`, and validateaddress's `pqscheme`, `pqschemename`, `pqkeyhash`; its answers for Sprout, Sapling and unified addresses are unchanged. This line has no
     `listaddresses` (the 6.x line's call, which gains the same `pqscheme`/`pqschemename` per PQ address there).
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, now documented and
     pinned by `qa/rpc-tests/wallet_balance_by_type.py`). *Spendable now* (`getwalletinfo.balance`, `getbalance`
@@ -1910,7 +1936,10 @@ from that address's confirmed notes, largest-first — blocks for the proving ti
 confirmed from `yed_estimatecollateral`; the node refuses `collateral-above-max` at preflight,
 before the carrier, and again when the MINT is built on the confirmed carrier — then the carrier
 lapses and `yed_sweepcarriers` reclaims it — so a block or a price move between the estimate and
-the call never locks more than was agreed). Builds the §3.5
+the call never locks more than was agreed). Before the carrier is broadcast the preflight also dry-runs the
+selection of the whole mint (collateral, token, pool and attestor fees, the MINT's and the carrier's network fees) on
+the same source, and refuses `insufficient-yec` with nothing sent (beta2; it used to broadcast the carrier and fail
+at the MINT). Builds the §3.5
 MINT at `R = tip − REF_LAG` after the MINTPOL-1 gate (`Snapshots[R].activation == ACTIVE`,
 `haltMask == 0`, the cap has room), draws one fresh key for the vault owner and the token output,
 locks the token output, commits. `vault` is `"<txid>:0"`; `payee` is the FEE-W choice (or the
@@ -2760,7 +2789,7 @@ what `yellowback_rpc_contract.py` uses.
 | `change-floor` | `yed_send`, `yed_sendmany`, `yed_redeem`, `yed_claim` | no selection leaves YED change of `0` or `≥ MIN_OUTPUT` (H2; a REDEEM or CLAIM burns a sub-dollar remainder instead, H4, so it reaches this only when even that is impossible): send `cents − 50` from a single `cents` output. The message is structured and always has this shape: `change-floor: <requested> cents cannot be sent from these coins without change below the $1.00 minimum output; nearest workable amounts: below <n\|none>, above <n\|none>` — the GUI reads the two numbers with that grammar and `yed_estimatesend.alternatives` returns them as fields |
 | `unlock-acknowledgement-missing` | `yed_unlockcoin` | the third argument is not exactly `I understand this burns YED` |
 | `yed-locked-outpoint` | `lockunspent` (the stock RPC) | `lockunspent false\|true [{txid,vout}]` naming an outpoint the Yellowback wallet layer holds: use `yed_unlockcoin` |
-| `yed-burn-refused` | `sendrawtransaction` (the stock RPC) | with `-yellowback`, a raw transaction that spends a `Tokens` outpoint of this wallet without a payload that reassigns it (no payload, or a TRANSFER that assigns nothing): pass `allowyedburn = true` to send it anyway |
+| `yed-burn-refused` | `sendrawtransaction` (the stock RPC) | with `-yellowback`, a raw transaction that spends a `Tokens` outpoint of this wallet, or an output of this wallet whose transaction the index has not judged and whose payload may give it YED, without a payload that reassigns those cents (no payload, or a TRANSFER that assigns less; any spend of a not-yet-judged claim cancel refund, whose amount is unknown): pass `allowyedburn = true` to send it anyway |
 | `not-a-yellowback-address` | `yed_send`, `yed_sendmany`, `yed_validateaddress` (in `reason`, no throw) | the recipient is not a `yb…`/`yt…`/`yr…` address of this network: pass an `s1…`/`sm…` address |
 | `verdict-parent-not-tip` | `yed_getblockverdict` | the block's parent is not the index tip and the block is not a rejected child of it (N12): pass the tip's grandparent |
 | `insufficient-yed` | `yed_redeem`, `yed_claim`, `yed_send`, `yed_sendmany` | wallet YED below the burn or amount (the spendable YED: tokens an own unconfirmed transaction spends do not count) |
@@ -2913,7 +2942,7 @@ These are Ycash's own commands. Each change is additive and inert without `-yell
 | Command | Change |
 |---|---|
 | `lockunspent` | With `-yellowback` and a wallet, `lockunspent false\|true [{txid,vout},…]` refuses (`yed-locked-outpoint`, `RPC_WALLET_ERROR`) when any named outpoint is held by the Yellowback wallet layer, and nothing in the call is applied. `lockunspent true` with no second argument still unlocks everything, then **re-applies** the Yellowback locks before returning, so it can never leave YED spendable as plain YEC. |
-| `sendrawtransaction` | Third parameter `allowyedburn` (boolean, default `false`), the same shape as `allowhighfees`: with `-yellowback` and a wallet, a raw transaction that spends a `Tokens` outpoint that is mine and does not reassign it is refused with `yed-burn-refused` (`RPC_WALLET_ERROR`) unless it is `true`. *Reassigns* means the transaction carries a well-formed REDEEM payload (a vault spend, which MP-1 judges and whose burn is a rule, not an accident) or a TRANSFER payload with at least one assignment; no payload, an unreadable one, a MINT payload, or a TRANSFER that assigns nothing all leave the spent cents with nowhere to go. Without `-yellowback`, without a wallet, or for a transaction that spends no YED of this wallet, the parameter changes nothing. |
+| `sendrawtransaction` | Third parameter `allowyedburn` (boolean, default `false`), the same shape as `allowhighfees`: with `-yellowback` and a wallet, a raw transaction that spends a `Tokens` outpoint that is mine, or an output of mine whose transaction the index has not judged yet and whose payload may give it YED (counted at the payload's figure; a claim cancel's refund, whose amount only the index knows, is refused whatever the payload), and does not reassign it is refused with `yed-burn-refused` (`RPC_WALLET_ERROR`) unless it is `true`. *Reassigns* means the transaction carries a well-formed REDEEM payload (a vault spend, which MP-1 judges and whose burn is a rule, not an accident) or a TRANSFER payload with at least one assignment; no payload, an unreadable one, a MINT payload, or a TRANSFER that assigns nothing all leave the spent cents with nowhere to go. Without `-yellowback`, without a wallet, or for a transaction that spends no YED of this wallet, the parameter changes nothing. While the Yellowback index is unhealthy the check still runs: every input that is an output of mine its transaction's payload may give YED is counted (the index's tokens cannot be read then, and the vault-spend exemption is not applied), so such a raw spend is refused until the index is healthy again or `allowyedburn` is passed. |
 | `importprivkey`, `importaddress`, `importwallet`, `z_importkey` | After their rescan, each calls the Yellowback wallet layer's `Reconcile()` (H8), so YED that has just become mine is locked before the next block rather than at the next reconciliation. No return-value change. |
 
 ### Startup (H6)

@@ -73,6 +73,7 @@ struct BuiltTx
     std::string warning;                    //!< MINT: the keypool-low nag ("" if none)
     // Sapling shape: set by BuildMint/BuildRedeem/BuildClaim/BuildSweep, consumed by FinishSapling
     std::optional<TransactionBuilder> builder;
+    std::vector<SaplingOutPoint> saplingNotes; //!< Sapling shape: the notes it spends; the RPC locks them until it commits or fails
     std::string fundedFrom;                 //!< MINT: "transparent" | "sapling"
     std::string collateralTo;               //!< vault spends: the destination address as given or drawn
 

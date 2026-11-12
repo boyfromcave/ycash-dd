@@ -190,8 +190,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 2)
         throw runtime_error(
-            "getnewaddress ( \"type\" )\n"
-            "getnewaddress ( \"account\" \"type\" )\n"
+            "getnewaddress ( \"type\"|\"account\" ( \"type\" ) )\n"
             "\nReturns a new Ycash address for receiving payments.\n"
             "\nArguments (the type may come first, getnewaddress pq, or second after the empty account, getnewaddress \"\" pq):\n"
             "1. \"type\"|\"account\" (string, optional) \"p2pkh\", \"pq\" or \"pqslh\": the address type (see 2.), and then no second\n"
@@ -203,8 +202,8 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                     Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                     yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                     Needs the vault upgrade active at the next block and an unlocked wallet.\n"
-            "                     A post-quantum address receives plain YEC; sendtoaddress/sendmany spend it (fee by size),\n"
-            "                     z_sendmany, z_shieldcoinbase and z_mergetoaddress never do.\n"
+            "                     A post-quantum address receives plain YEC; z_sendmany and z_mergetoaddress spend it (fee by\n"
+            "                     size, change back to it); sendtoaddress, sendmany and z_shieldcoinbase never do.\n"
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new Ycash address\n"
             "\nExamples:\n"
@@ -539,6 +538,8 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendtoaddress \"zcashaddress\" amount ( \"comment\" \"comment-to\" subtractfeefromamount )\n"
             "\nSend an amount to a given address. The amount is a real and is rounded to the nearest 0.00000001\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() +
             "\nArguments:\n"
             "1. \"zcashaddress\"  (string, required) The Ycash address to send to.\n"
@@ -1046,7 +1047,8 @@ UniValue sendfrom(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendfrom \"fromaccount\" \"tozcashaddress\" amount ( minconf \"comment\" \"comment-to\" )\n"
             "\nDEPRECATED (use sendtoaddress). Sent an amount from an account to a Ycash address.\n"
-            "The amount is a real and is rounded to the nearest 0.00000001."
+            "The amount is a real and is rounded to the nearest 0.00000001.\n"
+            "Ordinary (ECC) coins only, as sendtoaddress."
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"fromaccount\"       (string, required) MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
@@ -1114,6 +1116,8 @@ UniValue sendmany(const UniValue& params, bool fHelp)
         throw runtime_error(
             "sendmany \"fromaccount\" {\"address\":amount,...} ( minconf \"comment\" [\"address\",...] )\n"
             "\nSend multiple times. Amounts are decimal numbers with at most 8 digits of precision."
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
             "1. \"fromaccount\"         (string, required) MUST be set to the empty string \"\" to represent the default account. Passing any other string will result in an error.\n"
@@ -1568,9 +1572,9 @@ UniValue listreceivedbyaddress(const UniValue& params, bool fHelp)
             "    \"amountZat\" : xxxx                 (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
             "    \"confirmations\" : n                (numeric) The number of confirmations of the most recent transaction included\n"
             "    \"pqscheme\" : n,                    (numeric) A post-quantum address only: 1 = SLH-DSA-SHA2-128s, 2 = FN-DSA-512\n"
+            "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
             "    \"yed_holder\" : true,               (boolean) Where Yellowback is live, present only on a YED holder key: the Yellowback index holds a\n"
             "                                         YED token of this wallet at this address (its token outputs are locked; see yed_listunspent)\n"
-            "    \"pqschemename\" : \"name\",           (string) A post-quantum address only: \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
             "    \"txids\" : [\"txid\", ...]            (array) The transactions that paid the address\n"
             "  }\n"
             "  ,...\n"
@@ -3019,6 +3023,8 @@ UniValue fundrawtransaction(const UniValue& params, bool fHelp)
                             "This will not modify existing inputs, and will add one change output to the outputs.\n"
                             "Note that inputs which were signed may need to be resigned after completion since in/outputs have been added.\n"
                             "The inputs added will not be signed, use signrawtransaction for that.\n"
+                            "The inputs added are ordinary (ECC) coins only: a post-quantum coin is added only when the transaction already names\n"
+                            "it; with too few ECC coins the call is refused, naming the post-quantum value (spend it with z_sendmany).\n"
                             "Note that all existing inputs must have their previous output transaction be in the wallet.\n"
                             "Note that all inputs selected must be of standard form and P2SH scripts must be"
                             "in the wallet using importaddress or addmultisigaddress (to calculate fees).\n"
@@ -3107,7 +3113,10 @@ UniValue zc_benchmark(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() < 2) {
         throw runtime_error(
-            "zcbenchmark benchmarktype samplecount\n"
+            "zcbenchmark benchmarktype samplecount ( arg )\n"
+            "\n"
+            "arg (optional): the thread count for createjoinsplit and solveequihash, the JoinSplit hex for\n"
+            "verifyjoinsplit.\n"
             "\n"
             "Runs a benchmark of the selected type samplecount times,\n"
             "returning the running times of each sample.\n"
@@ -4634,6 +4643,11 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             nFee = AmountFromValue( params[3] );
         }
 
+        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
+        // than build, sign and fail at the commit. Checked before the upstream checks below (audit L-5), so a fee above
+        // the cap gets the message the 6.x line gives, which says what to do.
+        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
+
         // Check that the user specified fee is not absurd.
         // This allows amount=0 (and all amount < nDefaultFee) transactions to use the default network fee
         // or anything less than nDefaultFee instead of being forced to use a custom fee and leak metadata
@@ -4647,9 +4661,6 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Fee %s is greater than the sum of outputs %s and also greater than the default fee", FormatMoney(nFee), FormatMoney(nTotalOut)));
             }
 	}
-        // Beta2 (audit H1): a post-quantum spend is committed only within PQMaxTxFee(); refuse a larger fee here rather
-        // than build, sign and fail at the commit.
-        if (fromTaddr && IsPQKeyDestination(keyIO.DecodeDestination(fromaddress))) EnsurePQFeeWithinCap(nFee);
     }
 
     // Use input parameters as the optional context info to be returned by z_getoperationstatus and z_getoperationresult.
@@ -4883,8 +4894,8 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address, should be a taddr or \"*\".");
         }
         if (IsPQKeyDestination(taddr)) {
-            // quantum spec A-15: the z_* operations sign P2PKH only and never spend a TX_PQPKH coin.
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+            // z_shieldcoinbase spends coinbase only; a post-quantum source is spent with z_sendmany (beta2 D-2).
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "z_shieldcoinbase cannot spend from a post-quantum address; use z_sendmany");
         }
     }
 
@@ -5574,7 +5585,7 @@ UniValue z_listoperationids(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "z_listoperationids\n"
+            "z_listoperationids ( \"status\" )\n"
             "\nReturns the list of operation ids currently known to the wallet.\n"
             "\nArguments:\n"
             "1. \"status\"         (string, optional) Filter result by the operation's state e.g. \"success\".\n"

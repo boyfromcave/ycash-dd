@@ -72,6 +72,7 @@ BASE_SCRIPTS= [
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
     'wallet_yed_held_guard.py',      # beta2 item 32: the wallet-side has-held-YED guard beside H6
+    'wallet_yed_output_guard.py',    # every kind of YED output (the claim cancel's refund too) against the wallet's sends
     'yellowback_stock_node.py',
     # The v2 framework's own smoke test (six stock nodes, no yed_* call); registered 2026-10-01
     # (audit I-1: it existed and was allow-listed by CI but never registered, so never run).
@@ -135,6 +136,8 @@ BASE_SCRIPTS= [
     'wallet_pq_fee_cap.py',
     # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
     'wallet_yed_ecc_token.py',
+    'wallet_beta2_followups.py',
+    'wallet_beta2_followups2.py',
     # Real pool software (yolo, Rust) driving a stratum miner through submitblock; SKIPs without
     # YOLO_BIN, which the fork's CI builds (role-pool-regtest-plan.md 3.5).
     'yellowback_stratum.py',
