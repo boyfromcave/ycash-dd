@@ -999,6 +999,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssKey >> id;
             pwallet->setVaultPendingKeys.insert(id);
         }
+        else if (strType == "yedheld")
+        {
+            uint8_t v = 0;
+            ssValue >> v;
+            if (v != 0) pwallet->fYedHeld = true;
+        }
         else if (strType == "vaultrecipient")
         {
             uint256 recipientHash;
@@ -1043,7 +1049,8 @@ static bool IsSalvagedType(const std::string& strType)
     return IsKeyType(strType) ||
            strType == "pqissued" || strType == "vaultsetsig" ||
            strType == "vaultsignrestored" || strType == "vaultbuild" ||
-           strType == "vaultpendingkey" || strType == "vaultrecipient";
+           strType == "vaultpendingkey" || strType == "vaultrecipient" ||
+           strType == "yedheld";
 }
 
 DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
@@ -1606,6 +1613,12 @@ bool CWalletDB::EraseVaultSignRestored()
 {
     nWalletDBUpdateCounter++;
     return Erase(std::string("vaultsignrestored"));
+}
+
+bool CWalletDB::WriteYedHeld()
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("yedheld"), (uint8_t)1);
 }
 
 bool CWalletDB::WriteVaultBuild(const COutPoint& templ, const CMutableTransaction& mtx)
