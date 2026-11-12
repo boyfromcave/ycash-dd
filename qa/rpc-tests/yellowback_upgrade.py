@@ -52,7 +52,7 @@ from test_framework.util import (
     sync_mempools,
 )
 from test_framework.yellowback_attest import wait_for_spender
-from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, debug_log_contains
 from test_framework import yellowback_model as ym
 
 ACTIVATION = 130
@@ -174,11 +174,9 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
             gi = n.vault_getinfo()
             want = (self.set_id, True) if i < 3 else (None, False)        # node 3 never learns it
             assert_equal((gi['attestorsetid'], gi['moduleactive']), want)
-            with open(os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log')) as f:
-                log = f.read()
             line = ('Yellowback: attestor set %s (regtest -yellowbackattestorset)' % self.set_id if i < 3
                     else 'Yellowback: no attestor set; the YED module validates inertly')
-            assert line in log, 'node%d debug.log lacks "%s"' % (i, line)
+            assert debug_log_contains(self.options.tmpdir, i, line), 'node%d debug.log lacks "%s"' % (i, line)
         # the wallet has already re-accepted it (it records the set_create it broadcast); sendrawtransaction relays a
         # transaction already in the mempool, and accepts it when it is not
         n0.sendrawtransaction(set_hex)
