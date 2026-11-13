@@ -2050,8 +2050,13 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
             "\nResult:\n"
             "{\n"
             "  \"status\" : \"mined|waiting|expiringsoon|expired\",    (string) The transaction status, can be 'mined', 'waiting', 'expiringsoon' or 'expired'\n"
-            "  \"amount\" : x.xxx,        (numeric) The transaction amount in " + CURRENCY_UNIT + "\n"
+            "  \"amount\" : x.xxx,        (numeric) The net change to the wallet's transparent (ECC and post-quantum) balance in " + CURRENCY_UNIT + ",\n"
+            "                             excluding the fee when the transaction's transparent inputs paid it (no shielded value in);\n"
+            "                             shielded value is not counted: see `z_viewtransaction`\n"
             "  \"amountZat\" : x          (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
+            "  \"fee\" : x.xxx,           (numeric) The transaction's fee in " + CURRENCY_UNIT + ", negative: transparent and shielded value in\n"
+            "                             less transparent outputs and value into a shielded pool. Only when an input (transparent,\n"
+            "                             post-quantum or shielded) is the wallet's; read from the wallet's own records\n"
             "  \"confirmations\" : n,     (numeric) The number of confirmations\n"
             "  \"blockhash\" : \"hash\",  (string) The block hash\n"
             "  \"blockindex\" : xx,       (numeric) The block index\n"
@@ -2108,11 +2113,49 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     CAmount nCredit = wtx.GetCredit(filter);
     CAmount nDebit = wtx.GetDebit(filter);
     CAmount nNet = nCredit - nDebit;
-    CAmount nFee = (wtx.IsFromMe(filter) ? wtx.GetValueOut() - nDebit : 0);
+    // "fee" is the transaction's own fee, shown negative: GetValueOut() (transparent outputs and
+    // value moved into a shielded pool) less the transparent value in and the shielded value in
+    // (GetShieldedValueIn: a positive Sapling valueBalance, Sprout vpub_new). Upstream subtracted
+    // only the wallet's transparent debit (on the 6.x node line a Sapling-funded send showed its
+    // transparent outputs as the fee, Y6-FEE-DISPLAY; here it showed none). The transparent value
+    // in is read from the wallet's own records: each input whose funding transaction the wallet
+    // holds (ECC and post-quantum alike); exact for every transaction this wallet built. No chain
+    // lookup.
+    // "amount" stays the net change to the wallet's transparent balance with the fee excluded
+    // where the transparent inputs paid it: nNet - nFee when no shielded value came in (as
+    // before), nNet otherwise (the fee came out of the shielded value).
+    // "From me" also counts the wallet's Sprout and Sapling nullifiers, as the 6.x node line's
+    // CWalletTx::IsFromMe does (here CWalletTx::IsFromMe is the transparent debit only, so a
+    // Sapling-funded send showed no fee at all).
+    bool fFromMe = wtx.IsFromMe(filter);
+    for (const JSDescription& jsdesc : wtx.vJoinSplit) {
+        for (const uint256& nullifier : jsdesc.nullifiers) {
+            fFromMe = fFromMe || pwalletMain->IsSproutNullifierFromMe(nullifier);
+        }
+    }
+    for (const SpendDescription& spend : wtx.vShieldedSpend) {
+        fFromMe = fFromMe || pwalletMain->IsSaplingNullifierFromMe(spend.nullifier);
+    }
+    CAmount nFee = 0;
+    CAmount nAmount = nNet;
+    if (fFromMe) {
+        CAmount nTransparentIn = 0;
+        for (const CTxIn& txin : wtx.vin) {
+            auto prev = pwalletMain->mapWallet.find(txin.prevout.hash);
+            if (prev != pwalletMain->mapWallet.end() && txin.prevout.n < prev->second.vout.size()) {
+                nTransparentIn += prev->second.vout[txin.prevout.n].nValue;
+            }
+        }
+        CAmount nShieldedIn = wtx.GetShieldedValueIn();
+        nFee = wtx.GetValueOut() - nTransparentIn - nShieldedIn;
+        if (nShieldedIn == 0) {
+            nAmount = nNet - nFee;
+        }
+    }
 
-    entry.pushKV("amount", ValueFromAmount(nNet - nFee));
-    entry.pushKV("amountZat", nNet - nFee);
-    if (wtx.IsFromMe(filter))
+    entry.pushKV("amount", ValueFromAmount(nAmount));
+    entry.pushKV("amountZat", nAmount);
+    if (fFromMe)
         entry.pushKV("fee", ValueFromAmount(nFee));
 
     WalletTxToJSON(wtx, entry);

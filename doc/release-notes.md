@@ -4,6 +4,25 @@ release-notes at release time)
 Notable changes
 ===============
 
+Next release (beta3), changes since 6.22.0-beta2
+------------------------------------------------
+
+- **`gettransaction` shows the real fee for every funding shape.** On this line a send funded from
+  Sapling showed no `fee` at all: only a transparent debit made a transaction "from me" here
+  (ycash6 showed the sum of the transparent outputs as the fee). The fee is now the transaction's
+  own, still negative: transparent value in (read from the wallet's records of each input's funding
+  transaction) plus shielded value in (Sapling `valueBalance`, Sprout `vpub_new`) less transparent
+  outputs and value moved into a shielded pool. It is shown whenever an input (transparent,
+  post-quantum or shielded) is the wallet's, Sapling and Sprout spends now included. `amount` keeps
+  its meaning, the net change to the wallet's transparent balance excluding the fee, and its values
+  on this line are unchanged except for mixed funding: a send funded by transparent or post-quantum
+  inputs shows minus what left for others; a Sapling-funded send shows the transparent value it
+  paid this wallet (`0` for a send to others, `+x` for a send of `x` to an own ECC or post-quantum
+  address); a send with both transparent and shielded inputs shows the plain transparent net. Both
+  node lines now give the same figures. `listtransactions` and `listsinceblock` are unchanged.
+  Display only: balances, coin selection and consensus never read these figures. Inherited from
+  upstream zcashd.
+
 This is the reference node line (ycashd 4.5.0 with the proposed vault upgrade and Ycash Yellowback
 (YED)). It is built and tested beside ycash6 (ycashd 6.22.0-beta2, the release line), and gives the
 same answers and error strings. No activation height is set on mainnet. None of the changes below
