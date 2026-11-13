@@ -6,8 +6,27 @@ Notable changes
 
 This is the reference node line (ycashd 4.5.0 with the proposed vault upgrade and Ycash Yellowback
 (YED)). It is built and tested beside ycash6 (ycashd 6.22.0-beta2, the release line), and gives the
-same answers and error strings. No activation height is set on mainnet. None of the changes below
-is a consensus change: they are in the wallet, the RPCs, the address text and the tests.
+same answers and error strings. No activation height is set on mainnet. One change below is a
+consensus rule, enforced at every height: Sapling signatures and coinbase outputs must use canonical
+Jubjub encodings, the rule ycash6 and kogany already enforce. The other changes are in the wallet, the
+RPCs, the address text and the tests.
+
+Sapling: canonical Jubjub encodings (consensus, ZIP-216)
+--------------------------------------------------------
+
+- **Rejected at every height:** a transaction whose Sapling `bindingSig` R or any `spendAuthSig` R is
+  one of the two non-canonical Jubjub encodings (u = 0 with the sign bit set), with
+  `bad-sapling-bundle-authorization`, and a coinbase Sapling output whose recovered `pk_d` is the
+  identity in either encoding, with `bad-cb-output-desc-invalid-ct` (ycash6's reject reasons).
+- **Why:** this line links jubjub 0.5.1, which accepted those encodings; ycash6 (jubjub 0.10) and
+  kogany reject them at every height. One such transaction could have split the node lines. The rule
+  is not tied to an upgrade (the beta2 decision, 2026-11-12), so the lines fail the same way before
+  Vault too.
+- **No existing block is affected:** mainnet (to height 3,097,335, stale blocks included) and the
+  fast testnet contain no such encoding.
+- A block carrying one is scored 100; a transaction in the mempool is scored 0, because a node of an
+  earlier build relays it in good faith.
+- Run this build (or a later one) wherever a node must follow the same chain as ycash6 and kogany.
 
 Post-quantum addresses show their scheme (`rpcversion` 9)
 ---------------------------------------------------------
@@ -262,4 +281,7 @@ Known limitations
   rule covers the stock sends.
 - **No YED attestor set on any public network**: Yellowback is live only on regtest with
   `-yellowbackattestorset`.
+- **One known consensus difference, regtest and devnet only:** a pre-Canopy shielded coinbase output
+  with lead byte 0x01 and an ephemeral key inconsistent with its `esk` is rejected here and accepted by
+  ycash6 and kogany (recorded in #180; it arises only on regtest and devnet chains).
 - **Wallet encryption is experimental** (`-experimentalfeatures -developerencryptwallet`).
