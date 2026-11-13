@@ -491,6 +491,7 @@ jobs:
         id: mode
         env:
           REF: ${{ github.base_ref || github.ref_name }}
+          REF_TYPE: ${{ github.base_ref && 'branch' || github.ref_type }}
           HEAD_REF: ${{ github.head_ref }}
           GITHUB_TOKEN: ${{ github.token }}   # read-only: lists the other line's pull requests (public repository)
         run: |
@@ -509,7 +510,13 @@ jobs:
           if [ "$other" = upgrade/vault ] && git ls-remote --exit-code --heads "https://github.com/$OTHER_LINE_REPO.git" "$REF" >/dev/null 2>&1; then other=$REF; fi
           # upgrade/vault carries the in-term and post-quantum lines since 2026-10-12, so it always compares
           # with ycash6's upgrade/vault; the markers below only route the record branches.
-          if [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ] && grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
+          # A release is never routed to a record branch (ycash6's cross-line step, mirrored): a tag compares with
+          # ycash6's pairing tag (vault-params/v<V> -> v<V>) when it exists, else with ycash6's upgrade/vault, and
+          # so does a release/* branch ycash6 does not carry (ycash-dd's configure.ac names no release version).
+          if [ "$REF_TYPE" = tag ] || { [[ $REF == release/* ]] && [ "$other" != "$REF" ]; }; then
+            other=upgrade/vault
+            if [[ $REF == vault-params/v* ]] && git ls-remote --exit-code --tags "https://github.com/$OTHER_LINE_REPO.git" "refs/tags/${REF#vault-params/}" >/dev/null 2>&1; then other=${REF#vault-params/}; fi
+          elif [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ] && grep -q '"inTermClaims"' src/rpc/yellowback.cpp 2>/dev/null; then
             other=upgrade/vault-in-term
             if grep -q '"falconActive"' src/rpc/yellowback.cpp 2>/dev/null; then other=upgrade/quantum-vaults; fi
           fi
