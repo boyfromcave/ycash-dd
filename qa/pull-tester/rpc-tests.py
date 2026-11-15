@@ -128,6 +128,9 @@ BASE_SCRIPTS= [
     # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
     # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
     'wallet_balance_by_type.py',
+    # The chain's transparent value pools by address type (beta3 item 2): transparentPools in getblock and
+    # getblockchaininfo, sums, reorg, restart, the startup fill, -reindex, a node without undo data.
+    'value_pools_by_type.py',
     # getnewaddress takes the address type first too (beta2 item 10): getnewaddress pq | pqslh | p2pkh.
     'wallet_getnewaddress_type.py',
     # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.

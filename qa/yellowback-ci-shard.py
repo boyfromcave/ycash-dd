@@ -78,6 +78,7 @@ WEIGHTS = {
     "reindex": 40,
     "txn_doublespend": 30,
     "wallet_balance_by_type": 90,       # estimate (2026-11-10): two nodes, one restart, two reorgs
+    "value_pools_by_type": 150,         # estimate (2026-11-15): two nodes, five restarts (one -reindex), two reorgs
     "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
     "wallet_yed_held_guard": 150,       # estimate (2026-11-11): several restarts, three copied wallets
     "wallet_yed_output_guard": 400,     # estimate (2026-11-12): the cancel_limit run, two copied datadirs
