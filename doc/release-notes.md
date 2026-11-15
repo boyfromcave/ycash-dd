@@ -13,13 +13,9 @@ Next release (beta3), changes since 6.22.0-beta2
   own, still negative: transparent value in (read from the wallet's records of each input's funding
   transaction) plus shielded value in (Sapling `valueBalance`, Sprout `vpub_new`) less transparent
   outputs and value moved into a shielded pool. It is shown whenever an input (transparent,
-  post-quantum or shielded) is the wallet's, Sapling and Sprout spends now included. `amount` keeps
-  its meaning, the net change to the wallet's transparent balance excluding the fee, and its values
-  on this line are unchanged except for mixed funding: a send funded by transparent or post-quantum
-  inputs shows minus what left for others; a Sapling-funded send shows the transparent value it
-  paid this wallet (`0` for a send to others, `+x` for a send of `x` to an own ECC or post-quantum
-  address); a send with both transparent and shielded inputs shows the plain transparent net. Both
-  node lines now give the same figures. `listtransactions` and `listsinceblock` are unchanged.
+  post-quantum or shielded) is the wallet's, Sapling and Sprout spends now included. `amount` is
+  unchanged (upstream's figure; for a Sapling-funded send it still differs from ycash6's, whose
+  wallet counts a Sapling spend as "from me"), and so are `listtransactions` and `listsinceblock`.
   Display only: balances, coin selection and consensus never read these figures. Inherited from
   upstream zcashd.
 

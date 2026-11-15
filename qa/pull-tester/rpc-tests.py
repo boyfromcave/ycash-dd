@@ -128,7 +128,7 @@ BASE_SCRIPTS= [
     # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
     # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
     'wallet_balance_by_type.py',
-    # beta3 item 1: gettransaction's fee and amount for every funding shape (ECC, Sapling, post-quantum in and out).
+    # beta3 item 1: gettransaction's fee for every funding shape (ECC, Sapling, post-quantum, mixed), amount unchanged.
     'wallet_gettransaction_fee.py',
     # getnewaddress takes the address type first too (beta2 item 10): getnewaddress pq | pqslh | p2pkh.
     'wallet_getnewaddress_type.py',
