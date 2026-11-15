@@ -327,10 +327,28 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
     BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 2.96875);    //95% of the reward
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.15625); // 5% of the reward
 
+    // Inside the YDF mandate (mainnet below 2275000) the 5% is required whatever -ydf says.
+    mapArgs["-ydf"] = "0";
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2000000"));
+    obj = retValue.get_obj();
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 2.96875);    //95% of the reward
+    BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.15625); // 5% of the reward
+    mapArgs.erase("-ydf");
+
+    // Past the mandate the share is the -ydf setting: by default (DEFAULT_YDF_FEE_PERCENTAGE = 0)
+    // nothing, the whole subsidy to the miner.
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2726400"));
+    obj = retValue.get_obj();
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 1.5625);     // Ycash 100% to miner
+    BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0);     // no donation by default
+
+    // A donating miner sets -ydf=5.
+    mapArgs["-ydf"] = "5";
     BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2726400"));
     obj = retValue.get_obj();
     BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 1.484375);   // Ycash 95% to miner
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.078125);  // Ycash 5% dev fee
+    mapArgs.erase("-ydf");
 
     /*
      * getblock
