@@ -128,6 +128,7 @@ class GetrawtransactionInsightPQTest(BitcoinTestFramework):
 
         print('getaddresstxids, getaddressdeltas, getspentinfo (and getaddressfirstlastheight) for each address')
         has_first_last = 'getaddressfirstlastheight' in n0.help()
+        print('    getaddressfirstlastheight: %s' % ('checked' if has_first_last else 'not on this line'))
         for k, a in src.items():
             assert_equal((k, sorted(n0.getaddresstxids({'addresses': [a]}))), (k, sorted([fund, spend[k]])))
             d = n0.getaddressdeltas({'addresses': [a]})
