@@ -951,7 +951,7 @@ UniValue getblocksubsidy(const UniValue& params, bool fHelp)
             "\nResult:\n"
             "{\n"
             "  \"miner\" : x.xxx,              (numeric) The mining reward amount in " + CURRENCY_UNIT + ".\n"
-            "  \"founders\" : x.xxx,           (numeric) The founders' reward amount in " + CURRENCY_UNIT + ".\n"
+            "  \"founders\" : x.xxx,           (numeric) The founders' reward amount in " + CURRENCY_UNIT + " (during the Ycash Development Fund mandate the required 5%; after it the share this node's -ydf setting donates, default 0).\n"
             "  \"foundersaddress\" : xxx       (string)  The founders reward address for the block height .\n"  
             "  \"fundingstreams\" : [          (array) An array of funding stream descriptions (present only when Canopy has activated).\n"
             "    {\n"

@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -36,8 +37,10 @@ static constexpr uint32_t TX_EXPIRY_HEIGHT_THRESHOLD = 500000000;
 static const unsigned int ZIP212_GRACE_PERIOD = 3;
 /** The maximum allowed YDF fee percentage after it becomes optional */
 static const unsigned int MAX_YDF_FEE_PERCENTAGE = 5;
-/** Default for -ydf **/
-static const unsigned int DEFAULT_YDF_FEE_PERCENTAGE = MAX_YDF_FEE_PERCENTAGE;
+/** Default for -ydf: no donation after the mandate ends; a miner who donates sets -ydf=5.
+ *  Read only by the miner, getblocksubsidy, the metrics screen and init, never by block
+ *  validation (ContextualCheckBlock checks the mandate's 5 % output by height alone). **/
+static const unsigned int DEFAULT_YDF_FEE_PERCENTAGE = 0;
 
 /** Flags for LockTime() */
 enum {

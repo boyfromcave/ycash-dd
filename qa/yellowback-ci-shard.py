@@ -98,6 +98,7 @@ WEIGHTS = {
     "vault_undo_prune":         240,
     "wallet_pq_address":        240,
     "ycash_bootstrap":          240,
+    "ycash_ydf_default":        30,     # measured 2026-11-15 (17 s, laptop): two nodes, 107 blocks, two sends
     "yellowback_attest_bond":   240,
     "yellowback_attest_evict":  240,
     "yellowback_attest_live":   240,
