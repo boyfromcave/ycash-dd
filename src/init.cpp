@@ -598,7 +598,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-blockminsize=<n>", strprintf(_("Set minimum block size in bytes (default: %u)"), DEFAULT_BLOCK_MIN_SIZE));
     strUsage += HelpMessageOpt("-blockmaxsize=<n>", strprintf(_("Set maximum block size in bytes (default: %d)"), DEFAULT_BLOCK_MAX_SIZE));
     strUsage += HelpMessageOpt("-blockprioritysize=<n>", strprintf(_("Set maximum size of high-priority/low-fee transactions in bytes (default: %d)"), DEFAULT_BLOCK_PRIORITY_SIZE));
-    strUsage += HelpMessageOpt("-ydf=<n>", strprintf(_("Set optional YDF fee in percents (integer in range 0-100; default: %u)"), DEFAULT_YDF_FEE_PERCENTAGE));
+    strUsage += HelpMessageOpt("-ydf=<n>", strprintf(_("After the Ycash Development Fund mandate ends, include an output of n%% of the block subsidy in mined blocks as a donation to the fund (0 pays nothing; a miner who donates sets -ydf=5). Before the mandate ends the 5%% output is required whatever -ydf says. Values outside 0..100 are reset to the default. (default: %u)"), DEFAULT_YDF_FEE_PERCENTAGE));
     if (GetBoolArg("-help-debug", false))
         strUsage += HelpMessageOpt("-blockversion=<n>", strprintf("Override block version to test forking scenarios (default: %d)", (int)CBlock::CURRENT_VERSION));
 
