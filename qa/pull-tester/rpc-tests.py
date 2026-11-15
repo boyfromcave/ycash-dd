@@ -134,6 +134,8 @@ BASE_SCRIPTS= [
     'wallet_address_matrix.py',
     # beta2 audit H1 / A-M2: a PQ send's fee cap at the RPC and the commit, no rebroadcast of a refused send; uneconomic PQ coins.
     'wallet_pq_fee_cap.py',
+    # beta3 item 6: vin[].address of an input spending an FN-DSA or SLH-DSA output (getrawtransaction, getblock 2, getblockdeltas).
+    'getrawtransaction_insight_pq.py',
     # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
     'wallet_yed_ecc_token.py',
     'wallet_beta2_followups.py',

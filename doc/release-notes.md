@@ -230,10 +230,12 @@ Defects fixed
 Plain-YEC post-quantum addresses: notes carried from beta 1
 -----------------------------------------------------------
 
-- **Inputs spending post-quantum coins carry no address** in `getblockdeltas`, `getspentinfo` and
-  `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
-  Hash160, and a `TX_PQPKH` key hash is 32 bytes. `getaddressdeltas`, `getaddressutxos`,
-  `getaddressbalance` and `getaddresstxids` name them as requested.
+- **Inputs spending post-quantum coins name their address** (fixed in beta3; they carried none
+  before) in `getrawtransaction` (verbose `vin[].address`), `getblock` verbosity 2 and
+  `getblockdeltas`, in the D-9 form: the insight index keys a spent output by a Hash160 that cannot
+  be inverted, so the node reads the address from the spent output and checks it against the index
+  key. `getaddressdeltas`, `getaddressutxos`, `getaddressbalance` and `getaddresstxids` name them as
+  requested. No reindex is needed.
 - **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` whose address index was
   built by a build before 6.22.0-beta1: the index of earlier blocks holds no `TX_PQPKH` outputs
   until it is rebuilt. D-9 needs no reindex: the index is keyed by the key hash, not the text.
