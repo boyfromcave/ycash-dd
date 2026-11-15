@@ -28,6 +28,21 @@ Sapling: canonical Jubjub encodings (consensus, ZIP-216)
   earlier build relays it in good faith.
 - Run this build (or a later one) wherever a node must follow the same chain as ycash6 and kogany.
 
+Chain value pools by address type (`transparentPools`)
+------------------------------------------------------
+
+- **New field.** `getblockchaininfo` and `getblock` (verbosity 1 and 2) carry `transparentPools`: the transparent
+  value pool split into `transparent_ecc`, `transparent_pq` (with `pq_by_scheme`), `pq_channel`, `vault` and
+  `vault_intent`, plus `vault_by_module` (the YED module's part of the vault entries). The ids match the wallet's
+  `z_gettotalbalance` fields. Details: `doc/yellowback-rpc.md`, "`getblock` and `getblockchaininfo`".
+- **`valuePools` is unchanged**, entries and order alike. Clients should find pools by `id`, never by position.
+- **No reindex.** The figures come from a node-side index under `blocks/valuepools/`. On the first start of this
+  build a node fills it once from the block and undo files it has (a read, no validation; progress in the log
+  every 10,000 blocks). This line has no compiled seed, so the fill reads from genesis. A pruned node that lacks
+  old undo data reports `"monitored": false` until it is reindexed. Downgrading ignores the directory.
+- **Not a consensus change.** The index is written after a block has passed every check, never rejects a block and
+  never stops the node; a failure is logged and the index stops covering the blocks after it.
+
 Post-quantum addresses show their scheme (`rpcversion` 9)
 ---------------------------------------------------------
 
