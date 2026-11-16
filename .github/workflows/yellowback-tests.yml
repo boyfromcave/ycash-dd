@@ -160,7 +160,9 @@ env:
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
   # 0c95229 (yellowback#43, D-9) adds the generator's prefix line (rpcversion 9: yed_getinfo's pqAddressVersion /
   # pq.plainAddressVersion as objects keyed by scheme, docs/plans/yellowback-pq-prefix-rpc-delta.md section 4.12).
-  WORKSPACE_COMMIT: 0c952297195a00494ee0a41b6bb930b2c85b63e4
+  # dbf53a8 (B3-D5) adds the generator's beta3 line (rpcversion 10: no yed_* shape change,
+  # docs/plans/beta3/rpc-contract-delta.md section 4.13).
+  WORKSPACE_COMMIT: dbf53a83db4ee5fbb54992fbc4274b3902f1c5f5
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.

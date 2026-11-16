@@ -4,27 +4,95 @@ release-notes at release time)
 Notable changes
 ===============
 
-Next release (beta3), changes since 6.22.0-beta2
-------------------------------------------------
+6.22.0-beta3 (next release), changes since 6.22.0-beta2
+-------------------------------------------------------
 
-- **`gettransaction` shows the real fee for every funding shape.** On this line a send funded from
-  Sapling showed no `fee` at all: only a transparent debit made a transaction "from me" here
-  (ycash6 showed the sum of the transparent outputs as the fee). The fee is now the transaction's
-  own, still negative: transparent value in (read from the wallet's records of each input's funding
-  transaction) plus shielded value in (Sapling `valueBalance`, Sprout `vpub_new`) less transparent
-  outputs and value moved into a shielded pool. It is shown whenever an input (transparent,
-  post-quantum or shielded) is the wallet's, Sapling and Sprout spends now included. `amount` is
-  unchanged (upstream's figure; for a Sapling-funded send it still differs from ycash6's, whose
-  wallet counts a Sapling spend as "from me"), and so are `listtransactions`, `listsinceblock` and
-  `details[]`: for a Sapling-funded send the top-level `fee` can differ from `details[].fee`, which
-  counts the transparent debit only. When the wallet does not hold the funding transaction of every
-  transparent input (a jointly built transaction, or after `-zapwallettxes`), `fee` is left out
-  rather than shown too small.
-  Display only: balances, coin selection and consensus never read these figures. Inherited from
-  upstream zcashd.
+### What you must do when upgrading
 
-Chain value pools by address type (`transparentPools`)
-------------------------------------------------------
+1. **Clients: accept `rpcversion` 10.** `yed_getinfo.rpcversion` is 10 (beta2 was 9). No `yed_*`
+   field changes shape; a client that checks `rpcversion >= 10` knows the node has every addition
+   below. A client that requires exactly 9 must be changed to accept 10.
+2. **Miners and pools: the development-fund donation now defaults to 0 %.** Past the mandate's end
+   (mainnet height 2,275,000) a block this build mines pays the whole subsidy and every fee to the
+   miner. A miner or pool that wants to keep donating sets `-ydf=5`. Nothing changes during the
+   mandate, which consensus still enforces. A pool needs no other change: `getblocktemplate` and
+   `submitblock` keep their shape, and `getcoinbasetemplatefor` (below) is optional.
+3. **Fast testnet (testnet-yb-fast): every node must run this build before the chain reaches the
+   fund mandate's end there**, at height **(set at the release candidate)**. This is one-way: a node
+   on an earlier build stops following the chain at that height and bans the peer that sent the
+   block, so a node upgraded late needs `clearbanned` afterwards. Until every node has upgraded, a
+   fast-testnet pool keeps `-ydf=5`, whose blocks every build accepts. Mainnet, the slow and legacy
+   testnet profiles and regtest are unchanged.
+4. **The first start takes longer.** The node fills its new value-pool index once from genesis
+   (about 12 minutes on a mainnet node, seconds on regtest; the RPC server answers -28, warming up,
+   until it is done). No reindex.
+5. **Containers that restore a snapshot (`YCASHD_BOOTSTRAP`).** This line's image refuses
+   `YCASHD_BOOTSTRAP` on mainnet (a mainnet bundle is a ycash6 data directory; a mainnet node of
+   this line syncs from peers). On a testnet the entrypoint now refuses a network directory whose
+   `blocks/` holds data but has no `bootstrap.json` (a datadir an earlier image started on after a
+   failed restore): if you know that datadir is good, set `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1`, or
+   unset `YCASHD_BOOTSTRAP`. A failed restore now leaves `<network>.bootstrap-incomplete` in the
+   datadir, and the container will not start past it until you clear it
+   (`contrib/bootstrap/README.md`, "The marker").
+
+The changes, in order: the fast testnet's mandate end (the one consensus change), the `-ydf`
+default, `getcoinbasetemplatefor` and a `getblocktemplate` fix, `transparentPools`,
+`gettransaction`'s fee, the address of a post-quantum input, snapshot restores, and what
+`rpcversion` 10 covers; then the known limitations.
+
+### Fast testnet: the development-fund mandate ends (consensus, testnet-yb-fast only)
+
+- **A scheduled rule change on the fast testnet.** The fast profile gets its own mandate end,
+  `TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, at height **(set at the release candidate)**: the
+  fast-testnet tip when the release candidate is cut, plus 400 blocks. From that height a fast-testnet block is valid with
+  or without the 5 % fund output, as on mainnet since 2,275,000; below it the output stays required.
+  Until now the fast profile inherited the 900,000 of the original Ycash testnet, about 389,000 blocks
+  away.
+- **Every fast-testnet node must run this build before the chain reaches the height.** A node on an
+  earlier build rejects the first block without the fund output and stops following the chain. It
+  also bans the peer that sent the block (24 hours, kept in `banlist.dat`), so a node upgraded late
+  needs `clearbanned` after the upgrade to reconnect to its peers.
+- **The safe setting while nodes upgrade:** a pool that sets `-ydf=5` mines blocks that every build
+  accepts (the 5 % output stays valid after the height). Keep it until every node has upgraded.
+- Mainnet, the slow and legacy testnet profiles and regtest are unchanged.
+
+### Mining: the development-fund donation is opt-in (`-ydf`, default 0)
+
+- **The default changes from 5 to 0.** After the Ycash Development Fund mandate ends (mainnet height
+  2,275,000), a block this node mines pays the whole subsidy and every fee to the miner and carries
+  no fund output. A miner who wants to keep donating sets `-ydf=5` (any whole percentage from 0 to
+  100 is accepted, as before). A value outside that range (`-ydf=-1`, `-ydf=101`) is reset to the
+  default, so it now means 0 where it used to mean 5.
+- **Not a consensus change.** Past the mandate a block is valid with or without the fund output;
+  `DEFAULT_YDF_FEE_PERCENTAGE` is read by the miner, `getblocksubsidy`, the metrics screen and the
+  option check, never by block validation.
+- **The mandate period is unchanged:** below the mandate's end (2,275,000 on mainnet, testnet-yb-slow
+  and testnet-legacy; testnet-yb-fast has its own end, see above) the 5 % output is
+  required by consensus and the miner still pays it whatever `-ydf` says.
+- `getblocksubsidy`'s `founders` past the mandate is the share this node's `-ydf` setting donates
+  (0 by default); the metrics screen counts the reward the same way.
+
+### Mining: a coinbase for each miner's own address (`getcoinbasetemplatefor`)
+
+- **New RPC** `getcoinbasetemplatefor "address" {"previousblockhash": …, "txids": […]}`: a complete
+  coinbase that pays `address` (transparent, Sapling or post-quantum) for the block template the
+  caller names by its previous block hash and transaction ids. A pool pairs it with the header
+  fields and transactions of the `getblocktemplate` reply it holds, so each miner is paid in the
+  block it finds, at its own address, shielded addresses included
+  (`doc/yellowback-mining.md` §13).
+- **The node derives the amount; there is no amount argument.** The address receives the block
+  subsidy plus the fee of every named transaction, less the development-fund output this node's own
+  coinbase carries at that height (required during the mandate; afterwards the `-ydf` share, 0 by
+  default). A reference that no longer holds is refused (`template-stale: …`), and so is a coinbase
+  the block has no room for (`coinbase-does-not-fit: …`).
+- **Not a consensus change**, and `getblocktemplate` and `submitblock` are untouched: the node
+  keeps nothing between calls. The same call, answers and error strings on ycash6.
+- **`getblocktemplate` reports `foundersreward` for a Sapling miner address.** It read the coinbase's
+  second output, which a Sapling coinbase does not have (its fund output is the first), and showed 0
+  or the wrong value; it now derives the fund output's value by the rule the coinbase is built with,
+  as `getblocksubsidy` does. ycash6 was already right.
+
+### Chain value pools by address type (`transparentPools`)
 
 - **New field.** `getblockchaininfo` and `getblock` (verbosity 1 and 2) carry `transparentPools`: the transparent
   value pool split into `transparent_ecc`, `transparent_pq` (with `pq_by_scheme`), `pq_channel`, `vault` and
@@ -42,58 +110,93 @@ Chain value pools by address type (`transparentPools`)
   never stops the node; a failure is logged and the index stops covering the blocks after it. A failed write (a full
   disk) turns the index off until the next restart, which resumes the fill.
 
-Mining: the development-fund donation is opt-in (`-ydf`, default 0)
+### `gettransaction` shows the real fee for every funding shape
+
+- On this line a send funded from Sapling showed no `fee` at all: only a transparent debit made a transaction "from me" here
+  (ycash6 showed the sum of the transparent outputs as the fee). The fee is now the transaction's
+  own, still negative: transparent value in (read from the wallet's records of each input's funding
+  transaction) plus shielded value in (Sapling `valueBalance`, Sprout `vpub_new`) less transparent
+  outputs and value moved into a shielded pool. It is shown whenever an input (transparent,
+  post-quantum or shielded) is the wallet's, Sapling and Sprout spends now included. `amount` is
+  unchanged (upstream's figure; for a Sapling-funded send it still differs from ycash6's, whose
+  wallet counts a Sapling spend as "from me"), and so are `listtransactions`, `listsinceblock` and
+  `details[]`: for a Sapling-funded send the top-level `fee` can differ from `details[].fee`, which
+  counts the transparent debit only. When the wallet does not hold the funding transaction of every
+  transparent input (a jointly built transaction, or after `-zapwallettxes`), `fee` is left out
+  rather than shown too small.
+  Display only: balances, coin selection and consensus never read these figures. Inherited from
+  upstream zcashd.
+
+### Inputs spending post-quantum coins name their address
+
+- On a `-insightexplorer` node, `getrawtransaction` (verbose `vin[].address`), `getblock` verbosity 2,
+  `getblockdeltas` and REST `/rest/tx/<txid>.json` now name the address of an input that spends a
+  post-quantum output, in the scheme-visible form of beta2 (`sqf…`/`sqs…`, `tqf…`/`tqs…`, `rqf…`/`rqs…`); they carried
+  only `value`/`valueSat` before. The insight index keys a spent output by a Hash160 that cannot be
+  inverted, so the node reads the address from the spent output and checks it against the index key.
+  No reindex is needed. The same answers as ycash6.
+
+### Snapshot restores (`contrib/bootstrap/ycash-bootstrap`)
+
+- **A restore cannot fail silently**. A restore that is refused or fails exits non-zero and
+  leaves `DATADIR/<network>.bootstrap-incomplete`, which the container entrypoint will not start past
+  (`contrib/bootstrap/README.md`, "The marker"). The import node ignores peers whatever `ycash.conf`
+  says, and the restore fails if it ever has a connection. A 403 for an absent `SHA256SUMS.minisig`
+  counts as absent exactly where a 404 does, never as verified.
+- **State bundles in parts**. `ycash-bootstrap` reads `ycash-state/2` and `ycash-state/3`
+  (the tar.gz stream stored in 1 GiB parts), so bundles above 50 GB can be published, and restores
+  mainnet (`--network main`, a state bundle only; the tool is the same on both lines, and a mainnet
+  bundle is a ycash6 data directory, for a ycash6 node). Each part is fetched, checked against its signed
+  `SHA256SUMS` line before any of it reaches the extractor, resumed after a broken download and
+  deleted once extracted (`--keep-parts` keeps them): one part of extra disk. Free disk is checked up
+  front. A source ending in `latest/` now works (it is read for the height, then every file comes
+  from `../<height>/`).
+- **Signatures.** On mainnet the signature is always required and `--allow-unsigned` is refused
+  before any request; elsewhere a state bundle over http(s) and an unpinned prefix need it too, and
+  `--allow-unsigned` accepts an unsigned one with a warning. The "not signed" message names the HTTP
+  status of the missing `.minisig`.
+- **No restore hangs**: the node check after a state restore fails after `--stall-timeout` (default
+  1800 s) also when the restored `ycashd` never leaves warm-up (it used to wait forever), and a full
+  disk during a part's download fails at once with "no space left on the disk" instead of being
+  retried as a broken connection.
+- **This line's container image refuses `YCASHD_BOOTSTRAP` on mainnet** (exit 2, before `ycashd`
+  starts): a mainnet state bundle is a ycash6 data directory, so use the ycash6 image. The testnets
+  restore as before.
+- While `YCASHD_BOOTSTRAP` is set, the entrypoint refuses a network directory whose `blocks/` holds data
+  but has no `bootstrap.json` (an image before beta3 started on a failed restore), unless
+  `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1`.
+- Tooling only: no node, RPC or consensus change.
+
+### `rpcversion` 10: what changed
+
+`yed_getinfo.rpcversion` is 10 (was 9), one step for every change of this release. No `yed_*` field
+changes shape; every change is an addition to a stock call, and the number tells a client the node has
+all of them. Clients that require an exact version must accept 10.
+
+| Call or field | Change |
+|---|---|
+| `getcoinbasetemplatefor` | new call; result `data`, `hash`, `height`, `previousblockhash`, `addresstype`, `subsidy`, `fund`, `fundrule`, `fees`, `amount`, `txcount`, `flags`, `sigops`; errors `template-stale: …`, `coinbase-does-not-fit: …` |
+| `getblocktemplate` `coinbasetxn.foundersreward` | right for a Sapling miner address (this line only; ycash6 was right) |
+| `getblockchaininfo`, `getblock` (verbosity 1, 2) | new `transparentPools` object; `valuePools` unchanged |
+| `getrawtransaction` (verbose), `getblock` verbosity 2, `getblockdeltas`, REST `/rest/tx` | `vin[].address` (`inputs[].address`) for an input spending a post-quantum output |
+| `gettransaction` | `fee` for every funding shape; left out when the funding transaction of a transparent input is not held |
+| `-ydf`, `getblocksubsidy` `founders`, `getblocktemplate` `coinbasetxn.ydfpercentage` | default 0; past the mandate they report this node's `-ydf` share (ycash6's `getblocktemplate` has no `ydfpercentage`) |
+
+### Known limitations
+
+- **`gettransaction`'s `fee` and `details[].fee` can differ** for a Sapling-funded send (the second
+  counts the transparent debit only), and `fee` is left out when the wallet does not hold the funding
+  transaction of every transparent input. `amount` for a Sapling-funded send still differs from
+  ycash6's.
+- **A pruned node** that lacks old undo data reports `"monitored": false` in `transparentPools` until
+  it is reindexed.
+- **`getcoinbasetemplatefor` checks that each named transaction is in the mempool, not that the set
+  is complete or in order.** Name `getblocktemplate`'s list verbatim, or the block is invalid.
+- **No mainnet snapshot restore on this line**; a mainnet node syncs from peers.
+- **No YED attestor set on any public network**, as in beta2.
+
+Changes in 6.22.0-beta2 (ycash-dd tag `vault-params/v6.22.0-beta2`)
 -------------------------------------------------------------------
-
-- **The default changes from 5 to 0.** After the Ycash Development Fund mandate ends (mainnet height
-  2,275,000), a block this node mines pays the whole subsidy and every fee to the miner and carries
-  no fund output. A miner who wants to keep donating sets `-ydf=5` (any whole percentage from 0 to
-  100 is accepted, as before). A value outside that range (`-ydf=-1`, `-ydf=101`) is reset to the
-  default, so it now means 0 where it used to mean 5.
-- **Not a consensus change.** Past the mandate a block is valid with or without the fund output;
-  `DEFAULT_YDF_FEE_PERCENTAGE` is read by the miner, `getblocksubsidy`, the metrics screen and the
-  option check, never by block validation.
-- **The mandate period is unchanged:** below the mandate's end (2,275,000 on mainnet, testnet-yb-slow
-  and testnet-legacy; testnet-yb-fast has its own end, see the next section) the 5 % output is
-  required by consensus and the miner still pays it whatever `-ydf` says.
-- `getblocksubsidy`'s `founders` past the mandate is the share this node's `-ydf` setting donates
-  (0 by default); the metrics screen counts the reward the same way.
-
-Fast testnet: the development-fund mandate ends (consensus, testnet-yb-fast only)
----------------------------------------------------------------------------------
-
-- **A scheduled rule change on the fast testnet.** The fast profile gets its own mandate end,
-  `TESTNET_FAST_YDF_MANDATE_END_HEIGHT`. The tree carries a provisional 600,000, deliberately far
-  above the tip so that a build made before the cut stays strict; the final height is set when the
-  release candidate is cut (the fast-testnet tip then, plus 400 blocks), and the release guard refuses
-  an rc or final tag that still carries 600,000. From that height a fast-testnet block is valid with
-  or without the 5 % fund output, as on mainnet since 2,275,000; below it the output stays required.
-  Until now the fast profile inherited the 900,000 of the original Ycash testnet, about 389,000 blocks
-  away.
-- **Every fast-testnet node must run this build before the chain reaches the height.** A node on an
-  earlier build rejects the first block without the fund output and stops following the chain. It
-  also bans the peer that sent the block (24 hours, kept in `banlist.dat`), so a node upgraded late
-  needs `clearbanned` after the upgrade to reconnect to its peers.
-- **The safe setting while nodes upgrade:** a pool that sets `-ydf=5` mines blocks that every build
-  accepts (the 5 % output stays valid after the height). Keep it until every node has upgraded.
-- Mainnet, the slow and legacy testnet profiles and regtest are unchanged.
-
-Mining: a coinbase for each miner's own address (`getcoinbasetemplatefor`)
---------------------------------------------------------------------------
-
-- **New RPC** `getcoinbasetemplatefor "address" {"previousblockhash": …, "txids": […]}`: a complete
-  coinbase that pays `address` (transparent, Sapling or post-quantum) for the block template the
-  caller names by its previous block hash and transaction ids. A pool pairs it with the header
-  fields and transactions of the `getblocktemplate` reply it holds, so each miner is paid in the
-  block it finds, at its own address, shielded addresses included
-  (`doc/yellowback-mining.md` §13).
-- **The node derives the amount; there is no amount argument.** The address receives the block
-  subsidy plus the fee of every named transaction, less the development-fund output this node's own
-  coinbase carries at that height (required during the mandate; afterwards the `-ydf` share, 0 by
-  default). A reference that no longer holds is refused (`template-stale: …`), and so is a coinbase
-  the block has no room for (`coinbase-does-not-fit: …`).
-- **Not a consensus change**, and `getblocktemplate` and `submitblock` are untouched: the node
-  keeps nothing between calls. The same call, answers and error strings on ycash6.
 
 This is the reference node line (ycashd 4.5.0 with the proposed vault upgrade and Ycash Yellowback
 (YED)). It is built and tested beside ycash6 (ycashd 6.22.0-beta2, the release line), and gives the
