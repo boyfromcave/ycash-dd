@@ -156,7 +156,45 @@ UniValue TxShieldedOutputsToJSON(const CTransaction& tx) {
     return vdesc;
 }
 
-void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
+// insightexplorer: the address of the output a spent-index entry describes (beta3 item 6). A post-quantum output is
+// indexed by Hash160(scheme || keyHash) (CScript::AddressHash), which cannot be turned back into its address; the
+// getaddress* calls name it as the request did (src/rpc/misc.cpp, AddressNames), but no request names the spent
+// output of an input. So the address is read from the spent output itself (-insightexplorer requires -txindex) and
+// named only if that output hashes to the index key. `prevTxs`, when given, keeps the parents read during one
+// call (getblock 2, getblockdeltas), so a block whose inputs share a parent reads it once.
+CTxDestination SpentInfoDestination(
+    const COutPoint& prevout, CSpentIndexValue& spentInfo, std::map<uint256, CTransaction>* prevTxs)
+{
+    if (spentInfo.addressType != CScript::P2PQPKH) {
+        return DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+    }
+    CTransaction local;
+    CTransaction* prevTx = &local;
+    bool cached = false;
+    if (prevTxs) {
+        cached = prevTxs->count(prevout.hash) > 0;
+        prevTx = &(*prevTxs)[prevout.hash];
+    }
+    if (!cached) {
+        uint256 prevBlock;
+        if (!GetTransaction(prevout.hash, *prevTx, Params().GetConsensus(), prevBlock, true)) {
+            if (prevTxs) prevTxs->erase(prevout.hash);
+            return CNoDestination();
+        }
+    }
+    if (prevout.n >= prevTx->vout.size()) {
+        return CNoDestination();
+    }
+    const CScript& script = prevTx->vout[prevout.n].scriptPubKey;
+    CTxDestination dest;
+    if (script.GetType() != CScript::P2PQPKH || script.AddressHash() != spentInfo.addressHash ||
+        !ExtractDestination(script, dest) || !IsPQKeyDestination(dest)) {
+        return CNoDestination();
+    }
+    return dest;
+}
+
+void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry, std::map<uint256, CTransaction>* prevTxs)
 {
     const uint256 txid = tx.GetHash();
     entry.pushKV("txid", txid.GetHex());
@@ -194,8 +232,7 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
                 in.pushKV("value", ValueFromAmount(spentInfo.satoshis));
                 in.pushKV("valueSat", spentInfo.satoshis);
 
-                CTxDestination dest =
-                    DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+                CTxDestination dest = SpentInfoDestination(txin.prevout, spentInfo, prevTxs);
                 if (IsValidDestination(dest)) {
                     in.pushKV("address", keyIO.EncodeDestination(dest));
                 }
@@ -275,6 +312,11 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
     }
 }
 
+void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
+{
+    TxToJSON(tx, hashBlock, entry, nullptr);
+}
+
 UniValue getrawtransaction(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() < 1 || params.size() > 3)
@@ -316,6 +358,9 @@ UniValue getrawtransaction(const UniValue& params, bool fHelp)
             "         \"hex\": \"hex\"   (string) hex\n"
             "       },\n"
             "       \"sequence\": n      (numeric) The script sequence number\n"
+            "       \"value\": n         (numeric, optional) The value of the output being spent in " + CURRENCY_UNIT + "\n"
+            "       \"valueSat\": n      (numeric, optional) The value of the output being spent, in zats\n"
+            "       \"address\": \"addr\",  (string, optional) The transparent or post-quantum address of the output being spent\n"
             "     }\n"
             "     ,...\n"
             "  ],\n"
