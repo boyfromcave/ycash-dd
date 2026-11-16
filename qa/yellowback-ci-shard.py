@@ -60,6 +60,7 @@ WEIGHTS = {
     "vault_bridge": 200,
     "wallet_address_matrix": 300,       # estimate (2026-11-10): 20 sends, five SLH-DSA spends, a reorg, three merges
     "wallet_pq_fee_cap": 60,            # measured 2026-11-11: two restarts, a merge, a capped send
+    "wallet_pq_sendmany_lock": 45,      # measured 2026-11-16: one 24-input SLH-DSA send, a merge refused while it signs
     "wallet_yed_ecc_token": 90,         # measured 2026-11-11: Yellowback live late, a mint and a transfer
     "wallet_beta2_followups": 150,      # estimate (2026-11-11): two nodes, several restarts (beta2 wallet follow-ups)
     "wallet_beta2_followups2": 240,     # estimate (2026-11-12): three nodes, YED activation, Sapling proofs (follow-ups, second round)
