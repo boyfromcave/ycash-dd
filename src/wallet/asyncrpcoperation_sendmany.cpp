@@ -1072,7 +1072,7 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         builder_.AddTransparentInputUnsigned(COutPoint(c.tx->GetHash(), c.i), txOut.nValue);
         pq_inputs_.push_back(PQBuilderInput{i, COutPoint(c.tx->GetHash(), c.i), txOut.scriptPubKey, txOut.nValue});
     }
-    // Lock the selected coins before cs_wallet is released (ycash6's WalletTxBuilder::PreparePQTransaction does the
+    // Lock the selected coins before cs_wallet is released (the 6.20.0 line's WalletTxBuilder::PreparePQTransaction does the
     // same): the operation builds and signs them after this returns (up to ~33 s for 100 SLH-DSA inputs), and a
     // concurrent send from the same address would otherwise select the same coins and fail only at its broadcast.
     // AvailableCoins left out every coin already locked, so each of these was unlocked and is ours to unlock again:
