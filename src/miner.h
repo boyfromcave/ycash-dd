@@ -1,5 +1,6 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2013 The Bitcoin Core developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -72,6 +73,11 @@ struct CBlockTemplate
 };
 
 CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight);
+/** The same coinbase with the scriptSig bytes after `<height> OP_0` given by the caller instead of read from the
+ *  global COINBASE_FLAGS (which belongs to CreateNewBlock, under cs_main). The outputs, the development-fund
+ *  rule (-ydf included) and the Sapling proof are those of the function above: it calls this one. Holds no lock
+ *  and needs none, so getcoinbasetemplatefor proves outside cs_main. */
+CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags);
 
 /** Generate a new block, without valid proof-of-work */
 CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const MinerAddress& minerAddress, const std::optional<CMutableTransaction>& next_coinbase_mtx = std::nullopt);

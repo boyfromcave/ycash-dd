@@ -97,6 +97,7 @@ WEIGHTS = {
     "vault_refee":              240,
     "vault_undo_prune":         240,
     "wallet_pq_address":        240,
+    "getcoinbasetemplatefor":   90,     # measured 2026-11-15 (53 s, laptop): three nodes, 130 blocks, 28 Sapling proofs, a 2 MB block
     "ycash_bootstrap":          240,
     "ycash_ydf_default":        30,     # measured 2026-11-15 (17 s, laptop): two nodes, 107 blocks, two sends
     "yellowback_attest_bond":   240,
