@@ -217,8 +217,10 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
     def change_refusal(self, src, outs, selected, sent, fee=None):
         """The send selects coinbase and would leave change: the wallet refuses it and names the one amount that
         spends the `selected` zat. Returns (that amount, the fee) in zat."""
-        m = CHANGE_REFUSAL.match(self.refused(src, outs, WALLET_ERROR, fee))
-        assert m, 'not the change refusal'
+        message = self.refused(src, outs, WALLET_ERROR, fee)
+        m = CHANGE_REFUSAL.match(message)
+        assert m, message
+        print('  ' + message)
         change, exact, have, fee_named = (zat(g) for g in m.groups())
         assert_equal(have, selected)
         assert fee_named > 0
