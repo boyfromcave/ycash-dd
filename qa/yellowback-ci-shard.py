@@ -78,6 +78,7 @@ WEIGHTS = {
     "reindex": 40,
     "txn_doublespend": 30,
     "wallet_balance_by_type": 90,       # estimate (2026-11-10): two nodes, one restart, two reorgs
+    "wallet_gettransaction_fee": 120,   # estimate (2026-11-13): two nodes, nine sends, Sapling proofs
     "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
     "getrawtransaction_insight_pq": 45, # estimate (2026-11-15): one node, a clean 206-block chain, three spends
     "wallet_yed_held_guard": 150,       # estimate (2026-11-11): several restarts, three copied wallets
