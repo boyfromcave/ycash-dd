@@ -936,13 +936,19 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
             false,              // fOnlyConfirmed
             nullptr,            // coinControl
             true,               // fIncludeZeroValue
-            false,              // fIncludeCoinBase (a post-quantum address is never mined to)
+            true,               // fIncludeCoinBase (mature only; kept apart below)
             true,               // fOnlySpendable
             mindepth_,          // nMinDepth
             &destinations);     // onlyFilterByDests
     coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
         return !IsPQInputScript(o.tx->vout[o.i].scriptPubKey);
     }), coins.end());
+    // Beta3: a pool may pay a block reward to a post-quantum address (getcoinbasetemplatefor). Its mature coinbase is
+    // spent only when every recipient is shielded and only with no change (the rule a transparent coinbase is under
+    // where coinbase must be shielded, applied on every network as z_sendmany applies it to an ECC address), and only
+    // when the address's other coins do not cover the send. It never enters a send with a transparent recipient.
+    const bool shieldedOnly = t_outputs_.empty();
+    const CAmount immatureCoinbase = PQImmatureCoinbase(*pwalletMain, GetScriptForDestination(fromtaddr_));
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
     // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
     // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
@@ -950,14 +956,33 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
     // Audit A-M2: a coin worth no more than the fee its own input adds is never selected (PQInputMarginalFee).
     const CAmount marginal = PQInputMarginalFee(std::get<CPQKeyID>(fromtaddr_).scheme);
     coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& o) { return o.Value() <= marginal; }), coins.end());
-    if (coins.empty()) {
-        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
+    std::vector<COutput> coinbaseCoins;     // mature coinbase of this address, not yet among the candidates
+    CAmount coinbaseValue = 0;
+    for (const COutput& c : coins) {
+        if (c.fIsCoinbase) {
+            coinbaseCoins.push_back(c);
+            coinbaseValue += c.Value();
+        }
     }
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) { return o.fIsCoinbase; }), coins.end());
     // Largest first: each post-quantum input costs its full signature in size and fee.
-    std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
+    const auto largestFirst = [](const COutput& i, const COutput& j) -> bool {
         return i.Value() > j.Value();
-    });
+    };
+    // The ordinary coins fall short and every recipient is shielded: the mature coinbase joins the candidates.
+    const auto addCoinbase = [&]() -> bool {
+        if (!shieldedOnly || coinbaseCoins.empty()) return false;
+        coins.insert(coins.end(), coinbaseCoins.begin(), coinbaseCoins.end());
+        coinbaseCoins.clear();
+        std::sort(coins.begin(), coins.end(), largestFirst);
+        return true;
+    };
+    if (coins.empty() && !addCoinbase()) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
+            "Insufficient transparent funds, no UTXOs found for taddr from address.", coinbaseValue, immatureCoinbase));
+    }
+    std::sort(coins.begin(), coins.end(), largestFirst);
 
     KeyIO keyIO(Params());
     std::vector<CTxOut> tOuts;
@@ -985,11 +1010,20 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         }
         CAmount change = sum - target;
         if (sum < target) {
+            if (addCoinbase()) {
+                // Start again with the coinbase among the candidates (the fee is settled anew).
+                fee = fee_;
+                round = -1;
+                continue;
+            }
             if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
-            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
                                strprintf("Insufficient transparent funds, have %s, need %s",
-                                         FormatMoney(sum), FormatMoney(target)));
+                                         FormatMoney(sum), FormatMoney(target)),
+                               coinbaseCoins.empty() ? 0 : coinbaseValue, immatureCoinbase));
         }
+        // A send that spends coinbase makes no change output: what is left over is refused below.
+        const bool spendsCoinbase = std::any_of(selected.begin(), selected.end(), [](const COutput& o) { return o.fIsCoinbase; });
         // Change below the post-quantum dust threshold (priced on the real spend size) goes to the fee, as
         // sendtoaddress does: no dust output is made.
         CAmount dustToFee = 0;
@@ -1005,11 +1039,14 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
             prevScripts.push_back(c.tx->vout[c.i].scriptPubKey);
         }
         std::vector<CTxOut> outs = tOuts;
-        if (change > 0) outs.emplace_back(change, changeScript);
+        if (change > 0 && !spendsCoinbase) outs.emplace_back(change, changeScript);
         const CTransaction shape = PQFeeShape(nHeight, ins, outs, 0, z_outputs_.size());
         EnsurePQShapeStandard(shape, prevScripts, selected.size());
         const CAmount needed = PQBuilderFee(fee_, shape);
         if (needed <= fee) {
+            if (spendsCoinbase && change > 0) {
+                throw JSONRPCError(RPC_WALLET_ERROR, PQCoinbaseChangeRefusal(change, sum, fee));
+            }
             t_inputs_ = selected;
             txValues.t_inputs_total = sum;
             fee += dustToFee;
