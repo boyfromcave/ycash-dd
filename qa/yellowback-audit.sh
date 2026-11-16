@@ -442,6 +442,12 @@ leg_documents() {
   if [ -f qa/vault-rpc-contract.py ]; then python3 qa/vault-rpc-contract.py --check; fi
 }
 
+leg_rpcversion() {
+  # One source for the RPC version (beta3): YELLOWBACK_RPC_VERSION equals the contract's rpcversion, and
+  # no test or script states it as a literal (every bump from 5 to 10 left one behind).
+  python3 qa/yellowback-rpcversion.py check
+}
+
 leg_contract() {
   # Every yed_* the node registers is in the RPC contract (P7); the federation is gone from the module
   # (the whole-directory roster grep, N26); the contract's version and shape for this line.
@@ -785,6 +791,7 @@ else
 fi
 leg block "documents (fork-local, P4)" leg_documents
 leg block "RPC contract (P7; rpcversion of this line)" leg_contract
+leg block "rpcversion: one source, no literal check outside qa/yellowback-rpcversion.py's allow-list" leg_rpcversion
 leg block "attribution: The Ycash developers on every fork file, no upstream notice touched" leg_attribution
 leg block "naming: no ycash6 / DigiDollar / ydollar in src/ (AGENTS.md rule 6)" leg_naming
 leg block "advisory ignores: osv-scanner.toml and contrib/secops/deny-node.toml agree (SECURITY-CI.md)" leg_secops

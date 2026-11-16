@@ -717,6 +717,9 @@ jobs:
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         if: ${{ !cancelled() }}
         run: python3 qa/test_yellowback_cross_line_trees.py -v
+      - name: rpcversion literal checker unit tests (the audit's rpcversion leg)
+        if: ${{ !cancelled() }}
+        run: python3 qa/test_yellowback_rpcversion.py -v
       - name: pyflakes (functional tests and the shared helpers)
         if: ${{ !cancelled() }}
         run: |
