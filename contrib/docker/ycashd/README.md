@@ -26,8 +26,9 @@ Variables (unset = default):
 | `YCASHD_PQ_FALCON_HEIGHT` | `0` | regtest only: `pqfalconheight=<h>`, OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from `<h>` once the vault upgrade is active. `0` mirrors mainnet/testnet (Falcon from the vault activation, D-Q-2); `off` = SLH-DSA only |
 | `YCASHD_PQ_FEERATE` | unset (= the relay floor) | `pqfeerate=<YEC/kB>`, the wallet's fallback fee rate for a post-quantum input |
 | `YCASHD_HDSEED_FILE` | unset | path of a **mounted** secret file, passed as `-hdseedfile=<path>` (a new wallet takes its HD seed from the file: 64 hex digits or a z_exportwallet HDSeed= line) |
-| `YCASHD_BOOTSTRAP` | unset | before the first start, restore a checkpoint bundle into the empty datadir with `ycash-bootstrap` (testnet plan §4.4): `prefix` = the network's pinned prefix release (`testnet-prefix-v1`), or a bundle URL or directory. Testnet (with `YCASHD_TESTNET_PROFILE`) or regtest only. Skipped when the network's `blocks/` already holds data; a failed restore stops the container before `ycashd` starts, and its marker `<network>.bootstrap-incomplete` keeps it stopped on every restart until cleared ([below](#a-restore-that-did-not-complete-networkbootstrap-incomplete)) |
+| `YCASHD_BOOTSTRAP` | unset | before the first start, restore a checkpoint bundle into the empty datadir with `ycash-bootstrap` (testnet plan §4.4): `prefix` = the network's pinned prefix release (`testnet-prefix-v1`), or a bundle URL or directory. Refused on mainnet on this line: a mainnet state bundle is a ycash6 datadir ([below](#mainnet)). Skipped when the network's `blocks/` already holds data and a completed restore recorded `<network>/bootstrap.json` (blocks without it are refused unless `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1`); a failed restore stops the container before `ycashd` starts, and its marker `<network>.bootstrap-incomplete` keeps it stopped on every restart until cleared ([below](#a-restore-that-did-not-complete-networkbootstrap-incomplete)) |
 | `YCASHD_BOOTSTRAP_ARGS` | unset | extra `ycash-bootstrap` flags, e.g. `--require-signature` or `--verify-full` (`contrib/bootstrap/README.md`) |
+| `YCASHD_BOOTSTRAP_ACCEPT_DATADIR` | unset | `1`: with `YCASHD_BOOTSTRAP` set, start on a datadir whose `blocks/` holds data although no restore into it completed (no `<network>/bootstrap.json`) |
 | `YCASHD_CONF_EXTRA` | | extra `ycash.conf` lines, verbatim |
 | `YCASHD_EXTRA_ARGS` | | extra command-line flags, verbatim |
 | `YCASHD_CONF` | | use this mounted `ycash.conf` instead of generating one |
@@ -53,6 +54,16 @@ ycash.conf> --source "$YCASHD_BOOTSTRAP"` once, before `ycashd`; `contrib/bootst
 lists its checks. The image carries `python3` and `minisign` for it. The import node reads
 `ycash.conf` without its peer settings, so `addnode` lines in `YCASHD_CONF_EXTRA` reach only the
 real node, after the restore.
+
+### Mainnet
+
+Not on this line. A mainnet snapshot bundle (`ycash-infra` `bundles/state/FORMAT.md`, `ycash-state/2`
+or `/3`) is a ycash6 datadir, and a ycash-dd node cannot start from one (FORMAT.md: the two lines'
+on-disk formats are not promised to agree). With `YCASHD_NETWORK=mainnet` the entrypoint refuses any
+`YCASHD_BOOTSTRAP` (exit 2, before `ycashd` starts) and points to the ycash6 image, which restores
+it. Unset, a ycash-dd mainnet node syncs from peers, which is what makes it an independent verifier.
+In `entrypoint.sh` this is the one line of the bootstrap block that differs between the node lines,
+`BOOTSTRAP_MAINNET=0` (ycash6: `1`).
 
 ### A restore that did not complete: `<network>.bootstrap-incomplete`
 
@@ -80,9 +91,15 @@ Clear it in one of two ways, with the container stopped:
 - **start on the datadir as it is**: remove the marker only. The node keeps what the failed
   restore imported and syncs the rest from peers, unchecked against the bundle.
 
+With `YCASHD_BOOTSTRAP` still set, starting on the datadir as it is also needs
+`YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1` (below).
+
 A successful restore removes the marker itself and writes `<network>/bootstrap.json`. A datadir
 restored by an image from before the marker shows a failed restore by a missing
-`<network>/bootstrap.json` and a leftover `bootstrap-work/`; the entrypoint does not detect it.
+`<network>/bootstrap.json` and a leftover `bootstrap-work/`: while `YCASHD_BOOTSTRAP` is set, the
+entrypoint refuses a network directory whose `blocks/` holds data and that has no
+`bootstrap.json`, and says how to restore again; `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1` (or unsetting
+`YCASHD_BOOTSTRAP`) starts it as it is.
 
 ## The post-quantum line
 
