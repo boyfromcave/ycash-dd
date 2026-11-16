@@ -41,7 +41,7 @@ The image runs as uid 2001 and holds no wallet of any user. The deployment that 
 
 In plain words: a new testnet node would otherwise download half a million old blocks from its
 peers. With `YCASHD_BOOTSTRAP=prefix` it instead downloads one published, fingerprinted copy of
-them, checks every fingerprint (and the owner's signature once the copy is signed), loads it
+them, checks every fingerprint (and the release key's signature once the copy is signed), loads it
 without talking to anyone, and only then starts normally.
 
 ```bash
