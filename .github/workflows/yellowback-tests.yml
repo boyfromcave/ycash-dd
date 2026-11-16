@@ -128,16 +128,16 @@ env:
   # start without both. yolo's upgrade/vault branch (af66b6e) changes only its regtest test, so the
   # binary is main's; chain-viz's upgrade/vault speaks rpcversion 5.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: dc9c57a671e37821c21932b4859f9d28800d27e9
+  YOLO_COMMIT: b3abf818ba2c9f0d5234da461757efbcd96eb4a5
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: dfbef2b76dc6825186ed12919b6f37c97949ca3b  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
+  CHAINVIZ_COMMIT: 35d8eae6aca2c013429e7b63727bc3d8f7685f48
   # The lightwalletd fork the nightly drives (its upgrade/vault branch: rpcversion 5, the vault views),
   # at a commit (audit E-6), and the Go toolchain it builds with, checked against go.dev's sha256.
   LWD_REPO: boyfromcave/lightwalletd
-  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (bf8005a, rpcversion 9,
+  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (56660e5, rpcversion 9 and 10, beta3;
   # D-9: an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it, and it moves with every rpcversion bump.
-  LWD_COMMIT: bf8005adc0f29d881bc85e32e6db565e0036b839
+  LWD_COMMIT: 56660e56838052ab0f9e7555e2e068e4471fc0b3
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # The workspace repository at a commit: the audit runs its contract generator (scripts/extract_spec.py,
