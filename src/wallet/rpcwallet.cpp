@@ -4436,6 +4436,9 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             "\nsuch a send is priced on its size (the default is raised to it, an explicit fee below it is refused)."
             "\nWhen sending coinbase UTXOs to a shielded address, change is not allowed."
             "\nThe entire value of the UTXO(s) must be consumed."
+            "\nThe mature coinbase of a post-quantum from address (a block reward a pool paid to it) is spent only when every"
+            "\nrecipient is shielded and the address's other coins do not cover the send; the amounts must then add up to the"
+            "\nselected coins less the fee, and a send that would leave change is refused with that amount in the message."
             + strprintf("\nBefore Sapling activates, the maximum number of zaddr outputs is %d due to transaction size limits.\n", Z_SENDMANY_MAX_ZADDR_OUTPUTS_BEFORE_SAPLING)
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
