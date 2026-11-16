@@ -38,10 +38,14 @@ Chain value pools by address type (`transparentPools`)
 - **`valuePools` is unchanged**, entries and order alike. Clients should find pools by `id`, never by position.
 - **No reindex.** The figures come from a node-side index under `blocks/valuepools/`. On the first start of this
   build a node fills it once from the block and undo files it has (a read, no validation; progress in the log
-  every 10,000 blocks). This line has no compiled seed, so the fill reads from genesis. A pruned node that lacks
-  old undo data reports `"monitored": false` until it is reindexed. Downgrading ignores the directory.
+  every 10,000 blocks). This line has no compiled seed, so the fill reads from genesis: **startup waits about 12
+  minutes on a mainnet node** (all 3.1 million blocks; 726 s measured on 2026-11-15 by the 6.20.0 line's fill from
+  genesis on a copy of a mainnet data directory at height 3,100,949, on a loaded Apple M-series laptop), seconds on
+  regtest. Until the fill ends the RPC server answers -28 (warming up) with the fill's progress. A pruned node
+  that lacks old undo data reports `"monitored": false` until it is reindexed. Downgrading ignores the directory.
 - **Not a consensus change.** The index is written after a block has passed every check, never rejects a block and
-  never stops the node; a failure is logged and the index stops covering the blocks after it.
+  never stops the node; a failure is logged and the index stops covering the blocks after it. A failed write (a full
+  disk) turns the index off until the next restart, which resumes the fill.
 
 Post-quantum addresses show their scheme (`rpcversion` 9)
 ---------------------------------------------------------

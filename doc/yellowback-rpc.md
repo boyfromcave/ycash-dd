@@ -1818,6 +1818,10 @@ read it by position keep working. **Find pools by `id`, never by position.** The
   chain fills it once at startup from its block and undo files (logged as `valuepools: filling …`); until a block is
   covered its entries say `"monitored": false` and carry no values. A pruned node that lacks the old undo data
   cannot fill: its entries stay `"monitored": false` and the log says `reindex to enable`. `-reindex` rebuilds it.
+- Startup waits for the fill: until it ends the RPC server answers every call with -28 (warming up) and the message
+  `Filling the transparent pools index (height h of n)...`, so `"monitored": false` is not seen while it runs. A
+  failed write of the index (a full disk) turns it off until the node restarts: one log line, and every entry says
+  `"monitored": false`; the next start resumes the fill from the last block written.
 
 ---
 
