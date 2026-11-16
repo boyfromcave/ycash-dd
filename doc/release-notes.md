@@ -4,8 +4,8 @@ release-notes at release time)
 Notable changes
 ===============
 
-6.22.0-beta3 (next release), changes since 6.22.0-beta2
--------------------------------------------------------
+Changes in 6.22.0-beta3 (ycash-dd tag `vault-params/v6.22.0-beta3`)
+-------------------------------------------------------------------
 
 ### What you must do when upgrading
 

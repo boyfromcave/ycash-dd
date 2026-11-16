@@ -9,8 +9,10 @@
 # The release itself is cut on ycash6; the procedure is doc/yellowback-release.md there.
 # This workflow refuses a vault-params/v6.22.* tag unless the rules of the tag's stage hold
 # (qa/yellowback-release-heights.sh --release-version: a beta needs none of the release
-# parameters, only the invariants, R8's branch IDs among them; an rc R3-R6, the testnet's R7 and
-# R8's split height H_S; a final release R1-R8) and every compared Vault field matches ycash6
+# parameters, only the invariants, R8's branch IDs among them, and from 6.22.0-beta3 on R9 (the
+# fast testnet's YDF mandate end set, not the provisional 600,000); an rc R3-R6, the testnet's R7,
+# R8's split height H_S and R9; a final release R1-R9; wherever R9 binds, R10: the tag's section of
+# doc/release-notes.md exists and holds no placeholder) and every compared Vault field matches ycash6
 # (v<version> when that tag already exists, otherwise upgrade/vault).
 # A workflow_dispatch run with input release_version (e.g. 6.22.0-beta2) is the proving run of a
 # pairing tag before it is pushed: the dispatched commit is checked exactly as the tag

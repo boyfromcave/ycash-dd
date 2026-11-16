@@ -135,7 +135,10 @@ private:
     bool load_inputs(TxValues& txValues);
 
     // A PQ from address: select its coins and settle the fee on the transaction's real size (beta2 D-2).
+    // The selected coins are locked until the operation ends (unlock_pq_inputs, from main()).
     void select_pq_inputs(TxValues& txValues, CAmount sendAmount);
+    void unlock_pq_inputs();
+    std::vector<COutPoint> pq_locked_;
     std::array<unsigned char, ZC_MEMO_SIZE> get_memo_from_hex_string(std::string s);
     bool main_impl();
 

@@ -174,6 +174,8 @@ void AsyncRPCOperation_sendmany::main() {
         set_error_code(-2);
         set_error_message("unknown error");
     }
+    // After the broadcast, or on any failure (every exception main_impl() throws is caught above).
+    unlock_pq_inputs();
 
 #ifdef ENABLE_MINING
     GenerateBitcoins(GetBoolArg("-gen", false), GetArg("-genproclimit", 1), Params());
@@ -1070,6 +1072,25 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         builder_.AddTransparentInputUnsigned(COutPoint(c.tx->GetHash(), c.i), txOut.nValue);
         pq_inputs_.push_back(PQBuilderInput{i, COutPoint(c.tx->GetHash(), c.i), txOut.scriptPubKey, txOut.nValue});
     }
+    // Lock the selected coins before cs_wallet is released (the 6.20.0 line's WalletTxBuilder::PreparePQTransaction does the
+    // same): the operation builds and signs them after this returns (up to ~33 s for 100 SLH-DSA inputs), and a
+    // concurrent send from the same address would otherwise select the same coins and fail only at its broadcast.
+    // AvailableCoins left out every coin already locked, so each of these was unlocked and is ours to unlock again:
+    // main() does, after the broadcast or on any failure.
+    for (const COutput& c : t_inputs_) {
+        COutPoint outpt(c.tx->GetHash(), c.i);
+        pwalletMain->LockCoin(outpt);
+        pq_locked_.push_back(outpt);
+    }
+}
+
+void AsyncRPCOperation_sendmany::unlock_pq_inputs() {
+    if (pq_locked_.empty()) return;
+    LOCK(pwalletMain->cs_wallet);
+    for (COutPoint& outpt : pq_locked_) {
+        pwalletMain->UnlockCoin(outpt);
+    }
+    pq_locked_.clear();
 }
 
 bool AsyncRPCOperation_sendmany::load_inputs(TxValues& txValues) {
