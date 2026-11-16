@@ -740,7 +740,21 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
             // Show founders' reward (optional after YDF mandate end height)
             auto nextHeight = pindexPrev->nHeight + 1;
             entry.pushKV("ydfpercentage", nextHeight < Params().GetYdfMandateEndHeight() ? 5 : GetArg("-ydf", DEFAULT_YDF_FEE_PERCENTAGE));
-            entry.pushKV("foundersreward", tx.vout.size() > 1 ? (int64_t)tx.vout[1].nValue : 0);
+            // The fund output's value by the rule the coinbase is built with (miner.cpp, SetFoundersRewardAndGetMinerValue),
+            // as getblocksubsidy derives it, not vout[1]: a Sapling miner address has no transparent output of its
+            // own, so the fund output is vout[0] and vout[1] does not exist.
+            CAmount nFoundersReward = 0;
+            const CAmount nBlockSubsidy = GetBlockSubsidy(nextHeight, consensus);
+            if (!consensus.NetworkUpgradeActive(nextHeight, Consensus::UPGRADE_YCASH)) {
+                if (nextHeight <= consensus.GetLastFoundersRewardBlockHeight(nextHeight))
+                    nFoundersReward = nBlockSubsidy / 5;
+            } else if (nextHeight < Params().GetYdfMandateEndHeight()) {
+                nFoundersReward = nBlockSubsidy / 20;
+            } else {
+                unsigned int nYdfFeePercentage = GetArg("-ydf", DEFAULT_YDF_FEE_PERCENTAGE);
+                nFoundersReward = nBlockSubsidy * nYdfFeePercentage / 100;
+            }
+            entry.pushKV("foundersreward", (int64_t)nFoundersReward);
             entry.pushKV("foundersaddress", Params().GetFoundersRewardAddressAtHeight(nextHeight));
             entry.pushKV("required", nextHeight < Params().GetYdfMandateEndHeight());
             txCoinbase = entry;
