@@ -109,6 +109,9 @@ default, `getcoinbasetemplatefor` and a `getblocktemplate` fix, `transparentPool
 - **Not a consensus change.** The index is written after a block has passed every check, never rejects a block and
   never stops the node; a failure is logged and the index stops covering the blocks after it. A failed write (a full
   disk) turns the index off until the next restart, which resumes the fill.
+- **An unclean stop does not restart the fill.** After a kill, an out-of-memory kill or a power loss the block index
+  can come back older than the index's last block; the fill now resumes from the highest block of the restored chain
+  that has a record (one log line says so), in seconds, instead of refilling from genesis.
 
 ### `gettransaction` shows the real fee for every funding shape
 
