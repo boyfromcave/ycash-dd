@@ -78,6 +78,8 @@ WEIGHTS = {
     "reindex": 40,
     "txn_doublespend": 30,
     "wallet_balance_by_type": 90,       # estimate (2026-11-10): two nodes, one restart, two reorgs
+    "wallet_gettransaction_fee": 120,   # estimate (2026-11-13): two nodes, nine sends, Sapling proofs
+    "value_pools_by_type": 150,         # estimate (2026-11-15): two nodes, five restarts (one -reindex), two reorgs
     "wallet_getnewaddress_type": 30,    # estimate (2026-11-10): one node, no transactions
     "getrawtransaction_insight_pq": 45, # estimate (2026-11-15): one node, a clean 206-block chain, three spends
     "wallet_yed_held_guard": 150,       # estimate (2026-11-11): several restarts, three copied wallets
@@ -98,7 +100,9 @@ WEIGHTS = {
     "vault_refee":              240,
     "vault_undo_prune":         240,
     "wallet_pq_address":        240,
+    "getcoinbasetemplatefor":   90,     # measured 2026-11-15 (53 s, laptop): three nodes, 130 blocks, 28 Sapling proofs, a 2 MB block
     "ycash_bootstrap":          240,
+    "ycash_ydf_mandate_end":    30,     # estimate (2026-11-15): two nodes, six blocks, two raw submissions
     "ycash_ydf_default":        30,     # measured 2026-11-15 (17 s, laptop): two nodes, 107 blocks, two sends
     "yellowback_attest_bond":   240,
     "yellowback_attest_evict":  240,
