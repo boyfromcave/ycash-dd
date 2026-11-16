@@ -155,6 +155,10 @@ default, `getcoinbasetemplatefor` and a `getblocktemplate` fix, `transparentPool
   before any request; elsewhere a state bundle over http(s) and an unpinned prefix need it too, and
   `--allow-unsigned` accepts an unsigned one with a warning. The "not signed" message names the HTTP
   status of the missing `.minisig`.
+- **No restore hangs**: the node check after a state restore fails after `--stall-timeout` (default
+  1800 s) also when the restored `ycashd` never leaves warm-up (it used to wait forever), and a full
+  disk during a part's download fails at once with "no space left on the disk" instead of being
+  retried as a broken connection.
 - **This line's container image refuses `YCASHD_BOOTSTRAP` on mainnet** (exit 2, before `ycashd`
   starts): a mainnet state bundle is a ycash6 data directory, so use the ycash6 image. The testnets
   restore as before.
