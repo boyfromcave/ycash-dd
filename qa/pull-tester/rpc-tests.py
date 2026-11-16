@@ -134,6 +134,9 @@ BASE_SCRIPTS= [
     'wallet_balance_by_type.py',
     # beta3 item 1: gettransaction's fee for every funding shape (ECC, Sapling, post-quantum, mixed), amount unchanged.
     'wallet_gettransaction_fee.py',
+    # The chain's transparent value pools by address type (beta3 item 2): transparentPools in getblock and
+    # getblockchaininfo, sums, reorg, restart, the startup fill, -reindex, a node without undo data.
+    'value_pools_by_type.py',
     # getnewaddress takes the address type first too (beta2 item 10): getnewaddress pq | pqslh | p2pkh.
     'wallet_getnewaddress_type.py',
     # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.

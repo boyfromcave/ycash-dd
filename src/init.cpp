@@ -40,6 +40,7 @@
 #include "util.h"
 #include "utilmoneystr.h"
 #include "validationinterface.h"
+#include "valuepools.h"
 #include "yellowback/index.h"
 #include "yellowback/module.h"
 #include "vault/node.h"
@@ -276,6 +277,7 @@ void Shutdown()
             delete vault::g_vaultdb;
             vault::g_vaultdb = nullptr;
         }
+        valuepools::Close();
         delete pcoinsTip;
         pcoinsTip = NULL;
         delete pcoinscatcher;
@@ -2046,6 +2048,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!vaultMismatches.empty()) {
             return InitError(strprintf("vault: the set-state database fails its invariant audit (%s). ", vaultMismatches.front()) +
                              _("Restart with -reindex to rebuild the vault database."));
+        }
+    }
+
+    // The transparent value pools by address type (beta3 item 2, valuepools.h): a node-side index, wiped by -reindex,
+    // filled here once from the block and undo files before the node connects a block; never a reason to stop, except a
+    // record that contradicts a compiled seed.
+    valuepools::Open(GetDataDir() / "blocks" / "valuepools", fReindex);
+    {
+        LOCK(cs_main);
+        std::string valuePoolsErr;
+        if (!valuepools::Fill(chainparams, ShutdownRequested, valuePoolsErr)) {
+            return InitError(valuePoolsErr);
         }
     }
 

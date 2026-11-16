@@ -23,6 +23,25 @@ Next release (beta3), changes since 6.22.0-beta2
   Display only: balances, coin selection and consensus never read these figures. Inherited from
   upstream zcashd.
 
+Chain value pools by address type (`transparentPools`)
+------------------------------------------------------
+
+- **New field.** `getblockchaininfo` and `getblock` (verbosity 1 and 2) carry `transparentPools`: the transparent
+  value pool split into `transparent_ecc`, `transparent_pq` (with `pq_by_scheme`), `pq_channel`, `vault` and
+  `vault_intent`, plus `vault_by_module` (the YED module's part of the vault entries). The ids match the wallet's
+  `z_gettotalbalance` fields. Details: `doc/yellowback-rpc.md`, "`getblock` and `getblockchaininfo`".
+- **`valuePools` is unchanged**, entries and order alike. Clients should find pools by `id`, never by position.
+- **No reindex.** The figures come from a node-side index under `blocks/valuepools/`. On the first start of this
+  build a node fills it once from the block and undo files it has (a read, no validation; progress in the log
+  every 10,000 blocks). This line has no compiled seed, so the fill reads from genesis: **startup waits about 12
+  minutes on a mainnet node** (all 3.1 million blocks; 726 s measured on 2026-11-15 by the 6.20.0 line's fill from
+  genesis on a copy of a mainnet data directory at height 3,100,949, on a loaded Apple M-series laptop), seconds on
+  regtest. Until the fill ends the RPC server answers -28 (warming up) with the fill's progress. A pruned node
+  that lacks old undo data reports `"monitored": false` until it is reindexed. Downgrading ignores the directory.
+- **Not a consensus change.** The index is written after a block has passed every check, never rejects a block and
+  never stops the node; a failure is logged and the index stops covering the blocks after it. A failed write (a full
+  disk) turns the index off until the next restart, which resumes the fill.
+
 This is the reference node line (ycashd 4.5.0 with the proposed vault upgrade and Ycash Yellowback
 (YED)). It is built and tested beside ycash6 (ycashd 6.22.0-beta2, the release line), and gives the
 same answers and error strings. No activation height is set on mainnet. One change below is a

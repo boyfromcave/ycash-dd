@@ -1,4 +1,5 @@
 # Copyright (c) 2016-2020 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -54,6 +55,7 @@ ycash_gtest_SOURCES += \
 	gtest/test_txid.cpp \
 	gtest/test_upgrades.cpp \
 	gtest/test_validation.cpp \
+	gtest/test_valuepools.cpp \
 	gtest/test_zip32.cpp
 if ENABLE_WALLET
 ycash_gtest_SOURCES += \

@@ -261,6 +261,7 @@ BITCOIN_CORE_H = \
   utiltest.h \
   utiltime.h \
   validationinterface.h \
+  valuepools.h \
   version.h \
   wallet/asyncrpcoperation_common.h \
   wallet/asyncrpcoperation_mergetoaddress.h \
@@ -333,6 +334,7 @@ libbitcoin_server_a_SOURCES = \
   mempool_limit.cpp \
   txmempool.cpp \
   validationinterface.cpp \
+  valuepools.cpp \
   yellowback/db.cpp \
   yellowback/index.cpp \
   yellowback/policy.cpp \
