@@ -58,6 +58,14 @@ GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'balance', 'walletver
                     # T-8), stock v4.5.0 270013; peers below Vault are still accepted
                     'protocolversion'}
 
+# getblock keys the fork adds on purpose and stock v4.5.0 lacks: compared fork-vs-stock as "the
+# fork has them, the stock node has not", never left out silently.
+FORK_ONLY_GETBLOCK = {'transparentPools'}
+# -ydf: stock v4.5.0 donates 5 % of the subsidy after the YDF mandate by default; beta3 makes the
+# fork's default 0 (DEFAULT_YDF_FEE_PERCENTAGE, src/consensus/consensus.h), a miner's choice and
+# not a consensus rule, so the two templates' foundersreward differ by design below the upgrade.
+STOCK_YDF, FORK_YDF = 5, 0
+
 LEGACY, FORK = 0, 1
 
 
@@ -130,10 +138,21 @@ class YellowbackStockParityTest(BitcoinTestFramework):
             # the coinbase the two would mine must be byte-identical apart from the payout key
             ca, cb = ta['coinbasetxn'], tb['coinbasetxn']
             assert_equal((label, sorted(ca.keys())), (label, sorted(cb.keys())))
-            assert_equal((label, ca['foundersreward']), (label, cb['foundersreward']))
+            if self.legacy_running:
+                assert_equal((label, 'ydfpercentage', ca['ydfpercentage'], cb['ydfpercentage']), (label, 'ydfpercentage', STOCK_YDF, FORK_YDF))
+                assert ca['foundersreward'] > 0, (label, ca['foundersreward'])
+                assert_equal((label, 'fork foundersreward', cb['foundersreward']), (label, 'fork foundersreward', 0))
+            else:
+                assert_equal((label, ca['foundersreward']), (label, cb['foundersreward']))
         # one block, read back in full, field for field
         h = a.getbestblockhash()
         ba, bb = a.getblock(h), b.getblock(h)
+        if self.legacy_running:
+            # beta3 (chain value pools by address type): getblock carries the fork-only
+            # transparentPools; stock v4.5.0 has none. Every other key must agree.
+            assert_equal((label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK & set(ba)), (label, 'fork-only getblock keys', set()))
+            assert_equal((label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK & set(bb)), (label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK))
+            bb = {k: v for k, v in bb.items() if k not in FORK_ONLY_GETBLOCK}
         assert_equal((label, sorted(ba.keys())), (label, sorted(bb.keys())))
         for k in sorted(ba):
             if k == 'confirmations':
