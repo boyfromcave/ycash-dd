@@ -21,6 +21,8 @@ TEST(rpc, CheckBlockToJSONReturnsMinifiedSolution) {
     ss >> block;
 
     CBlockIndex index {block};
+    uint256 hash = block.GetHash();
+    index.phashBlock = &hash;
     index.nHeight = 1391;
 
     UniValue obj = blockToJSON(block, &index);
