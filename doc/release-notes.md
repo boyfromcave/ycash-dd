@@ -4,6 +4,25 @@ release-notes at release time)
 Notable changes
 ===============
 
+Next release (beta4), changes since 6.22.0-beta3
+------------------------------------------------
+
+- **Snapshot restores: a mainnet restore with the node check is no longer refused.** In beta3,
+  `contrib/bootstrap/ycash-bootstrap` with `--ycashd`/`--cli` refused every mainnet restore: before
+  Vault is active `vault_getinfo.dbtip` is null, and the tool recorded no vault state hash where the
+  bundle carries the empty state's. It now compares `vault_getinfo.statehash` (the empty state's
+  hash before Vault is active, as the publisher records it and `FORMAT.md` defines it) and still
+  refuses a vault database at a different block. The README's exit statuses are corrected (1: an
+  option refused before the restore starts). Proven against the signed mainnet bundle at
+  3,105,000 (ycash-dd #200, ycash6 #139).
+- **Security tooling: chrono RUSTSEC-2026-0543 is recorded as informational until 2027-02-15.**
+  chrono is unmaintained (no vulnerability, no fixed version). On this line it is in the node's
+  frozen v4.5.0 dependency graph (chrono 0.4.20, through tracing-appender and tracing-subscriber 0.2,
+  for log timestamps; the alternatives need a far newer rustc than this line's 1.51) and in the
+  attestor agent's lock file through a Windows-only dependency (the agent is not built for
+  Windows). Recorded in `osv-scanner.toml` and `contrib/secops/deny-node.toml`; accepted by the
+  Yellowback lead architect on 2026-11-18 (ycash-dd #201, ycash6 #140). No change to the node.
+
 Changes in 6.22.0-beta3 (ycash-dd tag `vault-params/v6.22.0-beta3`)
 -------------------------------------------------------------------
 
