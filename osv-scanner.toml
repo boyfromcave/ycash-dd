@@ -102,3 +102,8 @@ reason = "tokio AsyncFd safe constructors (new/with_interest/try_new/try_with_in
 id = "RUSTSEC-2026-0441"
 ignoreUntil = 2027-02-07T00:00:00Z
 reason = "pin-utils 0.1.0 unmaintained notice (repository archived 2026-10-01), no vulnerability and no fixed version: a macro-only crate (pin_mut!, unsafe_pinned!, unsafe_unpinned!) in Cargo.lock only, reached through futures-util 0.3.13 under hyper =0.14.12 (librustzcash and metrics-exporter-prometheus 0.3); src/rust does not use it. futures-util drops the dependency only from 0.3.32 (rust-version 1.71); this line builds with Rust 1.51 (rust-toolchain), and every futures-util it can build still depends on pin-utils, whose 0.1.1 is covered by the same notice. Leaves with the librustzcash/metrics upgrade. Triaged 2026-11-10."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-02-15T00:00:00Z
+reason = "chrono unmaintained notice (informational: unmaintained, no vulnerability, no fixed version), accepted by the Yellowback lead architect 2026-11-18. Cargo.lock (chrono 0.4.20): reached only through tracing-appender 0.1.2 and tracing-subscriber 0.2's chrono feature, for log timestamps; this is the frozen v4.5.0 dependency graph, and the alternatives (tracing-subscriber 0.3 with time) need a far newer rustc than this line's 1.51. Leaves with the librustzcash/tracing upgrade. contrib/yellowback/attest/Cargo.lock (chrono 0.4.45): reached only through wmi <- netwatch <- iroh, compiled on Windows only; the attestor agent is not built for Windows, and its deny.toml targets do not include it. Leaves when netwatch drops wmi, at an iroh bump. Triaged 2026-11-17."
