@@ -2161,6 +2161,32 @@ BOOST_AUTO_TEST_CASE(tag_v2_fee_payees)
       BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING); }
 }
 
+// D-7 (price-feed.md §4.5): a v2 tag with an unknown scheme (0x03) or a truncated one is no tag, and the block stays
+// valid (TAG-4): applied, nothing recorded at its height.
+// Rule: TAG-2
+// Rule: TAG-4
+BOOST_AUTO_TEST_CASE(tag_v2_malformed_is_no_tag_block_valid)
+{
+    Fixture f;
+    f.Activate();
+    Payee bad = PQPayee(pq::SCHEME_FN_DSA_512);
+    bad.kind = 0x03;
+    const CoinbaseTag t = MakeTag(0x01, 50000, 7, bad);
+    BOOST_CHECK_EQUAL(t.version, TAG_VERSION_V2);
+    BOOST_CHECK(!IsValidTag(t));
+    BlockEvaluation ev = f.Evaluate(t, {});
+    BOOST_CHECK(!ev.blockInvalid);
+    const int h = f.tip + 1;
+    f.Mine(t);
+    BOOST_CHECK_EQUAL(f.tip, h);
+    BOOST_CHECK(!State(f.view).GetTag((uint32_t)h).has_value());
+    BOOST_CHECK(!f.Snap(h).tagged);
+    // a good v2 tag at the next height is recorded with its payee
+    f.Mine(Fixture::QuoteV2(50000, pq::SCHEME_SLH_DSA_SHA2_128S));
+    BOOST_CHECK(State(f.view).GetTag((uint32_t)f.tip)->payee == PQPayee(pq::SCHEME_SLH_DSA_SHA2_128S));
+    BOOST_CHECK(f.Snap(f.tip).tagged);
+}
+
 // Rule: RED-4
 BOOST_AUTO_TEST_CASE(red4_claim_path_underwater_at_r)
 {
