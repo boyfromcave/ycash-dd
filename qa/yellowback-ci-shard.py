@@ -102,6 +102,7 @@ WEIGHTS = {
     "vault_undo_prune":         240,
     "wallet_pq_address":        240,
     "wallet_pq_coinbase_spend": 150,    # measured 2026-11-16 (96 s, laptop): four nodes, two chains of 113 blocks, 30 Sapling proofs
+    "wallet_pq_shieldcoinbase": 90,     # measured 2026-11-18 (about 50 s, laptop): two nodes, 215 blocks, five shieldings
     "getcoinbasetemplatefor":   90,     # measured 2026-11-15 (53 s, laptop): three nodes, 130 blocks, 28 Sapling proofs, a 2 MB block
     "ycash_bootstrap":          240,
     "ycash_ydf_mandate_end":    30,     # estimate (2026-11-15): two nodes, six blocks, two raw submissions
