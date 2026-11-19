@@ -969,7 +969,7 @@ UniValue AsyncRPCOperation_mergetoaddress::getStatus() const
     }
 
     UniValue obj = v.get_obj();
-    obj.pushKV("method", "z_mergetoaddress");
+    obj.pushKV("method", method);
     obj.pushKV("params", contextinfo_);
     return obj;
 }
