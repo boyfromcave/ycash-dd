@@ -15,7 +15,8 @@ Three pools quote side by side: POOLS[0] with its P2PKH payout address (tag v1),
   (-yellowbackpreferredpayee=rqf..., then the P2PKH pool) are accepted.
 - D-3 (the wallet half): the mint's fee output is the 35-byte TX_PQPKH of the eligible v2 payee.
 - D-5: the post-quantum fee output is spent at one confirmation, with z_sendmany, to a transparent address.
-- D-9: rpcversion 11. The Python model replays the chain and agrees with every yed_gettag (version, payoutScheme,
+- D-9: rpcversion 11 (read from the contract, qa/yellowback-rpcversion.py). The Python model replays the chain
+  and agrees with every yed_gettag (version, payoutScheme,
   payoutAddress) and the state hash.
 
 Rule: TAG-1 TAG-2 MINT-8 FEE-2 MINER-2
@@ -29,6 +30,7 @@ from test_framework.yellowback_util import (
     POOLS,
     REF_LAG,
     USER,
+    YELLOWBACK_RPC_VERSION,
     YellowbackTestFramework,
 )
 from test_framework import yellowback_model as ym
@@ -81,8 +83,8 @@ class YellowbackTagV2Test(YellowbackTestFramework):
         user = nodes[USER]
         fn_pool, slh_pool = POOLS[1], POOLS[2]
 
-        print('D-9: rpcversion 11')
-        assert_equal(user.yed_getinfo()['rpcversion'], 11)
+        print('D-9: rpcversion is the contract\'s (11 since tag v2)')
+        assert_equal(user.yed_getinfo()['rpcversion'], YELLOWBACK_RPC_VERSION)
 
         print('give two pools post-quantum payout addresses (rqf..., rqs...) from their own wallets')
         fn_addr = nodes[fn_pool].getnewaddress('pq')          # FN-DSA-512: Falcon is active (-pqfalconheight=0)
