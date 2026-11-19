@@ -164,9 +164,9 @@ env:
   # pq.plainAddressVersion as objects keyed by scheme, docs/plans/yellowback-pq-prefix-rpc-delta.md section 4.12).
   # dbf53a8 (B3-D5) adds the generator's beta3 line (rpcversion 10: no yed_* shape change,
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
-  # 802ddb8 (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
+  # 9b82b3c (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
   # payoutScheme, docs/plans/beta4/rpc-contract-delta.md section 4.14). Re-pin to its merge commit when #80 merges.
-  WORKSPACE_COMMIT: 802ddb898c5ed6e83b47179ebfefd859708b37cb
+  WORKSPACE_COMMIT: 9b82b3c9e7f124b87cbe09f98a0dc00a405fc2d8
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.

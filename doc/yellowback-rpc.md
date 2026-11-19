@@ -969,6 +969,7 @@ Result of `yed_getprice`:
     "version": 1,
     "priceMicroUsd": 2000000,
     "sourceMask": 3,
+    "payoutScheme": "p2pkh",
     "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
   }
 }
