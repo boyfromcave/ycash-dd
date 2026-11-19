@@ -207,8 +207,9 @@ leg_determinism() {
 
 # Fork-added functional scripts deliberately run by no CI job (item 1 of the CI-hardening lane, beta2
 # list items 69, 59). One name per line, each with its reason; anything not named here that the fork
-# added under qa/rpc-tests/ must be executable, registered and run. Empty on this line today.
+# added under qa/rpc-tests/ must be executable, registered and run.
 REGISTRATION_EXCLUDE=$(sed 's/[[:space:]]*#.*$//' <<'EOF_EXCLUDE' | grep -v '^$' || true
+yellowback_cancel_agent_light   # needs a lightwalletd-dd and a yew-attestor build (LIGHTWALLETD_BIN, YEW_ATTESTOR_BIN), out of this repo: run by hand (beta4 item 3d)
 EOF_EXCLUDE
 )
 
