@@ -1,4 +1,5 @@
 // Copyright (c) 2017 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -75,6 +76,9 @@ public:
     virtual void main();
 
     virtual UniValue getStatus() const;
+
+    /// The RPC getStatus() names (beta4: z_shieldcoinbase from a post-quantum address is built by this operation).
+    std::string method = "z_mergetoaddress";
 
     bool testmode = false; // Set to true to disable sending txs and generating proofs
 
