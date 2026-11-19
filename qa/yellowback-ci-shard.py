@@ -116,6 +116,7 @@ WEIGHTS = {
     "yellowback_lightwalletd":  240,
     "yellowback_pq":            240,
     "yellowback_pq_dayone":     240,
+    "yellowback_tag_v2":        300,
     "z_validateaddress_nowallet":  240,
 }
 DEFAULT = 240
