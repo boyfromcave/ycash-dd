@@ -222,6 +222,36 @@ struct TxValues {
     bool selectedUTXOCoinbase{false};
 };
 
+// Beta4 (REPORT item 7): the sentence an insufficient-funds refusal of an ECC or shielded from address adds when minconf
+// left some of its funds out (MinconfNote); "" for ANY_TADDR and when nothing was left out.
+static std::string SourceMinconfNote(bool fromTaddr, bool anyUtxo, const CTxDestination& taddr, const std::string& zaddr,
+                                     int minDepth)
+{
+    if (anyUtxo || minDepth <= 0) return "";
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+    CAmount below = 0;
+    if (fromTaddr) {
+        below = PQBelowMinconf(*pwalletMain, GetScriptForDestination(taddr), minDepth);
+    } else {
+        std::vector<SproutNoteEntry> sprout, sproutAll;
+        std::vector<SaplingNoteEntry> sapling, saplingAll;
+        pwalletMain->GetFilteredNotes(sproutAll, saplingAll, zaddr, 0);
+        pwalletMain->GetFilteredNotes(sprout, sapling, zaddr, minDepth);
+        for (const SproutNoteEntry& e : sproutAll) below += e.note.value();
+        for (const SaplingNoteEntry& e : saplingAll) below += e.note.value();
+        for (const SproutNoteEntry& e : sprout) below -= e.note.value();
+        for (const SaplingNoteEntry& e : sapling) below -= e.note.value();
+    }
+    return MinconfNote(below, minDepth);
+}
+
+static std::string WithNote(std::string message, const std::string& note)
+{
+    if (note.empty()) return message;
+    if (message.empty() || message.back() != '.') message += ".";
+    return message + note;
+}
+
 // Notes:
 // 1. #1159 Currently there is no limit set on the number of joinsplits, so size of tx could be invalid.
 // 2. #1360 Note selection is not optimal
@@ -259,7 +289,8 @@ bool AsyncRPCOperation_sendmany::main_impl() {
         if (!useanyutxo_ && isSingleZaddrOutput) {
             bool b = find_utxos(true, txValues);
             if (!b) {
-                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
+                throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address." +
+                                   SourceMinconfNote(true, useanyutxo_, fromtaddr_, fromaddress_, mindepth_));
             }
         } else {
             bool b = find_utxos(false, txValues);
@@ -274,7 +305,8 @@ bool AsyncRPCOperation_sendmany::main_impl() {
     }
 
     if (isfromzaddr_ && !find_unspent_notes()) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no unspent notes found for zaddr from address.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds, no unspent notes found for zaddr from address." +
+                           SourceMinconfNote(false, false, fromtaddr_, fromaddress_, mindepth_));
     }
 
     // At least one of z_sprout_inputs_ and z_sapling_inputs_ must be empty by design
@@ -292,8 +324,9 @@ bool AsyncRPCOperation_sendmany::main_impl() {
 
     if (isfromzaddr_ && (txValues.z_inputs_total < txValues.targetAmount)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-            strprintf("Insufficient shielded funds, have %s, need %s",
-            FormatMoney(txValues.z_inputs_total), FormatMoney(txValues.targetAmount)));
+            WithNote(strprintf("Insufficient shielded funds, have %s, need %s",
+            FormatMoney(txValues.z_inputs_total), FormatMoney(txValues.targetAmount)),
+            SourceMinconfNote(false, false, fromtaddr_, fromaddress_, mindepth_)));
     }
 
     if (isfromtaddr_) {
@@ -950,7 +983,8 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
     // where coinbase must be shielded, applied on every network as z_sendmany applies it to an ECC address), and only
     // when the address's other coins do not cover the send. It never enters a send with a transparent recipient.
     const bool shieldedOnly = t_outputs_.empty();
-    const CAmount immatureCoinbase = PQImmatureCoinbase(*pwalletMain, GetScriptForDestination(fromtaddr_));
+    int immatureBlocks = 0;
+    const CAmount immatureCoinbase = PQImmatureCoinbase(*pwalletMain, GetScriptForDestination(fromtaddr_), &immatureBlocks);
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
     // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
     // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
@@ -979,10 +1013,53 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
         std::sort(coins.begin(), coins.end(), largestFirst);
         return true;
     };
+    // Beta4 (REPORT item 7): what the refusal names. For mature coinbase left out (a recipient is transparent): the one
+    // amount that moves the rewards (largest first, as many as one transaction carries) to one Sapling address with no
+    // change, priced as that send is (no transparent output, one Sapling output).
+    const auto leftOut = [&](bool withCoinbase) -> PQFundsLeftOut {
+        PQFundsLeftOut left;
+        left.immature = immatureCoinbase;
+        left.immatureBlocks = immatureBlocks;
+        left.belowMinconf = PQBelowMinconf(*pwalletMain, GetScriptForDestination(fromtaddr_), mindepth_);
+        left.minDepth = mindepth_;
+        if (!withCoinbase || coinbaseCoins.empty()) return left;
+        left.coinbase = coinbaseValue;
+        left.coinbaseCoins = coinbaseCoins.size();
+        std::vector<COutput> cb = coinbaseCoins;
+        std::sort(cb.begin(), cb.end(), [](const COutput& i, const COutput& j) { return i.Value() > j.Value(); });
+        if (cb.size() > MAX_PQ_INPUTS_PER_TX) cb.erase(cb.begin() + MAX_PQ_INPUTS_PER_TX, cb.end());
+        while (!cb.empty()) {
+            std::vector<std::pair<CScript, CAmount>> ins;
+            std::vector<CScript> prevScripts;
+            CAmount sum = 0;
+            for (const COutput& c : cb) {
+                ins.emplace_back(c.tx->vout[c.i].scriptPubKey, c.Value());
+                prevScripts.push_back(c.tx->vout[c.i].scriptPubKey);
+                sum += c.Value();
+            }
+            const CTransaction shape = PQFeeShape(nHeight, ins, {}, 0, 1);
+            try {
+                EnsurePQShapeStandard(shape, prevScripts, cb.size());
+            } catch (const UniValue&) {
+                cb.pop_back();
+                continue;
+            }
+            const CAmount needed = PQBuilderFee(fee_, shape);
+            const CAmount fee = feeExplicit_ ? std::max(fee_, needed) : needed;
+            if (sum > fee) {
+                left.coinbaseSend = sum - fee;
+                left.coinbaseSelected = sum;
+                left.coinbaseFee = fee;
+                left.coinbaseSelectedCoins = cb.size();
+            }
+            break;
+        }
+        return left;
+    };
     if (coins.empty() && !addCoinbase()) {
         if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
-            "Insufficient transparent funds, no UTXOs found for taddr from address.", coinbaseValue, immatureCoinbase));
+            "Insufficient transparent funds, no UTXOs found for taddr from address.", true, leftOut(true)));
     }
     std::sort(coins.begin(), coins.end(), largestFirst);
 
@@ -1022,7 +1099,7 @@ void AsyncRPCOperation_sendmany::select_pq_inputs(TxValues& txValues, CAmount se
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
                                strprintf("Insufficient transparent funds, have %s, need %s",
                                          FormatMoney(sum), FormatMoney(target)),
-                               coinbaseCoins.empty() ? 0 : coinbaseValue, immatureCoinbase));
+                               false, leftOut(!coinbaseCoins.empty())));
         }
         // A send that spends coinbase makes no change output: what is left over is refused below.
         const bool spendsCoinbase = std::any_of(selected.begin(), selected.end(), [](const COutput& o) { return o.fIsCoinbase; });
@@ -1125,8 +1202,9 @@ bool AsyncRPCOperation_sendmany::load_inputs(TxValues& txValues) {
 
     if (txValues.t_inputs_total < txValues.targetAmount) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-                           strprintf("Insufficient transparent funds, have %s, need %s",
-                                     FormatMoney(txValues.t_inputs_total), FormatMoney(txValues.targetAmount)));
+                           WithNote(strprintf("Insufficient transparent funds, have %s, need %s",
+                                     FormatMoney(txValues.t_inputs_total), FormatMoney(txValues.targetAmount)),
+                                    SourceMinconfNote(true, useanyutxo_, fromtaddr_, fromaddress_, mindepth_)));
     }
 
     // If there is transparent change, is it valid or is it dust?
