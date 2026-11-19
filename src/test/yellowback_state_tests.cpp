@@ -66,7 +66,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ee6a9f157175b6e084df52f96dc5039e4d411189352542f329971e6dd7bb0c0b";   // SCHEMA_VERSION 15: HALT-2 divides by Totals.openDebtCents (owner 2026-10-28; Snapshot.openDebtCents; build_golden buys the stranded mint4 back with a class C mint at 232-233), 22 rejected blocks; 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "e45e83e80a681192e237e62bfad7155c4cb01dcf93fd756da76bccb2799bfe5a";   // SCHEMA_VERSION 16: tag v2 (beta4 D-T1, D-T4): the payee is kind || hash; v2-only quotes at 190..206, a P2PKH-fee mint refused at 201 (bad-mint-fee), the FN-DSA-fee mint and its SLH-DSA-fee owner redeem hold, 23 rejected blocks; 15: HALT-2 divides by Totals.openDebtCents (owner 2026-10-28; Snapshot.openDebtCents; build_golden buys the stranded mint4 back with a class C mint at 232-233), 22 rejected blocks; 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -777,7 +777,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
             // the emergency claim of build_golden landed at 299, the Falcon height is 400).
             static const std::vector<std::pair<int, std::string>> expected = {
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
-                { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
+                { 185, "vault-spend-short-burn" }, { 201, "bad-mint-fee" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
                 { 299, "red5-residual" }, { 299, "red5-residual" }, { 299, "red5-claimant-short" },
                 { 300, "intent-cancel-no-vault" }, { 300, "intent-cancel-no-refund" }, { 300, "intent-cancel-cosign" },
@@ -798,7 +798,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         CheckWalletReading(view, P, block, ev, height, hash);
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 22);
+    BOOST_CHECK_EQUAL(invalidBlocks, 23);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
