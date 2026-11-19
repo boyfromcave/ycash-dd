@@ -451,9 +451,9 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
-    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for pool fees (default: -mineraddress when that is a transparent P2PKH address)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH or post-quantum address the coinbase tag names for pool fees (tag v1 for P2PKH, v2 for post-quantum; default: -mineraddress when that is a P2PKH or post-quantum address)"));
     strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
-    strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH address the wallet pays pool fees to when it is eligible"));
+    strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH or post-quantum address the wallet pays pool fees to when it is eligible"));
     strUsage += HelpMessageOpt("-yellowbackpayeepenaltyblocks=<n>", _("Wallet payee policy: blocks a penalised pool is skipped for (default: the network's N_PENALTY)"));
     strUsage += HelpMessageOpt("-yellowbackpayeeaccuracywindow=<n>", _("Wallet payee policy: accuracy window in blocks (default: the network's ACCURACY_WINDOW)"));
     strUsage += HelpMessageOpt("-yellowbackpayeetiltbps=<bps>", _("Wallet payee policy: accuracy weighting tilt in bps (default: the network's PAYEE_TILT_BPS)"));
@@ -1445,8 +1445,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             for (const char* opt : { "-yellowbackpayoutaddress", "-yellowbackpreferredpayee" }) {
                 if (!mapArgs.count(opt)) continue;
                 CTxDestination dest = yellowbackKeyIO.DecodeDestination(mapArgs[opt]);
-                if (!std::get_if<CKeyID>(&dest)) {
-                    return InitError(strprintf(_("%s must be a transparent P2PKH address: '%s'"), opt, mapArgs[opt]));
+                if (!yellowback::Payee::FromDestination(dest).has_value()) {     // tag v2 (beta4 D-T2): P2PKH or a plain post-quantum address
+                    return InitError(strprintf(_("%s must be a transparent P2PKH or post-quantum address of this network: '%s'"), opt, mapArgs[opt]));
                 }
             }
             if (GetArg("-yellowbackquotemaxage", 1800) < 0) return InitError(_("-yellowbackquotemaxage must be >= 0."));
@@ -2166,8 +2166,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             std::string payout = GetArg("-yellowbackpayoutaddress", "");
             if (payout.empty() && mapArgs.count("-mineraddress")) payout = mapArgs["-mineraddress"];   // MINER-2's default (K22)
             if (!payout.empty()) {
-                CTxDestination dest = yellowbackKeyIO.DecodeDestination(payout);
-                if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) cfg.payoutKey = *keyID;
+                cfg.payoutKey = yellowback::Payee::FromDestination(yellowbackKeyIO.DecodeDestination(payout));   // P2PKH: tag v1; post-quantum: v2
             }
             cfg.quoteMaxAge = GetArg("-yellowbackquotemaxage", 1800);
             yellowback::g_yellowback->SetMinerConfig(cfg);
@@ -2176,8 +2175,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             pp.accuracyWindow = GetArg("-yellowbackpayeeaccuracywindow", pp.accuracyWindow);
             pp.tiltBps = GetArg("-yellowbackpayeetiltbps", pp.tiltBps);
             if (mapArgs.count("-yellowbackpreferredpayee")) {
-                CTxDestination dest = yellowbackKeyIO.DecodeDestination(mapArgs["-yellowbackpreferredpayee"]);
-                if (const CKeyID* keyID = std::get_if<CKeyID>(&dest)) pp.preferred = *keyID;
+                pp.preferred = yellowback::Payee::FromDestination(yellowbackKeyIO.DecodeDestination(mapArgs["-yellowbackpreferredpayee"]));
             }
             yellowback::g_yellowback->SetPayeePolicy(pp);
             if (mapArgs.count("-yellowbackpreferredattestor")) {          // AFEE-W (validated in step 3)
@@ -2190,7 +2188,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 if (faultErr.has_value()) return InitError(faultErr.value());
             }
             LogPrintf("yellowback: live from height %d, attestor set %s, payout=%s\n", yellowbackParams.startHeight, yellowbackParams.attestorSetId.GetHex(),
-                      cfg.payoutKey.has_value() ? yellowbackKeyIO.EncodeDestination(CTxDestination(cfg.payoutKey.value())) : std::string("none"));
+                      cfg.payoutKey.has_value() ? yellowbackKeyIO.EncodeDestination(cfg.payoutKey->Destination()) : std::string("none"));
         }
         // The index is consensus state (U-21): a node that cannot bring it to the tip does not start.
         if (!yellowback::g_yellowback->SyncToChain(ShutdownRequested)) {
