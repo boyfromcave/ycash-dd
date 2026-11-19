@@ -19,7 +19,6 @@
 #include "script/script.h"
 #include "test/test_bitcoin.h"
 #include "uint256.h"
-#include "utilstrencodings.h"
 #include "vault/state.h"
 #include "yellowback/index.h"
 #include "yellowback/params.h"
@@ -27,6 +26,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -325,7 +325,7 @@ BOOST_AUTO_TEST_CASE(testnet_yed_columns)
     // TEST_FAST_ATTESTOR_SET_ID, null until the ceremony (C-T7) fills it in, and when set exactly 64 hex characters
     BOOST_CHECK(slow.attestorSetId.IsNull());
     const std::string slot(yellowback::TEST_FAST_ATTESTOR_SET_ID);
-    BOOST_CHECK(slot.empty() || (slot.size() == 64 && IsHex(slot) && !uint256S(slot).IsNull()));
+    BOOST_CHECK(slot.empty() || (slot.size() == 64 && std::all_of(slot.begin(), slot.end(), [](char c) { return std::isxdigit((unsigned char)c) != 0; }) && !uint256S(slot).IsNull()));
     BOOST_CHECK(fast.attestorSetId == yellowback::TestFastAttestorSetId());
     BOOST_CHECK_EQUAL(fast.attestorSetId.IsNull(), slot.empty());
     BOOST_CHECK(fast.attestorSetId.IsNull());   // this release: the ceremony has not run (price-feed.md §3.1: no network carries an id)
