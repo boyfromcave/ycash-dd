@@ -5002,6 +5002,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     size_t utxoCounter = 0;
     bool maxedOutFlag = false;
     const size_t mempoolLimit = nLimit;
+    CAmount pqCoinbase = 0;
 
     // Set of addresses to filter utxos by
     std::set<CTxDestination> destinations = {};
@@ -5025,6 +5026,9 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
         }
         // z_shieldcoinbase never spends a TX_PQPKH coin (quantum spec A-15: only the YED/vault builders do).
         if (IsPQKeyDestination(address)) {
+            if (out.tx->IsCoinBase() && (destinations.empty() || destinations.count(address))) {
+                pqCoinbase += out.tx->vout[out.i].nValue;   // named in the refusal (beta4)
+            }
             continue;
         }
         // If taddr is not wildcard "*", filter utxos
@@ -5062,7 +5066,7 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     size_t numUtxos = inputs.size();
 
     if (numUtxos == 0) {
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield.");
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Could not find any coinbase funds to shield." + PQCoinbaseShieldNote(pqCoinbase));
     }
 
     if (shieldedValue < nFee) {
