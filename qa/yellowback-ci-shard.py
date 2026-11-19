@@ -117,6 +117,7 @@ WEIGHTS = {
     "yellowback_pq":            240,
     "yellowback_pq_dayone":     240,
     "yellowback_tag_v2":        300,
+    "yellowback_tag_v2_falcon": 240,    # estimate (2026-11-19): six nodes, ~240 blocks, one hand-solved block, one mint
     "z_validateaddress_nowallet":  240,
 }
 DEFAULT = 240
