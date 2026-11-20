@@ -131,7 +131,7 @@ env:
   YOLO_REPO: boyfromcave/yolo
   YOLO_COMMIT: eef18acdefda5cacc5e3e22022a263115cf073cf
   CHAINVIZ_REPO: boyfromcave/chain-viz
-  CHAINVIZ_COMMIT: 35d8eae6aca2c013429e7b63727bc3d8f7685f48
+  CHAINVIZ_COMMIT: 15ad0bccfd3269ed9728e8a915153bddb833fcd4
   # The lightwalletd fork the nightly drives (its upgrade/vault branch: rpcversion 5, the vault views),
   # at a commit (audit E-6), and the Go toolchain it builds with, checked against go.dev's sha256.
   LWD_REPO: boyfromcave/lightwalletd
@@ -165,9 +165,9 @@ env:
   # pq.plainAddressVersion as objects keyed by scheme, docs/plans/yellowback-pq-prefix-rpc-delta.md section 4.12).
   # dbf53a8 (B3-D5) adds the generator's beta3 line (rpcversion 10: no yed_* shape change,
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
-  # 9b82b3c (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
-  # payoutScheme, docs/plans/beta4/rpc-contract-delta.md section 4.14). Re-pin to its merge commit when #80 merges.
-  WORKSPACE_COMMIT: 9b82b3c9e7f124b87cbe09f98a0dc00a405fc2d8
+  # 370c434 (yellowback#80's merge, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
+  # payoutScheme, docs/plans/beta4/rpc-contract-delta.md section 4.14).
+  WORKSPACE_COMMIT: 370c4347875faa711801ca272f8aac735efe7763
   # The other node line, for the audit's byte-identity check of the golden vectors (same branch name).
   OTHER_LINE_REPO: boyfromcave/ycash6
   # The cargo-audit / cargo-deny releases the agent job installs (audit I-7); bump by PR.
