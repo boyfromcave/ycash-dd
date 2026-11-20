@@ -165,3 +165,6 @@ de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:g
 de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:600
 de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:645
 de412d503031d86a093eb69c9b6ec91af6639d52:src/test/data/pq_address_vectors.json:generic-api-key:654
+
+# contrib/testnet/ceremony/ceremony: the constant was the hex alphabet "0123456789abcdef" named MEMBER_KEY_HEX (a key-format check, not a key); renamed HEX_DIGITS in the next commit.
+cc422ef9fad2b83ff1cf31ab92c19602b466c96f:contrib/testnet/ceremony/ceremony:generic-api-key:81
