@@ -1075,7 +1075,7 @@ jobs:
         # PUBKEY_ADDRESS 0x1C,0x28). Both files are frozen at the pin, so the step runs the other three
         # parts by hand. Recorded in doc/yellowback.md (baseline).
         run: |
-          make -C src check-TESTS
+          make -C src check-TESTS || { for f in src/test/test_bitcoin.log src/ycash-gtest.log src/test-suite.log; do [ -f "$f" ] && { echo "::group::$f"; tail -n 200 "$f"; echo '::endgroup::'; }; done; exit 1; }
           make -C src/secp256k1 check
           make -C src/univalue check
       - name: Inherited functional tests recorded as passing in Phase 0

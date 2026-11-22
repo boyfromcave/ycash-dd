@@ -84,7 +84,10 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         extra = ['-txexpirydelta=200', '-whitelist=127.0.0.1']
         args = [a for a in yellowback_node_args(list(extra), yellowback=False)
                 if not a.startswith(nuparams(VAULT_BRANCH_ID, 0)[:-1])]
-        return args if legacy else args + [nuparams(VAULT_BRANCH_ID, self.vault_at)]
+        # -ydf=5 on the fork: v4.5.0's default donation is 5 %, the fork's 0 since #187 (beta3,
+        # B3-D: -ydf defaults to 0), so the two templates' foundersreward differ unless the fork
+        # is given the stock default explicitly.
+        return args if legacy else args + ['-ydf=5', nuparams(VAULT_BRANCH_ID, self.vault_at)]
 
     def setup_network(self, split=False):
         ref = self.options.ref_ycashd
