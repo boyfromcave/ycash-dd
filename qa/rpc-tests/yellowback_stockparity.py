@@ -137,6 +137,8 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         # one block, read back in full, field for field
         h = a.getbestblockhash()
         ba, bb = a.getblock(h), b.getblock(h)
+        # transparentPools is the fork's addition to getblock (beta3, B3-D5); v4.5.0 has no such key
+        bb.pop('transparentPools', None)
         assert_equal((label, sorted(ba.keys())), (label, sorted(bb.keys())))
         for k in sorted(ba):
             if k == 'confirmations':
