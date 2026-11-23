@@ -137,7 +137,9 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         # one block, read back in full, field for field
         h = a.getbestblockhash()
         ba, bb = a.getblock(h), b.getblock(h)
-        # transparentPools is the fork's addition to getblock (beta3, B3-D5); v4.5.0 has no such key
+        # transparentPools is the fork's addition to getblock (beta3 B3-D5, rpcversion 10, src/rpc/blockchain.cpp
+        # blockToJSON); v4.5.0 has no such key. Dropped on both sides: node 0 is the fork binary too after the restart.
+        ba.pop('transparentPools', None)
         bb.pop('transparentPools', None)
         assert_equal((label, sorted(ba.keys())), (label, sorted(bb.keys())))
         for k in sorted(ba):
