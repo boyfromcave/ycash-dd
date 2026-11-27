@@ -375,12 +375,22 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # A non-storage exception on the mempool path refuses that transaction only: the index stays healthy, so
         # a crafted peer transaction cannot make the next block stop the node (only dbwrapper_error does that).
         print('mempool_error_refuses_only: a non-storage exception in MempoolCheck refuses the transaction; node 4 runs on healthy')
+        payer = nodes[POOLS[0]]
+        funded = payer.fundrawtransaction(payer.createrawtransaction([], {payer.getnewaddress(): 1}))
+        signed = payer.signrawtransaction(funded['hex'])['hex']             # built, never sent: in no mempool
         self.restart(4, ['-yellowbacktestfault=error:mempool'])
         wait_yed_healthy(nodes[4], timeout=120)
         self.sync_all(blocks_only=True)
-        payer = nodes[POOLS[0]]
-        funded = payer.fundrawtransaction(payer.createrawtransaction([], {payer.getnewaddress(): 1}))
-        signed = payer.signrawtransaction(funded['hex'])['hex']
+        # The fault fires on the next MempoolCheck: isolate node 4 so that no relayed transaction reaches it first,
+        # and check nothing is pending there, so the transaction below is the one that consumes it.
+        for j in range(len(nodes)):
+            if j != 4 and nodes[j] is not None:
+                self._disconnect_pair(4, j)
+        deadline = time.time() + 30
+        while nodes[4].getpeerinfo():
+            assert time.time() < deadline, 'node 4 did not disconnect: %r' % nodes[4].getpeerinfo()
+            time.sleep(0.1)
+        assert_equal(nodes[4].getrawmempool(), [])
         try:
             nodes[4].sendrawtransaction(signed)
             raise AssertionError('the injected non-storage fault did not refuse the transaction')
@@ -388,6 +398,10 @@ class YellowbackIndexTest(YellowbackTestFramework):
             assert 'yellowback-check-error' in str(e), str(e)
         assert_equal(nodes[4].yed_getinfo()['healthy'], True)
         txid = nodes[4].sendrawtransaction(signed)                 # the fault is consumed: admitted
+        self.restart(4)                                            # rejoins the topology
+        wait_yed_healthy(nodes[4], timeout=120)
+        if txid not in payer.getrawmempool():
+            payer.sendrawtransaction(signed)
         self.sync_all()
         bh = payer.generate(1)[0]
         self.sync_all(blocks_only=True)
