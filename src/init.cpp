@@ -1371,12 +1371,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             // Exclude Sprout from upgrades
             for (auto i = Consensus::BASE_SPROUT + 1; i < Consensus::MAX_NETWORK_UPGRADES; ++i)
             {
-                if (vDeploymentParams[0].compare(HexInt(NetworkUpgradeInfo[i].nBranchId)) == 0) {
+                if (boost::iequals(vDeploymentParams[0], HexInt(NetworkUpgradeInfo[i].nBranchId))) {
                     UpdateNetworkUpgradeParameters(Consensus::UpgradeIndex(i), nActivationHeight);
                     found = true;
                     LogPrintf("Setting network upgrade activation parameters for %s to height=%d\n", vDeploymentParams[0], nActivationHeight);
                     break;
                 }
+            }
+            if (!found && boost::iequals(vDeploymentParams[0], HexInt(YUGEN_BRANCH_ID))) {
+                return InitError(strprintf("Network upgrade %s is Yugen, which this node does not implement (Yugen is ycashd 6.23.x)", vDeploymentParams[0]));
             }
             if (!found) {
                 return InitError(strprintf("Invalid network upgrade (%s)", vDeploymentParams[0]));
@@ -1509,12 +1512,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             // Exclude Sprout from upgrades
             for (auto i = Consensus::BASE_SPROUT + 1; i < Consensus::MAX_NETWORK_UPGRADES; ++i)
             {
-                if (vDeploymentParams[0].compare(HexInt(NetworkUpgradeInfo[i].nBranchId)) == 0) {
+                if (boost::iequals(vDeploymentParams[0], HexInt(NetworkUpgradeInfo[i].nBranchId))) {
                     UpdateEquihashUpgradeParameters(Consensus::UpgradeIndex(i), n, k);
                     found = true;
                     LogPrintf("Setting equihash upgrade activation parameters for %s to n=%d, k=%d\n", vDeploymentParams[0], n, k);
                     break;
                 }
+            }
+            if (!found && boost::iequals(vDeploymentParams[0], HexInt(YUGEN_BRANCH_ID))) {
+                return InitError(strprintf("Equihash upgrade %s is Yugen, which this node does not implement (Yugen is ycashd 6.23.x)", vDeploymentParams[0]));
             }
             if (!found) {
                 return InitError(strprintf("Invalid equihash upgrade (%s)", vDeploymentParams[0]));

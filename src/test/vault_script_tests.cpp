@@ -678,4 +678,20 @@ BOOST_AUTO_TEST_CASE(vault_flags_not_in_static_policy)
     BOOST_CHECK_EQUAL(MANDATORY_SCRIPT_VERIFY_FLAGS & VAULT_FLAGS, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(yugen_recognised_and_refused)
+{
+    // Ruling 18: this line recognises the Yugen version group and branch ID only to refuse them by name.
+    CMutableTransaction mtx;
+    mtx.fOverwintered = true;
+    mtx.nVersionGroupId = YUGEN_VERSION_GROUP_ID;
+    mtx.nVersion = SAPLING_TX_VERSION;
+    BOOST_CHECK_EXCEPTION(CTransaction{mtx}, std::ios_base::failure, [](const std::ios_base::failure& e) {
+        return std::string(e.what()).find("Yugen transaction format") != std::string::npos;
+    });
+    BOOST_CHECK_EQUAL(YUGEN_BRANCH_ID, 0x59474e30U);
+    for (int i = Consensus::BASE_SPROUT; i < Consensus::MAX_NETWORK_UPGRADES; ++i) {
+        BOOST_CHECK(NetworkUpgradeInfo[i].nBranchId != YUGEN_BRANCH_ID);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

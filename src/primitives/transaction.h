@@ -51,6 +51,9 @@ static_assert(SAPLING_TX_VERSION <= SAPLING_MAX_TX_VERSION,
 static constexpr uint32_t ZFUTURE_VERSION_GROUP_ID = 0xFFFFFFFF;
 static_assert(ZFUTURE_VERSION_GROUP_ID != 0, "version group id must be non-zero as specified in ZIP 202");
 
+// Yugen (ycashd 6.23.x) transaction version group: recognised so that it is refused by name; this node does not implement Yugen.
+static constexpr uint32_t YUGEN_VERSION_GROUP_ID = 0x59474E47;
+
 // Future transaction version. This value must only be used
 // in integration-testing contexts.
 static const int32_t ZFUTURE_TX_VERSION = 0x0000FFFF;
@@ -618,6 +621,9 @@ public:
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
 
+        if (fOverwintered && nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+            throw std::ios_base::failure("Yugen transaction format (version group 0x59474e47) is not supported by this node");
+        }
         if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
@@ -769,6 +775,9 @@ struct CMutableTransaction
             fOverwintered &&
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
+        if (fOverwintered && nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+            throw std::ios_base::failure("Yugen transaction format (version group 0x59474e47) is not supported by this node");
+        }
         if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isFuture)) {
             throw std::ios_base::failure("Unknown transaction format");
         }

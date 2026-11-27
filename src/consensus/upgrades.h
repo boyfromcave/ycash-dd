@@ -92,6 +92,9 @@ uint32_t CurrentEpochBranchId(int nHeight, const Consensus::Params& params);
  */
 uint32_t PrevEpochBranchId(uint32_t currentBranchId, const Consensus::Params& params);
 
+// Yugen (ycashd 6.23.x) branch ID: recognised so that it is refused by name; this node does not implement Yugen.
+static const uint32_t YUGEN_BRANCH_ID = 0x59474e30;
+
 /**
  * Returns true if a given branch id is a valid nBranchId for one of the network
  * upgrades contained in NetworkUpgradeInfo.
