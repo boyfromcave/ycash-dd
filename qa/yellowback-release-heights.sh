@@ -32,13 +32,15 @@
 #   --root DIR           tree to read (default: .)
 #   --other-json FILE    extract JSON of the other node line
 #   --release-version    when set, VER must be a 6.22.x release version (the vault release line;
-#                        ycash-dd pairing tags), and its suffix names the stage
+#                        ycash-dd pairing tags) or, on ycash-dd only, a 6.23.x one (the pairing
+#                        tag of ycash6's Yugen line, which carries the same Vault rules; ruling 18),
+#                        and its suffix names the stage
 #   --stage              the stage, when no version names it (default: final, the strictest)
 #   exit 0 when the parameters may ship; exit 1 when they may not; exit 2 when the extractor
 #   cannot parse the tree. A parse failure is never treated as "unset", including under --warn.
 set -euo pipefail
 
-# The one line that differs on ycash-dd.
+# The one line that differs on ycash-dd (with the 6.23 case of --release-version below).
 where="the release line is ycash6: its doc/yellowback-release.md, Network parameters"
 
 warn=0
@@ -70,8 +72,9 @@ if [ -n "$relver" ]; then
   fi
   case "$found" in
     "6.22 "*) ;;
+    "6.23 "*) ;;   # ycash-dd only: the pairing tag of ycash6's Yugen line (6.23.x, ruling 18)
     *)
-      echo "refusing to release: version $relver is not 6.22.x (the vault release line) ($where)"
+      echo "refusing to release: version $relver is not 6.22.x (the vault release line) or 6.23.x (the Yugen line's pairing) ($where)"
       exit 1
       ;;
   esac

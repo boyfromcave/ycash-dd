@@ -4,9 +4,23 @@ release-notes at release time)
 Notable changes
 ===============
 
-Next release (beta4), changes since 6.22.0-beta3
-------------------------------------------------
+Changes in 6.23.0-beta4 (ycash-dd tag `vault-params/v6.23.0-beta4`)
+-------------------------------------------------------------------
 
+This tag pairs with ycashd 6.23.0-beta4, the Yugen line of ycash6 (ruling 18). This node line does
+not implement Yugen; it carries the same Vault parameters and rules and now refuses Yugen by name.
+
+- **Yugen is recognised and refused by name.** A transaction in the Yugen version group
+  (0x59474E47) is refused as "Yugen transaction format ... is not supported by this node" instead of
+  the generic "Unknown transaction format"; `-nuparams=59474e30:<h>` and `-eqparams=59474e30:N:K` are
+  init errors naming Yugen (the branch ID now matches in either case), and `signrawtransaction` with
+  branch ID 0x59474e30 names it too. Both formats were already invalid here, so the set of valid
+  transactions and blocks is unchanged: a node of this line follows the chain up to Yugen's
+  activation and rejects Yugen transactions after it. Operators who must follow a chain past Yugen
+  run ycashd 6.23.x.
+- **Release guard: `vault-params/v6.23.*` is accepted** as the pairing tag of ycash6's Yugen line,
+  with the same stage rules as 6.22.x, compared with ycash6 `v<version>` when it exists, else
+  `upgrade/yugen`. The 6.22.x behaviour is unchanged.
 - **Pool quote agent: one fetch and one `yed_setquote` per block.** `yellowback-quote` polled every
   30 s, and every `yed_setquote` rebuilds the node's block template (2-3 rebuilds per 75 s block).
   `poll_seconds` now defaults to 75 (configurable; 60-75 s suits the 75 s block), still pushing on

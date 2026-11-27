@@ -131,7 +131,9 @@ release that activates it (neither is set yet); on regtest they are
 `-nuparams=6d5b7a31:<h> -yellowbackattestorset=<setid>`. The release line is ycash6
 (`doc/yellowback-release.md` there, "Network parameters"). Tag this repository
 `vault-params/v<V>` first: `.github/workflows/yellowback-release-guard.yml` refuses the tag
-unless it is a 6.22.x release version and `qa/yellowback-release-heights.sh` accepts the rules of
+unless it is a 6.22.x release version (or a 6.23.x one: the pairing tag of ycash6's Yugen line,
+`upgrade/yugen`, which carries the same Vault rules; this line does not implement Yugen and refuses
+it by name) and `qa/yellowback-release-heights.sh` accepts the rules of
 its stage (a beta, an rc or a final release: testnet plan §5.1, the table in ycash6's
 `doc/yellowback-release.md`; R8, the testnet shadow fork's split height and branch IDs, among them)
 and the same Vault fields on ycash6. Prove it first without a tag: dispatch the guard on

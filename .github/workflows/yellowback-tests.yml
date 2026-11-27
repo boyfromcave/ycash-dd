@@ -714,6 +714,9 @@ jobs:
       - name: Vault release-guard unit tests (audit W3-P-1 part C)
         if: ${{ !cancelled() }}
         run: python3 qa/test_yellowback_release_heights.py -v
+      - name: Release-guard Yugen pairing unit tests (ycash-dd only; ruling 18)
+        if: ${{ !cancelled() }}
+        run: python3 qa/test_yellowback_release_pairing.py -v
       - name: Cross-line identity checker unit tests (audit W3-P-2)
         if: ${{ !cancelled() }}
         run: python3 qa/test_yellowback_cross_line.py -v
